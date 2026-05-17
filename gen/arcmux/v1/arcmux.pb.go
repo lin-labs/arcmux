@@ -2,9 +2,9 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        v7.34.1
-// source: atrs/v1/atrs.proto
+// source: arcmux/v1/arcmux.proto
 
-package atrsv1
+package arcmuxv1
 
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
@@ -36,7 +36,7 @@ type CreateSessionRequest struct {
 
 func (x *CreateSessionRequest) Reset() {
 	*x = CreateSessionRequest{}
-	mi := &file_atrs_v1_atrs_proto_msgTypes[0]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -48,7 +48,7 @@ func (x *CreateSessionRequest) String() string {
 func (*CreateSessionRequest) ProtoMessage() {}
 
 func (x *CreateSessionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_atrs_v1_atrs_proto_msgTypes[0]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -61,7 +61,7 @@ func (x *CreateSessionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateSessionRequest.ProtoReflect.Descriptor instead.
 func (*CreateSessionRequest) Descriptor() ([]byte, []int) {
-	return file_atrs_v1_atrs_proto_rawDescGZIP(), []int{0}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *CreateSessionRequest) GetAgent() string {
@@ -125,7 +125,7 @@ type CreateSessionResponse struct {
 
 func (x *CreateSessionResponse) Reset() {
 	*x = CreateSessionResponse{}
-	mi := &file_atrs_v1_atrs_proto_msgTypes[1]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -137,7 +137,7 @@ func (x *CreateSessionResponse) String() string {
 func (*CreateSessionResponse) ProtoMessage() {}
 
 func (x *CreateSessionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_atrs_v1_atrs_proto_msgTypes[1]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -150,7 +150,7 @@ func (x *CreateSessionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateSessionResponse.ProtoReflect.Descriptor instead.
 func (*CreateSessionResponse) Descriptor() ([]byte, []int) {
-	return file_atrs_v1_atrs_proto_rawDescGZIP(), []int{1}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *CreateSessionResponse) GetSessionId() string {
@@ -193,7 +193,7 @@ type SendPromptRequest struct {
 
 func (x *SendPromptRequest) Reset() {
 	*x = SendPromptRequest{}
-	mi := &file_atrs_v1_atrs_proto_msgTypes[2]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -205,7 +205,7 @@ func (x *SendPromptRequest) String() string {
 func (*SendPromptRequest) ProtoMessage() {}
 
 func (x *SendPromptRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_atrs_v1_atrs_proto_msgTypes[2]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -218,7 +218,7 @@ func (x *SendPromptRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendPromptRequest.ProtoReflect.Descriptor instead.
 func (*SendPromptRequest) Descriptor() ([]byte, []int) {
-	return file_atrs_v1_atrs_proto_rawDescGZIP(), []int{2}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *SendPromptRequest) GetSessionId() string {
@@ -259,7 +259,7 @@ type SendPromptResponse struct {
 
 func (x *SendPromptResponse) Reset() {
 	*x = SendPromptResponse{}
-	mi := &file_atrs_v1_atrs_proto_msgTypes[3]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -271,7 +271,7 @@ func (x *SendPromptResponse) String() string {
 func (*SendPromptResponse) ProtoMessage() {}
 
 func (x *SendPromptResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_atrs_v1_atrs_proto_msgTypes[3]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -284,7 +284,7 @@ func (x *SendPromptResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendPromptResponse.ProtoReflect.Descriptor instead.
 func (*SendPromptResponse) Descriptor() ([]byte, []int) {
-	return file_atrs_v1_atrs_proto_rawDescGZIP(), []int{3}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *SendPromptResponse) GetDelivered() bool {
@@ -311,7 +311,7 @@ type CaptureRequest struct {
 
 func (x *CaptureRequest) Reset() {
 	*x = CaptureRequest{}
-	mi := &file_atrs_v1_atrs_proto_msgTypes[4]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -323,7 +323,7 @@ func (x *CaptureRequest) String() string {
 func (*CaptureRequest) ProtoMessage() {}
 
 func (x *CaptureRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_atrs_v1_atrs_proto_msgTypes[4]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -336,7 +336,7 @@ func (x *CaptureRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CaptureRequest.ProtoReflect.Descriptor instead.
 func (*CaptureRequest) Descriptor() ([]byte, []int) {
-	return file_atrs_v1_atrs_proto_rawDescGZIP(), []int{4}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *CaptureRequest) GetSessionId() string {
@@ -366,7 +366,7 @@ type CaptureResponse struct {
 
 func (x *CaptureResponse) Reset() {
 	*x = CaptureResponse{}
-	mi := &file_atrs_v1_atrs_proto_msgTypes[5]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -378,7 +378,7 @@ func (x *CaptureResponse) String() string {
 func (*CaptureResponse) ProtoMessage() {}
 
 func (x *CaptureResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_atrs_v1_atrs_proto_msgTypes[5]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -391,7 +391,7 @@ func (x *CaptureResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CaptureResponse.ProtoReflect.Descriptor instead.
 func (*CaptureResponse) Descriptor() ([]byte, []int) {
-	return file_atrs_v1_atrs_proto_rawDescGZIP(), []int{5}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *CaptureResponse) GetOutput() string {
@@ -438,7 +438,7 @@ type StatusRequest struct {
 
 func (x *StatusRequest) Reset() {
 	*x = StatusRequest{}
-	mi := &file_atrs_v1_atrs_proto_msgTypes[6]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -450,7 +450,7 @@ func (x *StatusRequest) String() string {
 func (*StatusRequest) ProtoMessage() {}
 
 func (x *StatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_atrs_v1_atrs_proto_msgTypes[6]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -463,7 +463,7 @@ func (x *StatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatusRequest.ProtoReflect.Descriptor instead.
 func (*StatusRequest) Descriptor() ([]byte, []int) {
-	return file_atrs_v1_atrs_proto_rawDescGZIP(), []int{6}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *StatusRequest) GetSessionId() string {
@@ -491,7 +491,7 @@ type StatusResponse struct {
 
 func (x *StatusResponse) Reset() {
 	*x = StatusResponse{}
-	mi := &file_atrs_v1_atrs_proto_msgTypes[7]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -503,7 +503,7 @@ func (x *StatusResponse) String() string {
 func (*StatusResponse) ProtoMessage() {}
 
 func (x *StatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_atrs_v1_atrs_proto_msgTypes[7]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -516,7 +516,7 @@ func (x *StatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatusResponse.ProtoReflect.Descriptor instead.
 func (*StatusResponse) Descriptor() ([]byte, []int) {
-	return file_atrs_v1_atrs_proto_rawDescGZIP(), []int{7}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *StatusResponse) GetSessionId() string {
@@ -601,7 +601,7 @@ type HookState struct {
 
 func (x *HookState) Reset() {
 	*x = HookState{}
-	mi := &file_atrs_v1_atrs_proto_msgTypes[8]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -613,7 +613,7 @@ func (x *HookState) String() string {
 func (*HookState) ProtoMessage() {}
 
 func (x *HookState) ProtoReflect() protoreflect.Message {
-	mi := &file_atrs_v1_atrs_proto_msgTypes[8]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -626,7 +626,7 @@ func (x *HookState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HookState.ProtoReflect.Descriptor instead.
 func (*HookState) Descriptor() ([]byte, []int) {
-	return file_atrs_v1_atrs_proto_rawDescGZIP(), []int{8}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *HookState) GetSource() string {
@@ -668,7 +668,7 @@ type KillRequest struct {
 
 func (x *KillRequest) Reset() {
 	*x = KillRequest{}
-	mi := &file_atrs_v1_atrs_proto_msgTypes[9]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -680,7 +680,7 @@ func (x *KillRequest) String() string {
 func (*KillRequest) ProtoMessage() {}
 
 func (x *KillRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_atrs_v1_atrs_proto_msgTypes[9]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -693,7 +693,7 @@ func (x *KillRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use KillRequest.ProtoReflect.Descriptor instead.
 func (*KillRequest) Descriptor() ([]byte, []int) {
-	return file_atrs_v1_atrs_proto_rawDescGZIP(), []int{9}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *KillRequest) GetSessionId() string {
@@ -727,7 +727,7 @@ type KillResponse struct {
 
 func (x *KillResponse) Reset() {
 	*x = KillResponse{}
-	mi := &file_atrs_v1_atrs_proto_msgTypes[10]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -739,7 +739,7 @@ func (x *KillResponse) String() string {
 func (*KillResponse) ProtoMessage() {}
 
 func (x *KillResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_atrs_v1_atrs_proto_msgTypes[10]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -752,7 +752,7 @@ func (x *KillResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use KillResponse.ProtoReflect.Descriptor instead.
 func (*KillResponse) Descriptor() ([]byte, []int) {
-	return file_atrs_v1_atrs_proto_rawDescGZIP(), []int{10}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *KillResponse) GetKilled() bool {
@@ -777,7 +777,7 @@ type ListSessionsRequest struct {
 
 func (x *ListSessionsRequest) Reset() {
 	*x = ListSessionsRequest{}
-	mi := &file_atrs_v1_atrs_proto_msgTypes[11]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -789,7 +789,7 @@ func (x *ListSessionsRequest) String() string {
 func (*ListSessionsRequest) ProtoMessage() {}
 
 func (x *ListSessionsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_atrs_v1_atrs_proto_msgTypes[11]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -802,7 +802,7 @@ func (x *ListSessionsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSessionsRequest.ProtoReflect.Descriptor instead.
 func (*ListSessionsRequest) Descriptor() ([]byte, []int) {
-	return file_atrs_v1_atrs_proto_rawDescGZIP(), []int{11}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{11}
 }
 
 type ListSessionsResponse struct {
@@ -814,7 +814,7 @@ type ListSessionsResponse struct {
 
 func (x *ListSessionsResponse) Reset() {
 	*x = ListSessionsResponse{}
-	mi := &file_atrs_v1_atrs_proto_msgTypes[12]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -826,7 +826,7 @@ func (x *ListSessionsResponse) String() string {
 func (*ListSessionsResponse) ProtoMessage() {}
 
 func (x *ListSessionsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_atrs_v1_atrs_proto_msgTypes[12]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -839,7 +839,7 @@ func (x *ListSessionsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSessionsResponse.ProtoReflect.Descriptor instead.
 func (*ListSessionsResponse) Descriptor() ([]byte, []int) {
-	return file_atrs_v1_atrs_proto_rawDescGZIP(), []int{12}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *ListSessionsResponse) GetSessions() []*SessionSummary {
@@ -864,7 +864,7 @@ type SessionSummary struct {
 
 func (x *SessionSummary) Reset() {
 	*x = SessionSummary{}
-	mi := &file_atrs_v1_atrs_proto_msgTypes[13]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -876,7 +876,7 @@ func (x *SessionSummary) String() string {
 func (*SessionSummary) ProtoMessage() {}
 
 func (x *SessionSummary) ProtoReflect() protoreflect.Message {
-	mi := &file_atrs_v1_atrs_proto_msgTypes[13]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -889,7 +889,7 @@ func (x *SessionSummary) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionSummary.ProtoReflect.Descriptor instead.
 func (*SessionSummary) Descriptor() ([]byte, []int) {
-	return file_atrs_v1_atrs_proto_rawDescGZIP(), []int{13}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *SessionSummary) GetSessionId() string {
@@ -950,7 +950,7 @@ type StreamOutputRequest struct {
 
 func (x *StreamOutputRequest) Reset() {
 	*x = StreamOutputRequest{}
-	mi := &file_atrs_v1_atrs_proto_msgTypes[14]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -962,7 +962,7 @@ func (x *StreamOutputRequest) String() string {
 func (*StreamOutputRequest) ProtoMessage() {}
 
 func (x *StreamOutputRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_atrs_v1_atrs_proto_msgTypes[14]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -975,7 +975,7 @@ func (x *StreamOutputRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamOutputRequest.ProtoReflect.Descriptor instead.
 func (*StreamOutputRequest) Descriptor() ([]byte, []int) {
-	return file_atrs_v1_atrs_proto_rawDescGZIP(), []int{14}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *StreamOutputRequest) GetSessionId() string {
@@ -995,7 +995,7 @@ type OutputChunk struct {
 
 func (x *OutputChunk) Reset() {
 	*x = OutputChunk{}
-	mi := &file_atrs_v1_atrs_proto_msgTypes[15]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1007,7 +1007,7 @@ func (x *OutputChunk) String() string {
 func (*OutputChunk) ProtoMessage() {}
 
 func (x *OutputChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_atrs_v1_atrs_proto_msgTypes[15]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1020,7 +1020,7 @@ func (x *OutputChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OutputChunk.ProtoReflect.Descriptor instead.
 func (*OutputChunk) Descriptor() ([]byte, []int) {
-	return file_atrs_v1_atrs_proto_rawDescGZIP(), []int{15}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *OutputChunk) GetText() string {
@@ -1047,7 +1047,7 @@ type SubscribeRequest struct {
 
 func (x *SubscribeRequest) Reset() {
 	*x = SubscribeRequest{}
-	mi := &file_atrs_v1_atrs_proto_msgTypes[16]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1059,7 +1059,7 @@ func (x *SubscribeRequest) String() string {
 func (*SubscribeRequest) ProtoMessage() {}
 
 func (x *SubscribeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_atrs_v1_atrs_proto_msgTypes[16]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1072,7 +1072,7 @@ func (x *SubscribeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubscribeRequest.ProtoReflect.Descriptor instead.
 func (*SubscribeRequest) Descriptor() ([]byte, []int) {
-	return file_atrs_v1_atrs_proto_rawDescGZIP(), []int{16}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *SubscribeRequest) GetSessionId() string {
@@ -1103,7 +1103,7 @@ type Event struct {
 
 func (x *Event) Reset() {
 	*x = Event{}
-	mi := &file_atrs_v1_atrs_proto_msgTypes[17]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1115,7 +1115,7 @@ func (x *Event) String() string {
 func (*Event) ProtoMessage() {}
 
 func (x *Event) ProtoReflect() protoreflect.Message {
-	mi := &file_atrs_v1_atrs_proto_msgTypes[17]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1128,7 +1128,7 @@ func (x *Event) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Event.ProtoReflect.Descriptor instead.
 func (*Event) Descriptor() ([]byte, []int) {
-	return file_atrs_v1_atrs_proto_rawDescGZIP(), []int{17}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *Event) GetSessionId() string {
@@ -1173,11 +1173,11 @@ func (x *Event) GetData() map[string]string {
 	return nil
 }
 
-var File_atrs_v1_atrs_proto protoreflect.FileDescriptor
+var File_arcmux_v1_arcmux_proto protoreflect.FileDescriptor
 
-const file_atrs_v1_atrs_proto_rawDesc = "" +
+const file_arcmux_v1_arcmux_proto_rawDesc = "" +
 	"\n" +
-	"\x12atrs/v1/atrs.proto\x12\aatrs.v1\"\xaf\x02\n" +
+	"\x16arcmux/v1/arcmux.proto\x12\tarcmux.v1\"\xb1\x02\n" +
 	"\x14CreateSessionRequest\x12\x14\n" +
 	"\x05agent\x18\x01 \x01(\tR\x05agent\x12\x10\n" +
 	"\x03cwd\x18\x02 \x01(\tR\x03cwd\x12\x16\n" +
@@ -1185,8 +1185,8 @@ const file_atrs_v1_atrs_proto_rawDesc = "" +
 	"\fsession_name\x18\x04 \x01(\tR\vsessionName\x12!\n" +
 	"\ftmux_session\x18\x05 \x01(\tR\vtmuxSession\x12\x1f\n" +
 	"\vtmux_window\x18\x06 \x01(\tR\n" +
-	"tmuxWindow\x128\n" +
-	"\x03env\x18\a \x03(\v2&.atrs.v1.CreateSessionRequest.EnvEntryR\x03env\x1a6\n" +
+	"tmuxWindow\x12:\n" +
+	"\x03env\x18\a \x03(\v2(.arcmux.v1.CreateSessionRequest.EnvEntryR\x03env\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x7f\n" +
@@ -1219,7 +1219,7 @@ const file_atrs_v1_atrs_proto_rawDesc = "" +
 	"idle_since\x18\x05 \x01(\tR\tidleSince\".\n" +
 	"\rStatusRequest\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x01 \x01(\tR\tsessionId\"\xc3\x02\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\"\xc5\x02\n" +
 	"\x0eStatusResponse\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x14\n" +
@@ -1233,10 +1233,10 @@ const file_atrs_v1_atrs_proto_rawDesc = "" +
 	"\x10last_activity_at\x18\a \x01(\tR\x0elastActivityAt\x12\x16\n" +
 	"\x06health\x18\b \x01(\tR\x06health\x12\x1f\n" +
 	"\vnudge_count\x18\t \x01(\x05R\n" +
-	"nudgeCount\x121\n" +
+	"nudgeCount\x123\n" +
 	"\n" +
 	"hook_state\x18\n" +
-	" \x01(\v2\x12.atrs.v1.HookStateR\thookState\"\x92\x01\n" +
+	" \x01(\v2\x14.arcmux.v1.HookStateR\thookState\"\x92\x01\n" +
 	"\tHookState\x12\x16\n" +
 	"\x06source\x18\x01 \x01(\tR\x06source\x12\"\n" +
 	"\rlast_tool_use\x18\x02 \x01(\tR\vlastToolUse\x12#\n" +
@@ -1251,9 +1251,9 @@ const file_atrs_v1_atrs_proto_rawDesc = "" +
 	"\x06killed\x18\x01 \x01(\bR\x06killed\x12\x1f\n" +
 	"\vfinal_state\x18\x02 \x01(\tR\n" +
 	"finalState\"\x15\n" +
-	"\x13ListSessionsRequest\"K\n" +
-	"\x14ListSessionsResponse\x123\n" +
-	"\bsessions\x18\x01 \x03(\v2\x17.atrs.v1.SessionSummaryR\bsessions\"\xd0\x01\n" +
+	"\x13ListSessionsRequest\"M\n" +
+	"\x14ListSessionsResponse\x125\n" +
+	"\bsessions\x18\x01 \x03(\v2\x19.arcmux.v1.SessionSummaryR\bsessions\"\xd0\x01\n" +
 	"\x0eSessionSummary\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x14\n" +
@@ -1275,85 +1275,85 @@ const file_atrs_v1_atrs_proto_rawDesc = "" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x1f\n" +
 	"\vevent_types\x18\x02 \x03(\tR\n" +
-	"eventTypes\"\xef\x01\n" +
+	"eventTypes\"\xf1\x01\n" +
 	"\x05Event\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x12\n" +
 	"\x04type\x18\x02 \x01(\tR\x04type\x12\x1c\n" +
 	"\ttimestamp\x18\x03 \x01(\tR\ttimestamp\x12\x14\n" +
 	"\x05state\x18\x04 \x01(\tR\x05state\x12\x18\n" +
-	"\amessage\x18\x05 \x01(\tR\amessage\x12,\n" +
-	"\x04data\x18\x06 \x03(\v2\x18.atrs.v1.Event.DataEntryR\x04data\x1a7\n" +
+	"\amessage\x18\x05 \x01(\tR\amessage\x12.\n" +
+	"\x04data\x18\x06 \x03(\v2\x1a.arcmux.v1.Event.DataEntryR\x04data\x1a7\n" +
 	"\tDataEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x012\xa0\x04\n" +
-	"\fAgentRuntime\x12N\n" +
-	"\rCreateSession\x12\x1d.atrs.v1.CreateSessionRequest\x1a\x1e.atrs.v1.CreateSessionResponse\x12E\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x012\xc0\x04\n" +
+	"\fAgentRuntime\x12R\n" +
+	"\rCreateSession\x12\x1f.arcmux.v1.CreateSessionRequest\x1a .arcmux.v1.CreateSessionResponse\x12I\n" +
 	"\n" +
-	"SendPrompt\x12\x1a.atrs.v1.SendPromptRequest\x1a\x1b.atrs.v1.SendPromptResponse\x12<\n" +
-	"\aCapture\x12\x17.atrs.v1.CaptureRequest\x1a\x18.atrs.v1.CaptureResponse\x129\n" +
-	"\x06Status\x12\x16.atrs.v1.StatusRequest\x1a\x17.atrs.v1.StatusResponse\x123\n" +
-	"\x04Kill\x12\x14.atrs.v1.KillRequest\x1a\x15.atrs.v1.KillResponse\x12K\n" +
-	"\fListSessions\x12\x1c.atrs.v1.ListSessionsRequest\x1a\x1d.atrs.v1.ListSessionsResponse\x12D\n" +
-	"\fStreamOutput\x12\x1c.atrs.v1.StreamOutputRequest\x1a\x14.atrs.v1.OutputChunk0\x01\x128\n" +
-	"\tSubscribe\x12\x19.atrs.v1.SubscribeRequest\x1a\x0e.atrs.v1.Event0\x01B/Z-github.com/lin-labs/arcmux/gen/atrs/v1;atrsv1b\x06proto3"
+	"SendPrompt\x12\x1c.arcmux.v1.SendPromptRequest\x1a\x1d.arcmux.v1.SendPromptResponse\x12@\n" +
+	"\aCapture\x12\x19.arcmux.v1.CaptureRequest\x1a\x1a.arcmux.v1.CaptureResponse\x12=\n" +
+	"\x06Status\x12\x18.arcmux.v1.StatusRequest\x1a\x19.arcmux.v1.StatusResponse\x127\n" +
+	"\x04Kill\x12\x16.arcmux.v1.KillRequest\x1a\x17.arcmux.v1.KillResponse\x12O\n" +
+	"\fListSessions\x12\x1e.arcmux.v1.ListSessionsRequest\x1a\x1f.arcmux.v1.ListSessionsResponse\x12H\n" +
+	"\fStreamOutput\x12\x1e.arcmux.v1.StreamOutputRequest\x1a\x16.arcmux.v1.OutputChunk0\x01\x12<\n" +
+	"\tSubscribe\x12\x1b.arcmux.v1.SubscribeRequest\x1a\x10.arcmux.v1.Event0\x01B3Z1github.com/lin-labs/arcmux/gen/arcmux/v1;arcmuxv1b\x06proto3"
 
 var (
-	file_atrs_v1_atrs_proto_rawDescOnce sync.Once
-	file_atrs_v1_atrs_proto_rawDescData []byte
+	file_arcmux_v1_arcmux_proto_rawDescOnce sync.Once
+	file_arcmux_v1_arcmux_proto_rawDescData []byte
 )
 
-func file_atrs_v1_atrs_proto_rawDescGZIP() []byte {
-	file_atrs_v1_atrs_proto_rawDescOnce.Do(func() {
-		file_atrs_v1_atrs_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_atrs_v1_atrs_proto_rawDesc), len(file_atrs_v1_atrs_proto_rawDesc)))
+func file_arcmux_v1_arcmux_proto_rawDescGZIP() []byte {
+	file_arcmux_v1_arcmux_proto_rawDescOnce.Do(func() {
+		file_arcmux_v1_arcmux_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_arcmux_v1_arcmux_proto_rawDesc), len(file_arcmux_v1_arcmux_proto_rawDesc)))
 	})
-	return file_atrs_v1_atrs_proto_rawDescData
+	return file_arcmux_v1_arcmux_proto_rawDescData
 }
 
-var file_atrs_v1_atrs_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
-var file_atrs_v1_atrs_proto_goTypes = []any{
-	(*CreateSessionRequest)(nil),  // 0: atrs.v1.CreateSessionRequest
-	(*CreateSessionResponse)(nil), // 1: atrs.v1.CreateSessionResponse
-	(*SendPromptRequest)(nil),     // 2: atrs.v1.SendPromptRequest
-	(*SendPromptResponse)(nil),    // 3: atrs.v1.SendPromptResponse
-	(*CaptureRequest)(nil),        // 4: atrs.v1.CaptureRequest
-	(*CaptureResponse)(nil),       // 5: atrs.v1.CaptureResponse
-	(*StatusRequest)(nil),         // 6: atrs.v1.StatusRequest
-	(*StatusResponse)(nil),        // 7: atrs.v1.StatusResponse
-	(*HookState)(nil),             // 8: atrs.v1.HookState
-	(*KillRequest)(nil),           // 9: atrs.v1.KillRequest
-	(*KillResponse)(nil),          // 10: atrs.v1.KillResponse
-	(*ListSessionsRequest)(nil),   // 11: atrs.v1.ListSessionsRequest
-	(*ListSessionsResponse)(nil),  // 12: atrs.v1.ListSessionsResponse
-	(*SessionSummary)(nil),        // 13: atrs.v1.SessionSummary
-	(*StreamOutputRequest)(nil),   // 14: atrs.v1.StreamOutputRequest
-	(*OutputChunk)(nil),           // 15: atrs.v1.OutputChunk
-	(*SubscribeRequest)(nil),      // 16: atrs.v1.SubscribeRequest
-	(*Event)(nil),                 // 17: atrs.v1.Event
-	nil,                           // 18: atrs.v1.CreateSessionRequest.EnvEntry
-	nil,                           // 19: atrs.v1.Event.DataEntry
+var file_arcmux_v1_arcmux_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
+var file_arcmux_v1_arcmux_proto_goTypes = []any{
+	(*CreateSessionRequest)(nil),  // 0: arcmux.v1.CreateSessionRequest
+	(*CreateSessionResponse)(nil), // 1: arcmux.v1.CreateSessionResponse
+	(*SendPromptRequest)(nil),     // 2: arcmux.v1.SendPromptRequest
+	(*SendPromptResponse)(nil),    // 3: arcmux.v1.SendPromptResponse
+	(*CaptureRequest)(nil),        // 4: arcmux.v1.CaptureRequest
+	(*CaptureResponse)(nil),       // 5: arcmux.v1.CaptureResponse
+	(*StatusRequest)(nil),         // 6: arcmux.v1.StatusRequest
+	(*StatusResponse)(nil),        // 7: arcmux.v1.StatusResponse
+	(*HookState)(nil),             // 8: arcmux.v1.HookState
+	(*KillRequest)(nil),           // 9: arcmux.v1.KillRequest
+	(*KillResponse)(nil),          // 10: arcmux.v1.KillResponse
+	(*ListSessionsRequest)(nil),   // 11: arcmux.v1.ListSessionsRequest
+	(*ListSessionsResponse)(nil),  // 12: arcmux.v1.ListSessionsResponse
+	(*SessionSummary)(nil),        // 13: arcmux.v1.SessionSummary
+	(*StreamOutputRequest)(nil),   // 14: arcmux.v1.StreamOutputRequest
+	(*OutputChunk)(nil),           // 15: arcmux.v1.OutputChunk
+	(*SubscribeRequest)(nil),      // 16: arcmux.v1.SubscribeRequest
+	(*Event)(nil),                 // 17: arcmux.v1.Event
+	nil,                           // 18: arcmux.v1.CreateSessionRequest.EnvEntry
+	nil,                           // 19: arcmux.v1.Event.DataEntry
 }
-var file_atrs_v1_atrs_proto_depIdxs = []int32{
-	18, // 0: atrs.v1.CreateSessionRequest.env:type_name -> atrs.v1.CreateSessionRequest.EnvEntry
-	8,  // 1: atrs.v1.StatusResponse.hook_state:type_name -> atrs.v1.HookState
-	13, // 2: atrs.v1.ListSessionsResponse.sessions:type_name -> atrs.v1.SessionSummary
-	19, // 3: atrs.v1.Event.data:type_name -> atrs.v1.Event.DataEntry
-	0,  // 4: atrs.v1.AgentRuntime.CreateSession:input_type -> atrs.v1.CreateSessionRequest
-	2,  // 5: atrs.v1.AgentRuntime.SendPrompt:input_type -> atrs.v1.SendPromptRequest
-	4,  // 6: atrs.v1.AgentRuntime.Capture:input_type -> atrs.v1.CaptureRequest
-	6,  // 7: atrs.v1.AgentRuntime.Status:input_type -> atrs.v1.StatusRequest
-	9,  // 8: atrs.v1.AgentRuntime.Kill:input_type -> atrs.v1.KillRequest
-	11, // 9: atrs.v1.AgentRuntime.ListSessions:input_type -> atrs.v1.ListSessionsRequest
-	14, // 10: atrs.v1.AgentRuntime.StreamOutput:input_type -> atrs.v1.StreamOutputRequest
-	16, // 11: atrs.v1.AgentRuntime.Subscribe:input_type -> atrs.v1.SubscribeRequest
-	1,  // 12: atrs.v1.AgentRuntime.CreateSession:output_type -> atrs.v1.CreateSessionResponse
-	3,  // 13: atrs.v1.AgentRuntime.SendPrompt:output_type -> atrs.v1.SendPromptResponse
-	5,  // 14: atrs.v1.AgentRuntime.Capture:output_type -> atrs.v1.CaptureResponse
-	7,  // 15: atrs.v1.AgentRuntime.Status:output_type -> atrs.v1.StatusResponse
-	10, // 16: atrs.v1.AgentRuntime.Kill:output_type -> atrs.v1.KillResponse
-	12, // 17: atrs.v1.AgentRuntime.ListSessions:output_type -> atrs.v1.ListSessionsResponse
-	15, // 18: atrs.v1.AgentRuntime.StreamOutput:output_type -> atrs.v1.OutputChunk
-	17, // 19: atrs.v1.AgentRuntime.Subscribe:output_type -> atrs.v1.Event
+var file_arcmux_v1_arcmux_proto_depIdxs = []int32{
+	18, // 0: arcmux.v1.CreateSessionRequest.env:type_name -> arcmux.v1.CreateSessionRequest.EnvEntry
+	8,  // 1: arcmux.v1.StatusResponse.hook_state:type_name -> arcmux.v1.HookState
+	13, // 2: arcmux.v1.ListSessionsResponse.sessions:type_name -> arcmux.v1.SessionSummary
+	19, // 3: arcmux.v1.Event.data:type_name -> arcmux.v1.Event.DataEntry
+	0,  // 4: arcmux.v1.AgentRuntime.CreateSession:input_type -> arcmux.v1.CreateSessionRequest
+	2,  // 5: arcmux.v1.AgentRuntime.SendPrompt:input_type -> arcmux.v1.SendPromptRequest
+	4,  // 6: arcmux.v1.AgentRuntime.Capture:input_type -> arcmux.v1.CaptureRequest
+	6,  // 7: arcmux.v1.AgentRuntime.Status:input_type -> arcmux.v1.StatusRequest
+	9,  // 8: arcmux.v1.AgentRuntime.Kill:input_type -> arcmux.v1.KillRequest
+	11, // 9: arcmux.v1.AgentRuntime.ListSessions:input_type -> arcmux.v1.ListSessionsRequest
+	14, // 10: arcmux.v1.AgentRuntime.StreamOutput:input_type -> arcmux.v1.StreamOutputRequest
+	16, // 11: arcmux.v1.AgentRuntime.Subscribe:input_type -> arcmux.v1.SubscribeRequest
+	1,  // 12: arcmux.v1.AgentRuntime.CreateSession:output_type -> arcmux.v1.CreateSessionResponse
+	3,  // 13: arcmux.v1.AgentRuntime.SendPrompt:output_type -> arcmux.v1.SendPromptResponse
+	5,  // 14: arcmux.v1.AgentRuntime.Capture:output_type -> arcmux.v1.CaptureResponse
+	7,  // 15: arcmux.v1.AgentRuntime.Status:output_type -> arcmux.v1.StatusResponse
+	10, // 16: arcmux.v1.AgentRuntime.Kill:output_type -> arcmux.v1.KillResponse
+	12, // 17: arcmux.v1.AgentRuntime.ListSessions:output_type -> arcmux.v1.ListSessionsResponse
+	15, // 18: arcmux.v1.AgentRuntime.StreamOutput:output_type -> arcmux.v1.OutputChunk
+	17, // 19: arcmux.v1.AgentRuntime.Subscribe:output_type -> arcmux.v1.Event
 	12, // [12:20] is the sub-list for method output_type
 	4,  // [4:12] is the sub-list for method input_type
 	4,  // [4:4] is the sub-list for extension type_name
@@ -1361,26 +1361,26 @@ var file_atrs_v1_atrs_proto_depIdxs = []int32{
 	0,  // [0:4] is the sub-list for field type_name
 }
 
-func init() { file_atrs_v1_atrs_proto_init() }
-func file_atrs_v1_atrs_proto_init() {
-	if File_atrs_v1_atrs_proto != nil {
+func init() { file_arcmux_v1_arcmux_proto_init() }
+func file_arcmux_v1_arcmux_proto_init() {
+	if File_arcmux_v1_arcmux_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_atrs_v1_atrs_proto_rawDesc), len(file_atrs_v1_atrs_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_arcmux_v1_arcmux_proto_rawDesc), len(file_arcmux_v1_arcmux_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   20,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_atrs_v1_atrs_proto_goTypes,
-		DependencyIndexes: file_atrs_v1_atrs_proto_depIdxs,
-		MessageInfos:      file_atrs_v1_atrs_proto_msgTypes,
+		GoTypes:           file_arcmux_v1_arcmux_proto_goTypes,
+		DependencyIndexes: file_arcmux_v1_arcmux_proto_depIdxs,
+		MessageInfos:      file_arcmux_v1_arcmux_proto_msgTypes,
 	}.Build()
-	File_atrs_v1_atrs_proto = out.File
-	file_atrs_v1_atrs_proto_goTypes = nil
-	file_atrs_v1_atrs_proto_depIdxs = nil
+	File_arcmux_v1_arcmux_proto = out.File
+	file_arcmux_v1_arcmux_proto_goTypes = nil
+	file_arcmux_v1_arcmux_proto_depIdxs = nil
 }

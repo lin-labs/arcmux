@@ -8,9 +8,9 @@ import (
 	"time"
 )
 
-const defaultSocket = "atrs"
+const defaultSocket = "arcmux"
 
-// Client wraps tmux CLI commands, always targeting the isolated atrs socket.
+// Client wraps tmux CLI commands, always targeting the isolated arcmux.socket.
 type Client struct {
 	socket string
 }

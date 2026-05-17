@@ -33,9 +33,9 @@ func TestParseHookEvent_Invalid(t *testing.T) {
 }
 
 func TestInstaller_OutputPath(t *testing.T) {
-	installer := NewInstaller("/tmp/atrs-hooks")
+	installer := NewInstaller("/tmp/arcmux-hooks")
 	path := installer.OutputPath("s-abc")
-	expected := "/tmp/atrs-hooks/atrs-hooks-s-abc.jsonl"
+	expected := "/tmp/arcmux-hooks/arcmux-hooks-s-abc.jsonl"
 	if path != expected {
 		t.Errorf("OutputPath = %q, want %q", path, expected)
 	}
@@ -56,7 +56,7 @@ func TestInstaller_Install_Claude(t *testing.T) {
 	}
 
 	// Check hook script was created
-	scriptPath := filepath.Join(hookDir, "hooks", "atrs-s-test.sh")
+	scriptPath := filepath.Join(hookDir, "hooks", "arcmux-s-test.sh")
 	info, err := os.Stat(scriptPath)
 	if err != nil {
 		t.Fatalf("hook script not created: %v", err)

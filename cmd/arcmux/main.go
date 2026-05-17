@@ -16,7 +16,7 @@ const version = "0.1.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintf(os.Stderr, "atrs: %v\n", err)
+		fmt.Fprintf(os.Stderr, "arcmux: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -30,13 +30,13 @@ func run(args []string) error {
 	case "start":
 		return cmdStart(args[1:])
 	case "version":
-		fmt.Printf("atrs %s\n", version)
+		fmt.Printf("arcmux %s\n", version)
 		return nil
 	case "help", "--help", "-h":
 		printUsage()
 		return nil
 	default:
-		return fmt.Errorf("unknown command: %s (try 'atrs help')", args[0])
+		return fmt.Errorf("unknown command: %s (try 'arcmux help')", args[0])
 	}
 }
 
@@ -70,7 +70,7 @@ func cmdStart(args []string) error {
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "atrs v%s listening on %s\n", version, cfg.Daemon.Socket)
+	fmt.Fprintf(os.Stderr, "arcmux v%s listening on %s\n", version, cfg.Daemon.Socket)
 	fmt.Fprintf(os.Stderr, "tmux socket: %s (use 'tmux -L %s attach' to observe)\n",
 		cfg.Tmux.SocketName, cfg.Tmux.SocketName)
 
@@ -81,22 +81,22 @@ func cmdStart(args []string) error {
 }
 
 func printUsage() {
-	fmt.Print(`atrs — Agent Tmux Runtime Service
+	fmt.Print(`arcmux — Agent Tmux Runtime Service
 
 Usage:
-  atrs start [--config path]    Start the daemon (default command)
-  atrs version                  Print version
-  atrs help                     Show this help
+  arcmux start [--config path]    Start the daemon (default command)
+  arcmux version                  Print version
+  arcmux help                     Show this help
 
 The daemon listens on a Unix socket for gRPC requests.
 Orchestrators connect to manage coding agent sessions.
 
-Configuration: ~/.config/atrs/config.toml
-Socket: ~/.config/atrs/atrs.sock (configurable)
-tmux server: tmux -L atrs (isolated)
+Configuration: ~/.config/arcmux/config.toml
+Socket: ~/.config/arcmux/arcmux.sock (configurable)
+tmux server: tmux -L arcmux (isolated)
 
 Observe agent panes:
-  tmux -L atrs attach
+  tmux -L arcmux attach
 
 `)
 }

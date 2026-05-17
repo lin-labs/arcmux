@@ -13,8 +13,8 @@ func TestLoad_Defaults(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 
-	if cfg.Tmux.SocketName != "atrs" {
-		t.Errorf("SocketName = %q, want %q", cfg.Tmux.SocketName, "atrs")
+	if cfg.Tmux.SocketName != "arcmux" {
+		t.Errorf("SocketName = %q, want %q", cfg.Tmux.SocketName, "arcmux")
 	}
 	if cfg.Tmux.DefaultSession != "agents" {
 		t.Errorf("DefaultSession = %q, want %q", cfg.Tmux.DefaultSession, "agents")
@@ -36,10 +36,10 @@ func TestLoad_CustomFile(t *testing.T) {
 
 	content := `
 [daemon]
-socket = "/tmp/test-atrs.sock"
+socket = "/tmp/test-arcmux.sock"
 
 [tmux]
-socket_name = "test-atrs"
+socket_name = "test-arcmux"
 default_session = "test-agents"
 
 [health]
@@ -56,11 +56,11 @@ stuck_timeout_default = "10m"
 		t.Fatalf("Load: %v", err)
 	}
 
-	if cfg.Daemon.Socket != "/tmp/test-atrs.sock" {
-		t.Errorf("Socket = %q, want %q", cfg.Daemon.Socket, "/tmp/test-atrs.sock")
+	if cfg.Daemon.Socket != "/tmp/test-arcmux.sock" {
+		t.Errorf("Socket = %q, want %q", cfg.Daemon.Socket, "/tmp/test-arcmux.sock")
 	}
-	if cfg.Tmux.SocketName != "test-atrs" {
-		t.Errorf("SocketName = %q, want %q", cfg.Tmux.SocketName, "test-atrs")
+	if cfg.Tmux.SocketName != "test-arcmux" {
+		t.Errorf("SocketName = %q, want %q", cfg.Tmux.SocketName, "test-arcmux")
 	}
 	if cfg.Tmux.DefaultSession != "test-agents" {
 		t.Errorf("DefaultSession = %q, want %q", cfg.Tmux.DefaultSession, "test-agents")

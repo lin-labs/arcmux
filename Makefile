@@ -4,7 +4,7 @@ BINARY := arcmux
 INSTALL_DIR := ~/.local/bin
 
 build:
-	go build -o bin/$(BINARY) ./cmd/atrs
+	go build -o bin/$(BINARY) ./cmd/arcmux
 
 install: build
 	mkdir -p $(INSTALL_DIR)
@@ -14,7 +14,7 @@ proto:
 	protoc \
 		--go_out=gen --go_opt=paths=source_relative \
 		--go-grpc_out=gen --go-grpc_opt=paths=source_relative \
-		proto/atrs/v1/atrs.proto
+		proto/arcmux/v1/arcmux.proto
 
 test:
 	go test ./...

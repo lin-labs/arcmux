@@ -9,7 +9,7 @@ import (
 	"github.com/lin-labs/arcmux/internal/profile"
 )
 
-// Config is the top-level configuration for the atrs daemon.
+// Config is the top-level configuration for the arcmux daemon.
 type Config struct {
 	Daemon  DaemonConfig             `toml:"daemon"`
 	Tmux    TmuxConfig               `toml:"tmux"`
@@ -40,16 +40,16 @@ type HooksConfig struct {
 	AutoInstall   bool   `toml:"auto_install"`
 }
 
-// DefaultConfigPath returns ~/.config/atrs/config.toml.
+// DefaultConfigPath returns ~/.config/arcmux/config.toml.
 func DefaultConfigPath() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "atrs", "config.toml")
+	return filepath.Join(home, ".config", "arcmux", "config.toml")
 }
 
-// DefaultSocketPath returns ~/.config/atrs/atrs.sock.
+// DefaultSocketPath returns ~/.config/arcmux/arcmux.sock.
 func DefaultSocketPath() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "atrs", "atrs.sock")
+	return filepath.Join(home, ".config", "arcmux", "arcmux.sock")
 }
 
 // Load reads configuration from the given path.
@@ -61,7 +61,7 @@ func Load(path string) (*Config, error) {
 			LogDir: defaultLogDir(),
 		},
 		Tmux: TmuxConfig{
-			SocketName:     "atrs",
+			SocketName:     "arcmux",
 			DefaultSession: "agents",
 		},
 		Health: HealthConfig{
@@ -71,7 +71,7 @@ func Load(path string) (*Config, error) {
 		},
 		Hooks: HooksConfig{
 			ClaudeHookDir: "~/.claude",
-			HookOutputDir: "/tmp/atrs-hooks",
+			HookOutputDir: "/tmp/arcmux-hooks",
 			AutoInstall:   true,
 		},
 		Agents: profile.DefaultProfiles(),
@@ -103,5 +103,5 @@ func DefaultAgentProfiles() map[string]profile.Profile {
 
 func defaultLogDir() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "atrs", "logs")
+	return filepath.Join(home, ".config", "arcmux", "logs")
 }

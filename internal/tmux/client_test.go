@@ -13,9 +13,9 @@ func tmuxAvailable() bool {
 }
 
 func TestNewClient(t *testing.T) {
-	c := NewClient("test-atrs")
-	if c.socket != "test-atrs" {
-		t.Errorf("socket = %q, want %q", c.socket, "test-atrs")
+	c := NewClient("test-arcmux")
+	if c.socket != "test-arcmux" {
+		t.Errorf("socket = %q, want %q", c.socket, "test-arcmux")
 	}
 }
 
@@ -32,7 +32,7 @@ func TestIntegration_SessionLifecycle(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	c := NewClient("atrs-test")
+	c := NewClient("arcmux-test")
 
 	// Ensure server
 	if err := c.EnsureServer(ctx); err != nil {
@@ -40,7 +40,7 @@ func TestIntegration_SessionLifecycle(t *testing.T) {
 	}
 
 	// Create session
-	sessionName := "atrs-test-session"
+	sessionName := "arcmux-test-session"
 	if err := c.NewSession(ctx, sessionName, "test-win", ""); err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}

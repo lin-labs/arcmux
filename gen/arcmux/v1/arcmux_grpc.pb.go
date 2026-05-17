@@ -2,9 +2,9 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.2
 // - protoc             v7.34.1
-// source: atrs/v1/atrs.proto
+// source: arcmux/v1/arcmux.proto
 
-package atrsv1
+package arcmuxv1
 
 import (
 	context "context"
@@ -19,14 +19,14 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	AgentRuntime_CreateSession_FullMethodName = "/atrs.v1.AgentRuntime/CreateSession"
-	AgentRuntime_SendPrompt_FullMethodName    = "/atrs.v1.AgentRuntime/SendPrompt"
-	AgentRuntime_Capture_FullMethodName       = "/atrs.v1.AgentRuntime/Capture"
-	AgentRuntime_Status_FullMethodName        = "/atrs.v1.AgentRuntime/Status"
-	AgentRuntime_Kill_FullMethodName          = "/atrs.v1.AgentRuntime/Kill"
-	AgentRuntime_ListSessions_FullMethodName  = "/atrs.v1.AgentRuntime/ListSessions"
-	AgentRuntime_StreamOutput_FullMethodName  = "/atrs.v1.AgentRuntime/StreamOutput"
-	AgentRuntime_Subscribe_FullMethodName     = "/atrs.v1.AgentRuntime/Subscribe"
+	AgentRuntime_CreateSession_FullMethodName = "/arcmux.v1.AgentRuntime/CreateSession"
+	AgentRuntime_SendPrompt_FullMethodName    = "/arcmux.v1.AgentRuntime/SendPrompt"
+	AgentRuntime_Capture_FullMethodName       = "/arcmux.v1.AgentRuntime/Capture"
+	AgentRuntime_Status_FullMethodName        = "/arcmux.v1.AgentRuntime/Status"
+	AgentRuntime_Kill_FullMethodName          = "/arcmux.v1.AgentRuntime/Kill"
+	AgentRuntime_ListSessions_FullMethodName  = "/arcmux.v1.AgentRuntime/ListSessions"
+	AgentRuntime_StreamOutput_FullMethodName  = "/arcmux.v1.AgentRuntime/StreamOutput"
+	AgentRuntime_Subscribe_FullMethodName     = "/arcmux.v1.AgentRuntime/Subscribe"
 )
 
 // AgentRuntimeClient is the client API for AgentRuntime service.
@@ -354,7 +354,7 @@ type AgentRuntime_SubscribeServer = grpc.ServerStreamingServer[Event]
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var AgentRuntime_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "atrs.v1.AgentRuntime",
+	ServiceName: "arcmux.v1.AgentRuntime",
 	HandlerType: (*AgentRuntimeServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
@@ -394,5 +394,5 @@ var AgentRuntime_ServiceDesc = grpc.ServiceDesc{
 			ServerStreams: true,
 		},
 	},
-	Metadata: "atrs/v1/atrs.proto",
+	Metadata: "arcmux/v1/arcmux.proto",
 }

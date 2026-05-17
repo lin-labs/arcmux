@@ -1,8 +1,8 @@
 syntax = "proto3";
 
-package atrs.v1;
+package arcmux.v1;
 
-option go_package = "github.com/lin-labs/arcmux/gen/atrs/v1;atrsv1";
+option go_package = "github.com/lin-labs/arcmux/gen/arcmux/v1;arcmuxv1";
 
 service AgentRuntime {
   // Session lifecycle

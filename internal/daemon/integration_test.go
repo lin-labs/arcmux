@@ -13,13 +13,13 @@ import (
 )
 
 func TestIntegration_DaemonLifecycle(t *testing.T) {
-	if os.Getenv("ATRS_INTEGRATION") == "" {
-		t.Skip("set ATRS_INTEGRATION=1 to run integration tests")
+	if os.Getenv("ARCMUX_INTEGRATION") == "" {
+		t.Skip("set ARCMUX_INTEGRATION=1 to run integration tests")
 	}
 
 	tmpDir := t.TempDir()
 	// Use /tmp for socket to avoid macOS 104-byte path limit
-	socketPath := "/tmp/atrs-test.sock"
+	socketPath := "/tmp/arcmux-test.sock"
 	os.Remove(socketPath)
 	cfg := &config.Config{
 		Daemon: config.DaemonConfig{
@@ -27,7 +27,7 @@ func TestIntegration_DaemonLifecycle(t *testing.T) {
 			LogDir: filepath.Join(tmpDir, "logs"),
 		},
 		Tmux: config.TmuxConfig{
-			SocketName:     "atrs-test-int",
+			SocketName:     "arcmux-test-int",
 			DefaultSession: "test-agents",
 		},
 		Health: config.HealthConfig{

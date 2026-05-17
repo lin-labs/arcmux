@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	atrsv1 "github.com/lin-labs/arcmux/gen/atrs/v1"
+	arcmuxv1 "github.com/lin-labs/arcmux/gen/arcmux/v1"
 	"github.com/lin-labs/arcmux/internal/config"
 	"github.com/lin-labs/arcmux/internal/health"
 	"github.com/lin-labs/arcmux/internal/hooks"
@@ -21,7 +21,7 @@ import (
 	"google.golang.org/grpc"
 )
 
-// Daemon is the main atrs runtime service.
+// Daemon is the main arcmux runtime service.
 type Daemon struct {
 	cfg      *config.Config
 	tmux     *tmux.Client
@@ -97,7 +97,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 	d.listener = listener
 
 	d.server = grpc.NewServer()
-	atrsv1.RegisterAgentRuntimeServer(d.server, NewGRPCServer(d))
+	arcmuxv1.RegisterAgentRuntimeServer(d.server, NewGRPCServer(d))
 
 	// Start background loops
 	go d.relayHealthEvents()
@@ -391,7 +391,7 @@ func (d *Daemon) GetSession(id string) (*session.Session, bool) {
 
 // OutputFilePath returns the output log path for a session.
 func (d *Daemon) outputFilePath(id string) string {
-	return filepath.Join(d.cfg.Hooks.HookOutputDir, fmt.Sprintf("atrs-output-%s.log", id))
+	return filepath.Join(d.cfg.Hooks.HookOutputDir, fmt.Sprintf("arcmux-output-%s.log", id))
 }
 
 // Subscribe returns a channel of events. Call Unsubscribe to stop.
