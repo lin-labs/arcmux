@@ -1,0 +1,151 @@
+syntax = "proto3";
+
+package atrs.v1;
+
+option go_package = "github.com/lin-labs/arcmux/gen/atrs/v1;atrsv1";
+
+service AgentRuntime {
+  // Session lifecycle
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
+  rpc SendPrompt(SendPromptRequest) returns (SendPromptResponse);
+  rpc Capture(CaptureRequest) returns (CaptureResponse);
+  rpc Status(StatusRequest) returns (StatusResponse);
+  rpc Kill(KillRequest) returns (KillResponse);
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+
+  // Streaming
+  rpc StreamOutput(StreamOutputRequest) returns (stream OutputChunk);
+  rpc Subscribe(SubscribeRequest) returns (stream Event);
+}
+
+// --- CreateSession ---
+
+message CreateSessionRequest {
+  string agent = 1;           // profile name: "codex", "claude", "grok"
+  string cwd = 2;             // working directory for the agent
+  string prompt = 3;          // initial prompt to send after handshake
+  string session_name = 4;    // optional human-readable name
+  string tmux_session = 5;    // optional: override default tmux session
+  string tmux_window = 6;     // optional: target window name
+  map<string, string> env = 7; // extra env vars for the agent process
+}
+
+message CreateSessionResponse {
+  string session_id = 1;
+  string tmux_target = 2;     // e.g. "agents:myapp.%42"
+  int64 pid = 3;
+  string state = 4;
+}
+
+// --- SendPrompt ---
+
+message SendPromptRequest {
+  string session_id = 1;
+  string text = 2;
+  bool confirm_delivery = 3;  // wait for agent to acknowledge
+  bool wait_idle = 4;         // wait for agent to be idle before sending
+}
+
+message SendPromptResponse {
+  bool delivered = 1;
+  string state = 2;           // agent state after delivery
+}
+
+// --- Capture ---
+
+message CaptureRequest {
+  string session_id = 1;
+  bool include_history = 2;   // full scrollback vs visible screen
+}
+
+message CaptureResponse {
+  string output = 1;
+  string current_command = 2;
+  string cwd = 3;
+  string state = 4;
+  string idle_since = 5;      // RFC3339 or empty
+}
+
+// --- Status ---
+
+message StatusRequest {
+  string session_id = 1;
+}
+
+message StatusResponse {
+  string session_id = 1;
+  string state = 2;
+  string agent = 3;
+  string tmux_target = 4;
+  int64 pid = 5;
+  string started_at = 6;
+  string last_activity_at = 7;
+  string health = 8;          // "healthy", "stuck", "escalated"
+  int32 nudge_count = 9;
+  HookState hook_state = 10;
+}
+
+message HookState {
+  string source = 1;          // "claude_hooks", "codex_output", "screen_only"
+  string last_tool_use = 2;
+  int32 files_changed = 3;
+  string last_signal_at = 4;
+}
+
+// --- Kill ---
+
+message KillRequest {
+  string session_id = 1;
+  bool graceful = 2;          // Ctrl-C + wait vs hard kill
+  string timeout = 3;         // duration string, e.g. "30s"
+}
+
+message KillResponse {
+  bool killed = 1;
+  string final_state = 2;
+}
+
+// --- ListSessions ---
+
+message ListSessionsRequest {}
+
+message ListSessionsResponse {
+  repeated SessionSummary sessions = 1;
+}
+
+message SessionSummary {
+  string session_id = 1;
+  string agent = 2;
+  string cwd = 3;
+  string state = 4;
+  string tmux_target = 5;
+  string started_at = 6;
+  string session_name = 7;
+}
+
+// --- StreamOutput ---
+
+message StreamOutputRequest {
+  string session_id = 1;
+}
+
+message OutputChunk {
+  string text = 1;
+  string timestamp = 2;
+}
+
+// --- Subscribe (events) ---
+
+message SubscribeRequest {
+  string session_id = 1;      // empty = all sessions
+  repeated string event_types = 2; // filter; empty = all
+}
+
+message Event {
+  string session_id = 1;
+  string type = 2;            // state_changed, stuck_detected, nudge_sent, etc.
+  string timestamp = 3;
+  string state = 4;
+  string message = 5;
+  map<string, string> data = 6;
+}
