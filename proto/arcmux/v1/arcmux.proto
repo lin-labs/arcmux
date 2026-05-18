@@ -21,7 +21,7 @@ service AgentRuntime {
 // --- CreateSession ---
 
 message CreateSessionRequest {
-  string agent = 1;           // profile name: "codex", "claude", "grok"
+  string agent = 1;           // profile name: "codex", "claude"
   string cwd = 2;             // working directory for the agent
   string prompt = 3;          // initial prompt to send after handshake
   string session_name = 4;    // optional human-readable name

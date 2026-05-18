@@ -11,9 +11,9 @@ import (
 )
 
 const (
-	handshakeTimeout     = 30 * time.Second
-	trustPromptTimeout   = 3 * time.Second
-	readyPatternTimeout  = 25 * time.Second
+	handshakeTimeout      = 30 * time.Second
+	trustPromptTimeout    = 3 * time.Second
+	readyPatternTimeout   = 25 * time.Second
 	handshakePollInterval = 500 * time.Millisecond
 )
 
@@ -49,7 +49,7 @@ func (d *Daemon) performHandshake(ctx context.Context, sess *session.Session, pr
 	}
 
 	// Phase 3: Handle resume prompt (Codex-specific)
-	if err := d.handleResumePrompt(handshakeCtx, target, prof); err != nil {
+	if _, err := d.handleResumePrompt(handshakeCtx, target, prof); err != nil {
 		return fmt.Errorf("handle resume prompt: %w", err)
 	}
 
@@ -118,24 +118,24 @@ func (d *Daemon) handleTrustPrompt(ctx context.Context, target string, prof prof
 	return true, d.tmux.SendKeys(ctx, target, response, "Enter")
 }
 
-func (d *Daemon) handleResumePrompt(ctx context.Context, target string, prof profile.Profile) error {
+func (d *Daemon) handleResumePrompt(ctx context.Context, target string, prof profile.Profile) (bool, error) {
 	if !strings.EqualFold(prof.Name, "codex") {
-		return nil
+		return false, nil
 	}
 
 	output, err := d.tmux.CapturePaneVisible(ctx, target)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	if containsFold(output, "resume") {
 		// Decline resume — start fresh
 		if err := d.tmux.SendKeys(ctx, target, "n", "Enter"); err != nil {
-			return err
+			return false, err
 		}
-		return d.tmux.WaitIdle(ctx, target, 10*time.Second, 2*time.Second)
+		return true, d.tmux.WaitIdle(ctx, target, 10*time.Second, 2*time.Second)
 	}
-	return nil
+	return false, nil
 }
 
 func (d *Daemon) waitForReadyPattern(ctx context.Context, target string, prof profile.Profile) error {
@@ -166,50 +166,19 @@ func (d *Daemon) waitForReadyPattern(ctx context.Context, target string, prof pr
 func (d *Daemon) deliverPrompt(ctx context.Context, sess *session.Session, prof profile.Profile, text string, confirm bool) error {
 	snap := sess.Snapshot()
 	target := snap.TmuxTarget
+	_ = confirm
+
+	beforeOutput, err := d.tmux.CapturePaneVisible(ctx, target)
+	if err != nil {
+		beforeOutput = ""
+	}
 
 	// Send the prompt text + Enter
 	if err := d.tmux.SendKeys(ctx, target, text, "Enter"); err != nil {
 		return fmt.Errorf("send prompt: %w", err)
 	}
 
-	if !confirm {
-		return nil
-	}
-
-	// Confirm delivery: wait for the agent to start working
-	return d.confirmPromptDelivery(ctx, target, prof)
-}
-
-func (d *Daemon) confirmPromptDelivery(ctx context.Context, target string, prof profile.Profile) error {
-	if prof.WorkingIndicator == "" {
-		// No working indicator: just wait for output change
-		time.Sleep(1 * time.Second)
-		return nil
-	}
-
-	// Wait for working indicator to appear
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		if time.Now().After(deadline) {
-			// Timeout is not fatal — agent may process without showing indicator
-			return nil
-		}
-
-		output, err := d.tmux.CapturePaneVisible(ctx, target)
-		if err != nil {
-			return err
-		}
-
-		if containsFold(output, prof.WorkingIndicator) {
-			return nil
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(500 * time.Millisecond):
-		}
-	}
+	return d.ensurePromptIngested(ctx, sess, prof, text, beforeOutput)
 }
 
 func containsFold(s, substr string) bool {

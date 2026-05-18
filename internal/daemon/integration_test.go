@@ -54,9 +54,9 @@ func TestIntegration_DaemonLifecycle(t *testing.T) {
 	}
 	defer d.Stop()
 
-	// Create a session that runs a simple echo command (not a real agent)
+	// Create a session against a supported built-in profile.
 	sess, err := d.CreateSession(ctx, CreateSessionRequest{
-		Agent: "grok", // grok profile is simplest (screen_only)
+		Agent: "codex",
 		CWD:   tmpDir,
 		Name:  "test-echo",
 	})

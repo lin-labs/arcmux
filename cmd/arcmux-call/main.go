@@ -45,13 +45,13 @@ func main() {
 
 	switch cmd {
 	case "create":
-		fs := map[string]string{"--agent": "codex", "--name": "gmail-codex"}
+		h, _ := os.UserHomeDir()
+		fs := map[string]string{"--agent": "codex", "--name": "gmail-codex", "--cwd": h}
 		for i := 2; i+1 < len(os.Args); i += 2 {
 			fs[os.Args[i]] = os.Args[i+1]
 		}
-		h, _ := os.UserHomeDir()
 		r, err := c.CreateSession(ctx, &arcmuxv1.CreateSessionRequest{
-			Agent: fs["--agent"], Cwd: h, SessionName: fs["--name"],
+			Agent: fs["--agent"], Cwd: fs["--cwd"], SessionName: fs["--name"],
 		})
 		if err != nil {
 			die(err)

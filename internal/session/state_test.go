@@ -82,3 +82,34 @@ func TestRecordActivity(t *testing.T) {
 		t.Error("LastActivityAt should advance after RecordActivity")
 	}
 }
+
+func TestRuntimeMetadata(t *testing.T) {
+	s := NewSession("s-1", "test", "codex_exec", "/tmp")
+	s.SetTransport("exec")
+	s.SetPID(4242)
+	s.SetCurrentCommand("codex exec --json -")
+	s.SetBackendSessionID("thread-123")
+	s.SetEnv(map[string]string{"FOO": "bar"})
+
+	snap := s.Snapshot()
+	if snap.Transport != "exec" {
+		t.Fatalf("Transport = %q, want exec", snap.Transport)
+	}
+	if snap.PID != 4242 {
+		t.Fatalf("PID = %d, want 4242", snap.PID)
+	}
+	if snap.CurrentCommand != "codex exec --json -" {
+		t.Fatalf("CurrentCommand = %q", snap.CurrentCommand)
+	}
+	if snap.BackendSessionID != "thread-123" {
+		t.Fatalf("BackendSessionID = %q", snap.BackendSessionID)
+	}
+	if snap.Env["FOO"] != "bar" {
+		t.Fatalf("Env[FOO] = %q, want bar", snap.Env["FOO"])
+	}
+
+	snap.Env["FOO"] = "changed"
+	if s.Snapshot().Env["FOO"] != "bar" {
+		t.Fatal("Snapshot env should be a copy")
+	}
+}

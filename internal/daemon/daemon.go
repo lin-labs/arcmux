@@ -13,6 +13,7 @@ import (
 
 	arcmuxv1 "github.com/lin-labs/arcmux/gen/arcmux/v1"
 	"github.com/lin-labs/arcmux/internal/config"
+	"github.com/lin-labs/arcmux/internal/delivery"
 	"github.com/lin-labs/arcmux/internal/health"
 	"github.com/lin-labs/arcmux/internal/hooks"
 	"github.com/lin-labs/arcmux/internal/profile"
@@ -30,12 +31,14 @@ type Daemon struct {
 	profiles map[string]profile.Profile
 	logger   *slog.Logger
 
-	mu       sync.RWMutex
-	sessions map[string]*session.Session
-	monitors map[string]context.CancelFunc
+	mu        sync.RWMutex
+	sessions  map[string]*session.Session
+	monitors  map[string]context.CancelFunc
+	processes map[string]*os.Process
 
 	healthEvents chan health.HealthEvent
 	eventBus     *EventBus
+	delivery     *delivery.Controller
 
 	server   *grpc.Server
 	listener net.Listener
@@ -57,8 +60,10 @@ func New(cfg *config.Config, logger *slog.Logger) *Daemon {
 		logger:       logger,
 		sessions:     make(map[string]*session.Session),
 		monitors:     make(map[string]context.CancelFunc),
+		processes:    make(map[string]*os.Process),
 		healthEvents: make(chan health.HealthEvent, 64),
 		eventBus:     NewEventBus(),
+		delivery:     delivery.NewController(delivery.NewJudge(), delivery.DefaultControllerConfig()),
 	}
 }
 
@@ -158,12 +163,33 @@ func (d *Daemon) CreateSession(ctx context.Context, req CreateSessionRequest) (*
 		name = fmt.Sprintf("%s-%s", req.Agent, id[2:10])
 	}
 	sess := session.NewSession(id, name, req.Agent, req.CWD)
+	sess.SetTransport(prof.Transport)
+	sess.SetEnv(req.Env)
 
 	d.logger.Info("creating session",
 		"session_id", id,
 		"agent", req.Agent,
 		"cwd", req.CWD,
 	)
+
+	if prof.Transport == profile.TransportExec {
+		sess.SetState(session.StateIdle)
+		d.mu.Lock()
+		d.sessions[id] = sess
+		d.mu.Unlock()
+		d.persistSessions()
+		d.emitStateChanged(id, session.StateIdle, "session ready")
+		if prompt := req.Prompt; prompt != "" {
+			go func() {
+				if err := d.SendPrompt(d.ctx, id, prompt, true, false); err != nil {
+					sess.SetState(session.StateStuck)
+					d.emitStateChanged(id, session.StateStuck, "prompt delivery failed")
+					d.logger.Error("initial exec prompt failed", "session_id", id, "error", err)
+				}
+			}()
+		}
+		return sess, nil
+	}
 
 	// Determine tmux target
 	tmuxSession := d.cfg.Tmux.DefaultSession
@@ -203,6 +229,7 @@ func (d *Daemon) CreateSession(ctx context.Context, req CreateSessionRequest) (*
 	d.mu.Lock()
 	d.sessions[id] = sess
 	d.mu.Unlock()
+	d.persistSessions()
 
 	// Start agent and handshake in background
 	go d.startAgentLifecycle(id, sess, prof, req.Prompt)
@@ -238,6 +265,8 @@ func (d *Daemon) startAgentLifecycle(id string, sess *session.Session, prof prof
 	// Deliver initial prompt if provided
 	if prompt != "" {
 		if err := d.deliverPrompt(ctx, sess, prof, prompt, true); err != nil {
+			sess.SetState(session.StateStuck)
+			d.emitStateChanged(id, session.StateStuck, "prompt delivery failed")
 			d.logger.Error("initial prompt delivery failed", "session_id", id, "error", err)
 			d.emitEvent(Event{
 				SessionID: id,
@@ -285,6 +314,10 @@ func (d *Daemon) SendPrompt(ctx context.Context, sessionID, text string, confirm
 		return fmt.Errorf("unknown agent profile: %s", snap.Agent)
 	}
 
+	if prof.Transport == profile.TransportExec {
+		return d.sendExecPrompt(ctx, sess, prof, text, confirmDelivery, waitIdle)
+	}
+
 	// Wait for idle if requested and agent is working
 	if waitIdle && snap.State == session.StateWorking {
 		if err := d.tmux.WaitIdle(ctx, snap.TmuxTarget, prof.StuckTimeout, 2*time.Second); err != nil {
@@ -293,6 +326,8 @@ func (d *Daemon) SendPrompt(ctx context.Context, sessionID, text string, confirm
 	}
 
 	if err := d.deliverPrompt(ctx, sess, prof, text, confirmDelivery); err != nil {
+		sess.SetState(session.StateStuck)
+		d.emitStateChanged(sessionID, session.StateStuck, "prompt delivery failed")
 		return err
 	}
 
@@ -314,6 +349,17 @@ func (d *Daemon) Capture(ctx context.Context, sessionID string, includeHistory b
 		return "", fmt.Errorf("session not found: %s", sessionID)
 	}
 	snap := sess.Snapshot()
+
+	if snap.Transport == profile.TransportExec {
+		data, err := os.ReadFile(d.outputFilePath(sessionID))
+		if err != nil {
+			if os.IsNotExist(err) {
+				return "", nil
+			}
+			return "", err
+		}
+		return string(data), nil
+	}
 
 	if includeHistory {
 		return d.tmux.CapturePaneHistory(ctx, snap.TmuxTarget)
@@ -337,6 +383,10 @@ func (d *Daemon) Kill(ctx context.Context, sessionID string, graceful bool, time
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 	snap := sess.Snapshot()
+
+	if snap.Transport == profile.TransportExec {
+		return d.killExecSession(ctx, sess, graceful, timeout)
+	}
 
 	// Stop monitor
 	d.mu.Lock()
@@ -365,6 +415,7 @@ func (d *Daemon) Kill(ctx context.Context, sessionID string, graceful bool, time
 	d.hooks.Cleanup(sessionID)
 
 	sess.SetState(session.StateExited)
+	d.persistSessions()
 	d.emitStateChanged(sessionID, session.StateExited, "killed")
 
 	return nil
@@ -454,13 +505,16 @@ func (d *Daemon) setupTmuxPane(ctx context.Context, tmuxSession, window, cwd str
 // --- Persistence ---
 
 type persistedSession struct {
-	ID         string         `json:"id"`
-	Name       string         `json:"name"`
-	Agent      string         `json:"agent"`
-	CWD        string         `json:"cwd"`
-	TmuxTarget string         `json:"tmux_target"`
-	State      session.State  `json:"state"`
-	StartedAt  time.Time      `json:"started_at"`
+	ID               string        `json:"id"`
+	Name             string        `json:"name"`
+	Agent            string        `json:"agent"`
+	CWD              string        `json:"cwd"`
+	Transport        string        `json:"transport"`
+	TmuxTarget       string        `json:"tmux_target"`
+	CurrentCommand   string        `json:"current_command"`
+	BackendSessionID string        `json:"backend_session_id"`
+	State            session.State `json:"state"`
+	StartedAt        time.Time     `json:"started_at"`
 }
 
 func (d *Daemon) persistPath() string {
@@ -477,13 +531,16 @@ func (d *Daemon) persistSessions() {
 			continue
 		}
 		records = append(records, persistedSession{
-			ID:         snap.ID,
-			Name:       snap.Name,
-			Agent:      snap.Agent,
-			CWD:        snap.CWD,
-			TmuxTarget: snap.TmuxTarget,
-			State:      snap.State,
-			StartedAt:  snap.StartedAt,
+			ID:               snap.ID,
+			Name:             snap.Name,
+			Agent:            snap.Agent,
+			CWD:              snap.CWD,
+			Transport:        snap.Transport,
+			TmuxTarget:       snap.TmuxTarget,
+			CurrentCommand:   snap.CurrentCommand,
+			BackendSessionID: snap.BackendSessionID,
+			State:            snap.State,
+			StartedAt:        snap.StartedAt,
 		})
 	}
 	d.mu.RUnlock()
@@ -523,6 +580,37 @@ func (d *Daemon) restoreSessions() {
 	ctx := context.Background()
 	restored := 0
 	for _, rec := range records {
+		if _, ok := d.profiles[rec.Agent]; !ok {
+			d.logger.Info("restored session agent unknown, skipping",
+				"session_id", rec.ID, "agent", rec.Agent)
+			continue
+		}
+		if rec.Transport == "" {
+			rec.Transport = profile.TransportTmux
+			if prof, ok := d.profiles[rec.Agent]; ok && prof.Transport != "" {
+				rec.Transport = prof.Transport
+			}
+		}
+
+		if rec.Transport == profile.TransportExec {
+			sess := session.NewSession(rec.ID, rec.Name, rec.Agent, rec.CWD)
+			sess.SetTransport(rec.Transport)
+			sess.SetCurrentCommand(rec.CurrentCommand)
+			sess.SetBackendSessionID(rec.BackendSessionID)
+			sess.StartedAt = rec.StartedAt
+			if rec.State == session.StateWorking {
+				sess.SetState(session.StateIdle)
+			} else {
+				sess.SetState(rec.State)
+			}
+
+			d.mu.Lock()
+			d.sessions[rec.ID] = sess
+			d.mu.Unlock()
+			restored++
+			continue
+		}
+
 		// Check if the tmux pane still exists
 		if !d.tmux.PaneExists(ctx, rec.TmuxTarget) {
 			d.logger.Info("restored session pane gone, skipping",
@@ -531,7 +619,10 @@ func (d *Daemon) restoreSessions() {
 		}
 
 		sess := session.NewSession(rec.ID, rec.Name, rec.Agent, rec.CWD)
+		sess.SetTransport(rec.Transport)
 		sess.TmuxTarget = rec.TmuxTarget
+		sess.SetCurrentCommand(rec.CurrentCommand)
+		sess.SetBackendSessionID(rec.BackendSessionID)
 		sess.StartedAt = rec.StartedAt
 		sess.SetState(rec.State)
 

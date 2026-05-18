@@ -75,17 +75,20 @@ func (s *GRPCServer) Capture(ctx context.Context, req *arcmuxv1.CaptureRequest) 
 	snap := sess.Snapshot()
 
 	resp := &arcmuxv1.CaptureResponse{
-		Output: output,
-		State:  string(snap.State),
-		Cwd:    snap.CWD,
+		Output:         output,
+		CurrentCommand: snap.CurrentCommand,
+		State:          string(snap.State),
+		Cwd:            snap.CWD,
 	}
 
 	// Get pane info for current command
-	info, err := s.daemon.tmux.GetPaneInfo(ctx, snap.TmuxTarget)
-	if err == nil {
-		resp.CurrentCommand = info.CurrentCommand
-		if info.CWD != "" {
-			resp.Cwd = info.CWD
+	if snap.TmuxTarget != "" {
+		info, err := s.daemon.tmux.GetPaneInfo(ctx, snap.TmuxTarget)
+		if err == nil {
+			resp.CurrentCommand = info.CurrentCommand
+			if info.CWD != "" {
+				resp.Cwd = info.CWD
+			}
 		}
 	}
 

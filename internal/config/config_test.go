@@ -67,6 +67,35 @@ stuck_timeout_default = "10m"
 	}
 }
 
+func TestLoad_CustomAgentsRetainBuiltInExecProfiles(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+
+	content := `
+[agents.codex]
+name = "codex"
+start_command = "codex custom"
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if cfg.Agents["codex"].Transport != "tmux" {
+		t.Fatalf("codex transport = %q, want tmux", cfg.Agents["codex"].Transport)
+	}
+	if _, ok := cfg.Agents["codex_exec"]; !ok {
+		t.Fatal("expected codex_exec profile to remain available")
+	}
+	if _, ok := cfg.Agents["claude_exec"]; !ok {
+		t.Fatal("expected claude_exec profile to remain available")
+	}
+}
+
 func TestCaptureInterval(t *testing.T) {
 	cfg := &Config{Health: HealthConfig{CaptureInterval: "10s"}}
 	if d := cfg.CaptureInterval(); d != 10*time.Second {

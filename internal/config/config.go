@@ -11,16 +11,16 @@ import (
 
 // Config is the top-level configuration for the arcmux daemon.
 type Config struct {
-	Daemon  DaemonConfig             `toml:"daemon"`
-	Tmux    TmuxConfig               `toml:"tmux"`
-	Health  HealthConfig             `toml:"health"`
-	Hooks   HooksConfig              `toml:"hooks"`
-	Agents  map[string]profile.Profile `toml:"agents"`
+	Daemon DaemonConfig               `toml:"daemon"`
+	Tmux   TmuxConfig                 `toml:"tmux"`
+	Health HealthConfig               `toml:"health"`
+	Hooks  HooksConfig                `toml:"hooks"`
+	Agents map[string]profile.Profile `toml:"agents"`
 }
 
 type DaemonConfig struct {
-	Socket  string `toml:"socket"`
-	LogDir  string `toml:"log_dir"`
+	Socket string `toml:"socket"`
+	LogDir string `toml:"log_dir"`
 }
 
 type TmuxConfig struct {
@@ -55,6 +55,7 @@ func DefaultSocketPath() string {
 // Load reads configuration from the given path.
 // Returns defaults if the file does not exist.
 func Load(path string) (*Config, error) {
+	defaultAgents := profile.DefaultProfiles()
 	cfg := &Config{
 		Daemon: DaemonConfig{
 			Socket: DefaultSocketPath(),
@@ -74,7 +75,7 @@ func Load(path string) (*Config, error) {
 			HookOutputDir: "/tmp/arcmux-hooks",
 			AutoInstall:   true,
 		},
-		Agents: profile.DefaultProfiles(),
+		Agents: copyAgentProfiles(defaultAgents),
 	}
 
 	if path == "" {
@@ -93,6 +94,8 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
+	cfg.Agents = mergeAgentProfiles(defaultAgents, cfg.Agents)
+
 	return cfg, nil
 }
 
@@ -104,4 +107,34 @@ func DefaultAgentProfiles() map[string]profile.Profile {
 func defaultLogDir() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".config", "arcmux", "logs")
+}
+
+func mergeAgentProfiles(defaults, loaded map[string]profile.Profile) map[string]profile.Profile {
+	merged := make(map[string]profile.Profile, len(defaults)+len(loaded))
+	for name, prof := range defaults {
+		merged[name] = prof
+	}
+	for name, prof := range loaded {
+		if base, ok := defaults[name]; ok {
+			if prof.Transport == "" {
+				prof.Transport = base.Transport
+			}
+			if prof.ExecDriver == "" {
+				prof.ExecDriver = base.ExecDriver
+			}
+			if prof.HookType == "" {
+				prof.HookType = base.HookType
+			}
+		}
+		merged[name] = prof
+	}
+	return merged
+}
+
+func copyAgentProfiles(src map[string]profile.Profile) map[string]profile.Profile {
+	dst := make(map[string]profile.Profile, len(src))
+	for name, prof := range src {
+		dst[name] = prof
+	}
+	return dst
 }
