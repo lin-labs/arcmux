@@ -19,8 +19,9 @@ type Config struct {
 }
 
 type DaemonConfig struct {
-	Socket string `toml:"socket"`
-	LogDir string `toml:"log_dir"`
+	Socket   string `toml:"socket"`
+	LogDir   string `toml:"log_dir"`
+	HTTPAddr string `toml:"http_addr"`
 }
 
 type TmuxConfig struct {
@@ -58,8 +59,9 @@ func Load(path string) (*Config, error) {
 	defaultAgents := profile.DefaultProfiles()
 	cfg := &Config{
 		Daemon: DaemonConfig{
-			Socket: DefaultSocketPath(),
-			LogDir: defaultLogDir(),
+			Socket:   DefaultSocketPath(),
+			LogDir:   defaultLogDir(),
+			HTTPAddr: "127.0.0.1:7777",
 		},
 		Tmux: TmuxConfig{
 			SocketName:     "arcmux",

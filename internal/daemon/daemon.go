@@ -42,6 +42,7 @@ type Daemon struct {
 
 	server   *grpc.Server
 	listener net.Listener
+	httpSrv  *HTTPServer
 	ctx      context.Context
 	cancel   context.CancelFunc
 }
@@ -116,6 +117,17 @@ func (d *Daemon) Start(ctx context.Context) error {
 		}
 	}()
 
+	// Start HTTP server if configured
+	if addr := d.cfg.Daemon.HTTPAddr; addr != "" {
+		d.httpSrv = NewHTTPServer(d, addr)
+		go func() {
+			if err := d.httpSrv.Serve(); err != nil {
+				d.logger.Error("http serve error", "error", err)
+			}
+		}()
+		d.logger.Info("http server listening", "addr", addr)
+	}
+
 	d.logger.Info("daemon started",
 		"socket", socketPath,
 		"tmux_socket", d.cfg.Tmux.SocketName,
@@ -141,6 +153,13 @@ func (d *Daemon) Stop() {
 	// Stop gRPC server
 	if d.server != nil {
 		d.server.GracefulStop()
+	}
+
+	// Stop HTTP server
+	if d.httpSrv != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = d.httpSrv.Shutdown(shutdownCtx)
+		cancel()
 	}
 
 	if d.cancel != nil {
