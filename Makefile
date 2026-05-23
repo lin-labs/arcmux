@@ -16,7 +16,7 @@ build:
 
 install: build
 	mkdir -p $(INSTALL_DIR)
-	cp bin/$(BINARY) $(INSTALL_DIR)/$(BINARY)
+	install -m 0755 bin/$(BINARY) $(BIN)
 
 proto:
 	protoc \
