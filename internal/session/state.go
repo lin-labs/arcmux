@@ -39,6 +39,7 @@ type Session struct {
 	IdleSince        *time.Time
 	NudgeCount       int
 	Env              map[string]string
+	AutoClose        bool // for exec transport: transition to StateExited on subprocess exit
 }
 
 // NewSession creates a session in starting state.
@@ -127,6 +128,14 @@ func (s *Session) SetHealth(health string) {
 	s.Health = health
 }
 
+// SetAutoClose records whether the session should transition to StateExited
+// when its subprocess (exec transport) finishes, rather than parking at idle.
+func (s *Session) SetAutoClose(v bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.AutoClose = v
+}
+
 // SetEnv replaces the session environment snapshot.
 func (s *Session) SetEnv(env map[string]string) {
 	s.mu.Lock()
@@ -160,6 +169,7 @@ type Snapshot struct {
 	LastActivityAt   time.Time
 	IdleSince        *time.Time
 	NudgeCount       int
+	AutoClose        bool
 }
 
 func (s *Session) Snapshot() Snapshot {
@@ -182,6 +192,7 @@ func (s *Session) Snapshot() Snapshot {
 		LastActivityAt:   s.LastActivityAt,
 		IdleSince:        s.IdleSince,
 		NudgeCount:       s.NudgeCount,
+		AutoClose:        s.AutoClose,
 	}
 }
 

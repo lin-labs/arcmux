@@ -176,6 +176,14 @@ func (d *Daemon) CreateSession(ctx context.Context, req CreateSessionRequest) (*
 		return nil, fmt.Errorf("unknown agent profile: %s", req.Agent)
 	}
 
+	// Default CWD to ~/Projects so agent sessions land in a sensible place
+	// rather than inheriting the daemon's launch directory.
+	if req.CWD == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			req.CWD = filepath.Join(home, "Projects")
+		}
+	}
+
 	id := generateSessionID()
 	name := req.Name
 	if name == "" {
@@ -184,6 +192,7 @@ func (d *Daemon) CreateSession(ctx context.Context, req CreateSessionRequest) (*
 	sess := session.NewSession(id, name, req.Agent, req.CWD)
 	sess.SetTransport(prof.Transport)
 	sess.SetEnv(req.Env)
+	sess.SetAutoClose(req.AutoClose)
 
 	d.logger.Info("creating session",
 		"session_id", id,
@@ -694,6 +703,7 @@ type CreateSessionRequest struct {
 	TmuxSession string
 	TmuxWindow  string
 	Env         map[string]string
+	AutoClose   bool // exec transport only: transition to StateExited on subprocess exit
 }
 
 func generateSessionID() string {

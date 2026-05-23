@@ -19,10 +19,10 @@ install: build
 	install -m 0755 bin/$(BINARY) $(BIN)
 
 proto:
-	protoc \
+	protoc -I proto \
 		--go_out=gen --go_opt=paths=source_relative \
 		--go-grpc_out=gen --go-grpc_opt=paths=source_relative \
-		proto/arcmux/v1/arcmux.proto
+		arcmux/v1/arcmux.proto
 
 test:
 	go test ./...

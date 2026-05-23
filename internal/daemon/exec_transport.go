@@ -160,10 +160,17 @@ func (d *Daemon) waitExecPrompt(runCtx context.Context, sess *session.Session, r
 		return
 	}
 
+	// One-shot exec sessions (AutoClose=true) close out instead of parking at
+	// idle, so persistSessions drops them rather than keeping a dead handle.
+	terminalState := session.StateIdle
+	if snap.AutoClose {
+		terminalState = session.StateExited
+	}
+
 	if waitErr != nil {
-		sess.SetState(session.StateIdle)
+		sess.SetState(terminalState)
 		d.persistSessions()
-		d.emitStateChanged(sessionID, session.StateIdle, "prompt failed")
+		d.emitStateChanged(sessionID, terminalState, "prompt failed")
 		d.emitEvent(Event{
 			SessionID: sessionID,
 			Type:      "prompt_failed",
@@ -173,9 +180,9 @@ func (d *Daemon) waitExecPrompt(runCtx context.Context, sess *session.Session, r
 		return
 	}
 
-	sess.SetState(session.StateIdle)
+	sess.SetState(terminalState)
 	d.persistSessions()
-	d.emitStateChanged(sessionID, session.StateIdle, "prompt completed")
+	d.emitStateChanged(sessionID, terminalState, "prompt completed")
 	d.emitEvent(Event{
 		SessionID: sessionID,
 		Type:      "prompt_completed",

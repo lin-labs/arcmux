@@ -33,6 +33,7 @@ func (s *GRPCServer) CreateSession(ctx context.Context, req *arcmuxv1.CreateSess
 		TmuxSession: req.TmuxSession,
 		TmuxWindow:  req.TmuxWindow,
 		Env:         req.Env,
+		AutoClose:   req.AutoClose,
 	})
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "create session: %v", err)

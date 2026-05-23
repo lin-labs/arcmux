@@ -22,12 +22,17 @@ service AgentRuntime {
 
 message CreateSessionRequest {
   string agent = 1;           // profile name: "codex", "claude"
-  string cwd = 2;             // working directory for the agent
+  string cwd = 2;             // working directory for the agent; empty defaults to ~/Projects
   string prompt = 3;          // initial prompt to send after handshake
   string session_name = 4;    // optional human-readable name
   string tmux_session = 5;    // optional: override default tmux session
   string tmux_window = 6;     // optional: target window name
   map<string, string> env = 7; // extra env vars for the agent process
+  // For exec-transport sessions: when true, transition to StateExited (rather
+  // than StateIdle) after the subprocess exits, so the persist layer drops the
+  // entry instead of keeping it as a resumable-but-dead handle. Ignored for
+  // tmux transport.
+  bool auto_close = 8;
 }
 
 message CreateSessionResponse {

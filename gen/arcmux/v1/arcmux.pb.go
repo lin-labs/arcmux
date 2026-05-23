@@ -22,14 +22,19 @@ const (
 )
 
 type CreateSessionRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Agent         string                 `protobuf:"bytes,1,opt,name=agent,proto3" json:"agent,omitempty"`                                                                       // profile name: "codex", "claude"
-	Cwd           string                 `protobuf:"bytes,2,opt,name=cwd,proto3" json:"cwd,omitempty"`                                                                           // working directory for the agent
-	Prompt        string                 `protobuf:"bytes,3,opt,name=prompt,proto3" json:"prompt,omitempty"`                                                                     // initial prompt to send after handshake
-	SessionName   string                 `protobuf:"bytes,4,opt,name=session_name,json=sessionName,proto3" json:"session_name,omitempty"`                                        // optional human-readable name
-	TmuxSession   string                 `protobuf:"bytes,5,opt,name=tmux_session,json=tmuxSession,proto3" json:"tmux_session,omitempty"`                                        // optional: override default tmux session
-	TmuxWindow    string                 `protobuf:"bytes,6,opt,name=tmux_window,json=tmuxWindow,proto3" json:"tmux_window,omitempty"`                                           // optional: target window name
-	Env           map[string]string      `protobuf:"bytes,7,rep,name=env,proto3" json:"env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // extra env vars for the agent process
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Agent       string                 `protobuf:"bytes,1,opt,name=agent,proto3" json:"agent,omitempty"`                                                                       // profile name: "codex", "claude"
+	Cwd         string                 `protobuf:"bytes,2,opt,name=cwd,proto3" json:"cwd,omitempty"`                                                                           // working directory for the agent; empty defaults to ~/Projects
+	Prompt      string                 `protobuf:"bytes,3,opt,name=prompt,proto3" json:"prompt,omitempty"`                                                                     // initial prompt to send after handshake
+	SessionName string                 `protobuf:"bytes,4,opt,name=session_name,json=sessionName,proto3" json:"session_name,omitempty"`                                        // optional human-readable name
+	TmuxSession string                 `protobuf:"bytes,5,opt,name=tmux_session,json=tmuxSession,proto3" json:"tmux_session,omitempty"`                                        // optional: override default tmux session
+	TmuxWindow  string                 `protobuf:"bytes,6,opt,name=tmux_window,json=tmuxWindow,proto3" json:"tmux_window,omitempty"`                                           // optional: target window name
+	Env         map[string]string      `protobuf:"bytes,7,rep,name=env,proto3" json:"env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // extra env vars for the agent process
+	// For exec-transport sessions: when true, transition to StateExited (rather
+	// than StateIdle) after the subprocess exits, so the persist layer drops the
+	// entry instead of keeping it as a resumable-but-dead handle. Ignored for
+	// tmux transport.
+	AutoClose     bool `protobuf:"varint,8,opt,name=auto_close,json=autoClose,proto3" json:"auto_close,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -111,6 +116,13 @@ func (x *CreateSessionRequest) GetEnv() map[string]string {
 		return x.Env
 	}
 	return nil
+}
+
+func (x *CreateSessionRequest) GetAutoClose() bool {
+	if x != nil {
+		return x.AutoClose
+	}
+	return false
 }
 
 type CreateSessionResponse struct {
@@ -1177,7 +1189,7 @@ var File_arcmux_v1_arcmux_proto protoreflect.FileDescriptor
 
 const file_arcmux_v1_arcmux_proto_rawDesc = "" +
 	"\n" +
-	"\x16arcmux/v1/arcmux.proto\x12\tarcmux.v1\"\xb1\x02\n" +
+	"\x16arcmux/v1/arcmux.proto\x12\tarcmux.v1\"\xd0\x02\n" +
 	"\x14CreateSessionRequest\x12\x14\n" +
 	"\x05agent\x18\x01 \x01(\tR\x05agent\x12\x10\n" +
 	"\x03cwd\x18\x02 \x01(\tR\x03cwd\x12\x16\n" +
@@ -1186,7 +1198,9 @@ const file_arcmux_v1_arcmux_proto_rawDesc = "" +
 	"\ftmux_session\x18\x05 \x01(\tR\vtmuxSession\x12\x1f\n" +
 	"\vtmux_window\x18\x06 \x01(\tR\n" +
 	"tmuxWindow\x12:\n" +
-	"\x03env\x18\a \x03(\v2(.arcmux.v1.CreateSessionRequest.EnvEntryR\x03env\x1a6\n" +
+	"\x03env\x18\a \x03(\v2(.arcmux.v1.CreateSessionRequest.EnvEntryR\x03env\x12\x1d\n" +
+	"\n" +
+	"auto_close\x18\b \x01(\bR\tautoClose\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x7f\n" +
