@@ -34,9 +34,18 @@ deps:
 	go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
 	go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
 
+# If a `<service>.service` user unit exists, defer process control to systemd
+# so the Makefile doesn't fight Restart=always. Detected at recipe time so a
+# unit added later just works without re-editing the Makefile.
+HAS_SYSTEMD_UNIT = systemctl --user list-unit-files $(BINARY).service 2>/dev/null \
+	| grep -q '^$(BINARY)\.service'
+
 start:
 	@mkdir -p $(LOG_DIR)
-	@if pgrep -x $(BINARY) >/dev/null; then \
+	@if $(HAS_SYSTEMD_UNIT); then \
+		systemctl --user start $(BINARY); \
+		echo "started $(BINARY) via systemd"; \
+	elif pgrep -x $(BINARY) >/dev/null; then \
 		echo "$(BINARY) already running (pids $$(pgrep -x $(BINARY) | tr '\n' ' '))"; \
 	else \
 		test -x $(BIN) || { echo "missing $(BIN); run 'make install' first"; exit 1; }; \
@@ -46,7 +55,10 @@ start:
 	fi
 
 stop:
-	@if pgrep -x $(BINARY) >/dev/null; then \
+	@if $(HAS_SYSTEMD_UNIT); then \
+		systemctl --user stop $(BINARY); \
+		echo "stopped $(BINARY) via systemd"; \
+	elif pgrep -x $(BINARY) >/dev/null; then \
 		pkill -TERM -x $(BINARY); \
 		for i in 1 2 3 4 5; do \
 			pgrep -x $(BINARY) >/dev/null || break; \
@@ -61,7 +73,16 @@ stop:
 		echo "$(BINARY) not running"; \
 	fi
 
-restart: stop start
+# When systemd manages the service, use `restart` directly — one transaction,
+# avoids the stop→start race where another supervisor (or us) can squeeze a
+# duplicate daemon in between.
+restart:
+	@if $(HAS_SYSTEMD_UNIT); then \
+		systemctl --user restart $(BINARY); \
+		echo "restarted $(BINARY) via systemd"; \
+	else \
+		$(MAKE) --no-print-directory stop start; \
+	fi
 
 status:
 	@pids="$$(pgrep -x $(BINARY))"; \
