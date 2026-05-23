@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 
 	"github.com/lin-labs/arcmux/internal/profile"
@@ -100,6 +102,11 @@ func (h *HTTPServer) handleSessionNew(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cwd := r.URL.Query().Get("cwd")
+	if cwd == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			cwd = filepath.Join(home, "Projects")
+		}
+	}
 
 	tmuxSession := h.daemon.cfg.Tmux.DefaultSession
 	target, err := h.daemon.setupTmuxPane(ctx, tmuxSession, name, cwd)
