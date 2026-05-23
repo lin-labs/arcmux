@@ -111,4 +111,6 @@ release: install restart
 # Run from your workstation. Override LABS_HOST / LABS_REPO as needed.
 deploy:
 	@echo "deploying to $(LABS_HOST):$(LABS_REPO)"
-	@ssh $(LABS_HOST) 'set -e; cd $(LABS_REPO) && git pull --ff-only && make release'
+	@ssh $(LABS_HOST) 'set -e; \
+		export PATH=/usr/local/go/bin:$$HOME/.local/bin:$$PATH; \
+		cd $(LABS_REPO) && git pull --ff-only && make release'
