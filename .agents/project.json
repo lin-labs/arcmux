@@ -1,0 +1,5 @@
+{
+  "obs_project": "arcmux",
+  "primary_stack": "go",
+  "validate_profile": ".agents/validate.md"
+}
