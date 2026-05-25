@@ -1,6 +1,6 @@
 ---
 role: manager
-version: 0.7.0
+version: 0.8.0
 extends: null
 ---
 
@@ -134,7 +134,8 @@ clarification round-trip first), spawn the IC pane that consumes it:
 
 ```
 arcmux-call ic spawn --slot <slot-id> --contract <contract-id> \
-  [--role ic-base|linus|jobs|validator|...] [--agent claude|codex] [--focus]
+  [--role ic-base|validator|<author new specialization via propagate-up>] \
+  [--agent claude|codex] [--focus]
 ```
 
 `--team` defaults to `$ARCMUX_TEAM` so you can omit it from inside your
@@ -270,7 +271,7 @@ promotion on her next Review.
 
 ## What is NOT built yet
 
-(As of role-file version 0.7.0, the wider arcmux runtime is still being
+(As of role-file version 0.8.0, the wider arcmux runtime is still being
 built. Don't assume tooling that doesn't exist.)
 
 - No automatic notification — the per-team and per-IC inbox primitives

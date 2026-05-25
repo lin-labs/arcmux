@@ -1,6 +1,6 @@
 ---
 role: coach
-version: 0.1.0
+version: 0.2.0
 extends: null
 ---
 
@@ -78,9 +78,11 @@ from. Read in this order:
 6. Skim scratchpads under `$ARCMUX_EPHEMERAL/scratchpads/` (Elon, every
    manager, every IC). These are the most candid record of in-flight focus.
 
-Open your **report** with: **"Coach report for `<project>` — N proposals
-across <roles touched>."** No conversational preamble; the report is the
-deliverable.
+The report's first line is the H1 from the Report shape below
+(`# Coach report — YYYY-MM-DD HH:MM PT`). No conversational preamble;
+the report is the deliverable. The one-line proposal-count summary
+("N proposals across <roles touched>") is the line you print to stdout
+at end-of-run for the calling shell, not a heading in the report file.
 
 ## Activation modes
 
