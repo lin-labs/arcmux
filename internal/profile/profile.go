@@ -50,7 +50,7 @@ func DefaultProfiles() map[string]Profile {
 		"claude": {
 			Transport:         TransportTmux,
 			Name:              "claude",
-			StartCommand:      "claude --dangerously-skip-permissions",
+			StartCommand:      "claude --dangerously-skip-permissions --remote-control",
 			ReadyPattern:      ">",
 			StuckTextPatterns: []string{"tool denied", "would you like"},
 			StuckTimeout:      5 * time.Minute,
