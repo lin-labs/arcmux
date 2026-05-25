@@ -373,3 +373,68 @@ func TestDropICInboxRejectsEmpty(t *testing.T) {
 		t.Error("DropICInbox(empty): want error, got nil")
 	}
 }
+
+func TestInboxDepth(t *testing.T) {
+	db := openTestDB(t)
+
+	// Elon: empty → 0; push two → 2; ack one → 1.
+	if n, err := db.DepthElonInbox(); err != nil || n != 0 {
+		t.Fatalf("empty Elon depth: n=%d err=%v", n, err)
+	}
+	for i, id := range []string{"e1", "e2"} {
+		if err := db.PushElonInbox(InboxMsg{ID: id, Verb: "add", ReceivedAt: time.Now().Add(time.Duration(i) * time.Millisecond)}); err != nil {
+			t.Fatalf("push %s: %v", id, err)
+		}
+	}
+	if n, _ := db.DepthElonInbox(); n != 2 {
+		t.Errorf("after 2 push, Elon depth = %d, want 2", n)
+	}
+	_ = db.AckElonInbox("e1")
+	if n, _ := db.DepthElonInbox(); n != 1 {
+		t.Errorf("after ack, Elon depth = %d, want 1", n)
+	}
+
+	// Manager: missing sub-bucket → err; after Ensure → 0; push N → N.
+	if _, err := db.DepthManagerInbox("ghost"); !errors.Is(err, ErrManagerInboxMissing) {
+		t.Errorf("DepthManagerInbox(unknown): err=%v, want ErrManagerInboxMissing", err)
+	}
+	if err := db.EnsureManagerInbox("alpha"); err != nil {
+		t.Fatalf("ensure alpha: %v", err)
+	}
+	if n, err := db.DepthManagerInbox("alpha"); err != nil || n != 0 {
+		t.Fatalf("alpha empty depth: n=%d err=%v", n, err)
+	}
+	for i, id := range []string{"a1", "a2", "a3"} {
+		if err := db.PushManagerInbox("alpha", InboxMsg{ID: id, Verb: "add", ReceivedAt: time.Now().Add(time.Duration(i) * time.Millisecond)}); err != nil {
+			t.Fatalf("push alpha %s: %v", id, err)
+		}
+	}
+	if n, _ := db.DepthManagerInbox("alpha"); n != 3 {
+		t.Errorf("alpha after 3 push: depth = %d, want 3", n)
+	}
+
+	// IC: missing → err; after Ensure → 0; push → 1; drop → err.
+	if _, err := db.DepthICInbox("ghost-slot"); !errors.Is(err, ErrICInboxMissing) {
+		t.Errorf("DepthICInbox(unknown): err=%v, want ErrICInboxMissing", err)
+	}
+	_ = db.EnsureICInbox("worker-1")
+	if n, _ := db.DepthICInbox("worker-1"); n != 0 {
+		t.Errorf("worker-1 empty depth: %d, want 0", n)
+	}
+	_ = db.PushICInbox("worker-1", InboxMsg{ID: "w1", Verb: "ack"})
+	if n, _ := db.DepthICInbox("worker-1"); n != 1 {
+		t.Errorf("worker-1 after push depth: %d, want 1", n)
+	}
+	_ = db.DropICInbox("worker-1")
+	if _, err := db.DepthICInbox("worker-1"); !errors.Is(err, ErrICInboxMissing) {
+		t.Errorf("after drop, DepthICInbox: err=%v, want ErrICInboxMissing", err)
+	}
+
+	// Empty-arg guards.
+	if _, err := db.DepthManagerInbox(""); err == nil {
+		t.Error("DepthManagerInbox(empty): want error, got nil")
+	}
+	if _, err := db.DepthICInbox(""); err == nil {
+		t.Error("DepthICInbox(empty): want error, got nil")
+	}
+}

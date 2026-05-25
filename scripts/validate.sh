@@ -78,6 +78,10 @@ run_step "smoke: arcmux-call dispatch"   bash -c './bin/arcmux-call 2>&1 | grep 
 run_step "smoke: ic dispatcher"          bash -c './bin/arcmux-call ic 2>&1 | grep -qE "spawn|dissolve"'
 run_step "smoke: inbox dispatcher"       bash -c './bin/arcmux-call inbox 2>&1 | grep -qE "push|peek|ack"'
 run_step "smoke: contract dispatcher"    bash -c './bin/arcmux-call contract 2>&1 | grep -qE "create|transition|deps"'
+# pulse smoke: invocation against a never-launched project must fail loud
+# with a recognizable error (no state.bolt) — proves the subcommand wires
+# Open() correctly and the flag parsing is intact.
+run_step "smoke: pulse rejects unstarted" bash -c 'out=$(./bin/arcmux pulse --project nostart --vault-root /tmp/__novault__ --data-root /tmp/__nodata__ --once 2>&1 || true); echo "$out" | grep -qE "not started|state.bolt|VaultRoot|no such file|invalid project"'
 
 # Compose JSON report
 OVERALL="pass"

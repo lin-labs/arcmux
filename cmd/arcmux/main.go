@@ -32,6 +32,8 @@ func run(args []string) error {
 		return cmdStart(args[1:])
 	case "manager":
 		return manager.CmdManager(context.Background(), args[1:], os.Stdout)
+	case "pulse":
+		return cmdPulse(args[1:])
 	case "version":
 		fmt.Printf("arcmux %s\n", version)
 		return nil
@@ -89,6 +91,7 @@ func printUsage() {
 Usage:
   arcmux start [--config path]                            Start the daemon (default command)
   arcmux manager <agent> <project> [--mission "..."]      Launch three-tier manager mode (Elon+Manager+ICs in cmux)
+  arcmux pulse --project <slug> [--interval 30s] [--once] Drive the per-project wake loop
   arcmux version                                          Print version
   arcmux help                                             Show this help
 

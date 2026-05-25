@@ -136,6 +136,67 @@ func (d *DB) AckManagerInbox(team, id string) error {
 	})
 }
 
+// DepthElonInbox returns the number of unacked messages in Elon's inbox.
+// Constant-time-ish (one cursor walk); the pulser calls this every tick so
+// keeping it allocation-light matters.
+func (d *DB) DepthElonInbox() (int, error) {
+	return d.depth(BucketInboxElon)
+}
+
+// DepthManagerInbox returns the number of unacked messages in a team's
+// manager inbox. Returns ErrManagerInboxMissing if the sub-bucket has not
+// been created (caller decides whether absent == 0 or absent == error).
+func (d *DB) DepthManagerInbox(team string) (int, error) {
+	if team == "" {
+		return 0, fmt.Errorf("DepthManagerInbox: team required")
+	}
+	var n int
+	err := d.b.View(func(tx *bolt.Tx) error {
+		b, err := managerBucket(tx, team)
+		if err != nil {
+			return err
+		}
+		s := b.Stats()
+		n = s.KeyN
+		return nil
+	})
+	return n, err
+}
+
+// DepthICInbox returns the number of unacked messages in a slot's per-IC
+// inbox. Returns ErrICInboxMissing if the sub-bucket has not been created.
+func (d *DB) DepthICInbox(slot string) (int, error) {
+	if slot == "" {
+		return 0, fmt.Errorf("DepthICInbox: slot required")
+	}
+	var n int
+	err := d.b.View(func(tx *bolt.Tx) error {
+		b, err := icInboxBucket(tx, slot)
+		if err != nil {
+			return err
+		}
+		s := b.Stats()
+		n = s.KeyN
+		return nil
+	})
+	return n, err
+}
+
+// depth returns the count of keys in a top-level inbox bucket.
+func (d *DB) depth(bucket string) (int, error) {
+	var n int
+	err := d.b.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(bucket))
+		if b == nil {
+			return fmt.Errorf("bucket %s missing", bucket)
+		}
+		s := b.Stats()
+		n = s.KeyN
+		return nil
+	})
+	return n, err
+}
+
 // managerBucket resolves the per-team nested inbox bucket within the
 // inbox-managers parent. Returns ErrManagerInboxMissing if either the parent
 // or the sub-bucket is absent.

@@ -176,7 +176,20 @@ func Start(ctx context.Context, o Options) (*Project, error) {
 	}
 	p.ElonPane = panes[0]
 
-	// 8. Audit the start. Direct AppendAudit (not arcmux-call subprocess)
+	// 8. Persist project meta so post-launch substrate (pulse, future
+	// heartbeats) can locate Elon without grepping the audit log. The Elon
+	// pane is project-singleton — managers + ICs are looked up via teams /
+	// slots, but Elon lives outside those tables.
+	if err := db.PutProjectMeta(store.ProjectMeta{
+		ElonPaneRef:      p.ElonPane.Ref,
+		ElonSurfaceRef:   p.ElonPane.SelectedSurf,
+		ElonWorkspaceRef: ws.Ref,
+	}); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("persist project meta: %w", err)
+	}
+
+	// 9. Audit the start. Direct AppendAudit (not arcmux-call subprocess)
 	// because the launcher already holds the bbolt write lock — shelling out
 	// would block on bbolt's process-wide lock. Out-of-process callers
 	// (spawned panes) use arcmux-call audit instead.
