@@ -89,14 +89,19 @@ func printUsage() {
 	fmt.Print(`arcmux — Agent Tmux Runtime Service
 
 Usage:
-  arcmux start [--config path]                            Start the daemon (default command)
+  arcmux start [--config path]                            Start the daemon (default command — also runs the pulse supervisor)
   arcmux manager <agent> <project> [--mission "..."]      Launch three-tier manager mode (Elon+Manager+ICs in cmux)
-  arcmux pulse --project <slug> [--interval 30s] [--once] Drive the per-project wake loop
+  arcmux pulse --project <slug> [--interval 10s] [--once] Debug-only: pulse one project (the daemon does this for all projects)
   arcmux version                                          Print version
   arcmux help                                             Show this help
 
 The daemon listens on a Unix socket for gRPC requests.
 Orchestrators connect to manage coding agent sessions.
+
+Pulse runtime: the daemon auto-discovers every project under
+<pulse.data_root>/arcmux/*/state.bolt and runs one pulser per project.
+Cadence defaults (configurable in ~/.config/arcmux/config.toml):
+  elon=30s  manager=10s  ic=5s   tick=10s   rescan=60s
 
 Configuration: ~/.config/arcmux/config.toml
 Socket: ~/.config/arcmux/arcmux.sock (configurable)

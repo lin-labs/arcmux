@@ -116,3 +116,115 @@ func TestStuckTimeout(t *testing.T) {
 		t.Errorf("StuckTimeout = %v, want 10m", d)
 	}
 }
+
+// TestPulse_Defaults verifies the canonical lab-service cadences ship as
+// defaults when no [pulse] table is provided.
+func TestPulse_Defaults(t *testing.T) {
+	cfg, err := Load("/nonexistent/path/config.toml")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Pulse.Enabled {
+		t.Error("Pulse.Enabled should default to true")
+	}
+	pp, err := cfg.Pulse.ParsePulse()
+	if err != nil {
+		t.Fatalf("ParsePulse: %v", err)
+	}
+	if pp.Cadence.Elon != 30*time.Second {
+		t.Errorf("Elon cadence = %v, want 30s", pp.Cadence.Elon)
+	}
+	if pp.Cadence.Manager != 10*time.Second {
+		t.Errorf("Manager cadence = %v, want 10s", pp.Cadence.Manager)
+	}
+	if pp.Cadence.IC != 5*time.Second {
+		t.Errorf("IC cadence = %v, want 5s", pp.Cadence.IC)
+	}
+	if pp.Interval != 10*time.Second {
+		t.Errorf("Interval = %v, want 10s", pp.Interval)
+	}
+	if pp.DiscoveryInterval != 60*time.Second {
+		t.Errorf("DiscoveryInterval = %v, want 60s", pp.DiscoveryInterval)
+	}
+	if pp.DataRoot == "" {
+		t.Error("DataRoot default empty; expected ~/data")
+	}
+}
+
+// TestPulse_PartialOverride proves that a [pulse] table specifying just
+// one knob inherits the rest from defaults instead of silently zeroing.
+func TestPulse_PartialOverride(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.toml")
+	content := `
+[pulse]
+enabled = true
+[pulse.cadence]
+elon = "1m"
+`
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	pp, err := cfg.Pulse.ParsePulse()
+	if err != nil {
+		t.Fatalf("ParsePulse: %v", err)
+	}
+	if pp.Cadence.Elon != time.Minute {
+		t.Errorf("Elon = %v, want 1m (user override)", pp.Cadence.Elon)
+	}
+	if pp.Cadence.Manager != 10*time.Second {
+		t.Errorf("Manager = %v, want 10s (default carried)", pp.Cadence.Manager)
+	}
+	if pp.Cadence.IC != 5*time.Second {
+		t.Errorf("IC = %v, want 5s (default carried)", pp.Cadence.IC)
+	}
+	if pp.Interval != 10*time.Second {
+		t.Errorf("Interval = %v, want 10s (default carried)", pp.Interval)
+	}
+}
+
+// TestPulse_BadDurationFailsLoud — a misconfigured cadence should error at
+// parse time, not at runtime.
+func TestPulse_BadDurationFailsLoud(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(p, []byte("[pulse.cadence]\nelon = \"twenty seconds\"\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, err := cfg.Pulse.ParsePulse(); err == nil {
+		t.Fatal("ParsePulse accepted invalid duration; want error")
+	}
+}
+
+// TestPulse_DisableLeavesOtherFieldsParseable: setting enabled=false should
+// not leave durations empty (would otherwise blow up ParsePulse callers
+// who still want to introspect the cadences).
+func TestPulse_DisableLeavesOtherFieldsParseable(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(p, []byte("[pulse]\nenabled = false\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	pp, err := cfg.Pulse.ParsePulse()
+	if err != nil {
+		t.Fatalf("ParsePulse with enabled=false: %v", err)
+	}
+	if pp.Enabled {
+		t.Error("Pulse.Enabled override lost")
+	}
+	if pp.Cadence.Elon != 30*time.Second {
+		t.Errorf("Elon cadence dropped on disable: %v", pp.Cadence.Elon)
+	}
+}

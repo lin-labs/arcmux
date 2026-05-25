@@ -16,13 +16,24 @@ import (
 	"github.com/lin-labs/arcmux/internal/manager/pulse"
 )
 
-// cmdPulse runs the per-project wake loop. One process per project so the
-// bbolt write lock (held by store.Open) stays project-local.
+// cmdPulse is a DEBUG SHIM. The canonical pulse runtime now lives inside
+// the arcmux daemon (`arcmux start` → internal/daemon.PulseSupervisor)
+// which auto-discovers every project under `<data_root>/arcmux/*/state.bolt`
+// and runs one Pulser per project with cadences from
+// `[pulse]` in `~/.config/arcmux/config.toml`.
 //
-// Modes:
+// This subcommand is kept for two narrow uses:
 //
-//	--once   run one Tick and exit (smoke + cron-style driver)
-//	default  run forever, ticking every --interval, until SIGINT/SIGTERM
+//	--once   run one Tick against a specific project and print the report
+//	         (great for cron-style drivers, smoke tests, debugging).
+//	default  run a per-project loop in the foreground; useful when the
+//	         daemon is intentionally stopped and you want a one-off
+//	         pulse against a single project (e.g. local debugging).
+//
+// IMPORTANT: while the arcmux daemon is running, it already holds the
+// state.bolt lock for this project. Invoking `arcmux pulse --project <slug>`
+// at the same time will block on the file lock. Stop the daemon first
+// (or use `--once` and rely on the daemon's own audit log) when debugging.
 func cmdPulse(args []string) error {
 	fs := flag.NewFlagSet("pulse", flag.ContinueOnError)
 	project := fs.String("project", os.Getenv("ARCMUX_PROJECT"), "project slug (defaults to $ARCMUX_PROJECT)")

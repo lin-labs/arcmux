@@ -16,6 +16,7 @@ import (
 	"github.com/lin-labs/arcmux/internal/delivery"
 	"github.com/lin-labs/arcmux/internal/health"
 	"github.com/lin-labs/arcmux/internal/hooks"
+	"github.com/lin-labs/arcmux/internal/manager/cmuxcli"
 	"github.com/lin-labs/arcmux/internal/profile"
 	"github.com/lin-labs/arcmux/internal/session"
 	"github.com/lin-labs/arcmux/internal/tmux"
@@ -45,6 +46,8 @@ type Daemon struct {
 	httpSrv  *HTTPServer
 	ctx      context.Context
 	cancel   context.CancelFunc
+
+	pulse *PulseSupervisor
 }
 
 // New creates a new daemon instance.
@@ -110,6 +113,23 @@ func (d *Daemon) Start(ctx context.Context) error {
 	go d.watcher.Run(d.ctx)
 	go d.persistLoop()
 
+	// Pulse supervisor: one Pulser per discovered project under
+	// <Pulse.DataRoot>/arcmux/*/state.bolt. Disabled? Skip silently.
+	pcfg, err := d.cfg.Pulse.ParsePulse()
+	if err != nil {
+		return fmt.Errorf("pulse config: %w", err)
+	}
+	if pcfg.Enabled {
+		d.pulse = NewPulseSupervisor(pcfg, cmuxcli.New(), d.logger)
+		go func() {
+			if err := d.pulse.Run(d.ctx); err != nil && err != context.Canceled {
+				d.logger.Error("pulse supervisor exited", "error", err)
+			}
+		}()
+	} else {
+		d.logger.Info("pulse supervisor disabled (config.pulse.enabled=false)")
+	}
+
 	// Start gRPC server (blocking in goroutine)
 	go func() {
 		if err := d.server.Serve(listener); err != nil {
@@ -164,6 +184,17 @@ func (d *Daemon) Stop() {
 
 	if d.cancel != nil {
 		d.cancel()
+	}
+
+	// Wait for pulse supervisor to drain so every bolt handle is closed
+	// before the daemon process exits — leftover locks would block the
+	// next `arcmux start`.
+	if d.pulse != nil {
+		select {
+		case <-d.pulse.Done():
+		case <-time.After(5 * time.Second):
+			d.logger.Warn("pulse supervisor did not drain within 5s; forcing exit")
+		}
 	}
 
 	d.eventBus.Close()

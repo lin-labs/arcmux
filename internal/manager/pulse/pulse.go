@@ -44,14 +44,20 @@ type Cadence struct {
 	IC      time.Duration
 }
 
-// DefaultCadence mirrors the user's spec: Elon 15m, Manager 10m, IC 5m.
-// These are the "how often does an idle actor self-review" intervals; the
+// DefaultCadence matches the lab-service rhythm Boyan set as canonical when
+// pulse moved into the arcmux daemon: Elon 30s, Manager 10s, IC 5s. These
+// are the "how often does an idle actor self-review" intervals; the
 // inbox-depth trigger is independent and fires regardless of cadence.
+//
+// Production wiring overrides these via [pulse.cadence] in
+// ~/.config/arcmux/config.toml, so these defaults only apply when (a) the
+// pulse package is used directly (e.g. tests, the `arcmux pulse` debug
+// shim with no overrides) or (b) the user has not set the config file.
 func DefaultCadence() Cadence {
 	return Cadence{
-		Elon:    15 * time.Minute,
-		Manager: 10 * time.Minute,
-		IC:      5 * time.Minute,
+		Elon:    30 * time.Second,
+		Manager: 10 * time.Second,
+		IC:      5 * time.Second,
 	}
 }
 
