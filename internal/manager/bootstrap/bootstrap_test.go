@@ -94,6 +94,7 @@ func TestRenderExportsTeamAndContract(t *testing.T) {
 		Project:    "demo",
 		Role:       "ic-team-a-linus-1",
 		Team:       "team-a",
+		Slot:       "linus-1",
 		Contract:   "design-auth",
 		ScriptName: "bootstrap-ic-team-a-linus-1.sh",
 		EphemRoot:  dir,
@@ -108,12 +109,34 @@ func TestRenderExportsTeamAndContract(t *testing.T) {
 	bs := string(body)
 	for _, want := range []string{
 		"export ARCMUX_TEAM='team-a'",
+		"export ARCMUX_SLOT='linus-1'",
 		"export ARCMUX_CONTRACT='design-auth'",
 		"export ARCMUX_ROLE='ic-team-a-linus-1'",
 	} {
 		if !strings.Contains(bs, want) {
 			t.Errorf("script missing %q\n---\n%s", want, bs)
 		}
+	}
+}
+
+// TestRenderOmitsSlotWhenEmpty pins the invariant that a manager bootstrap
+// (Slot empty) does not get ARCMUX_SLOT — only IC bootstraps do. The
+// per-IC inbox addresses by slot id; exporting an empty/wrong ARCMUX_SLOT
+// for a manager would mislead a peek-loop.
+func TestRenderOmitsSlotWhenEmpty(t *testing.T) {
+	dir := t.TempDir()
+	roleFile := filepath.Join(t.TempDir(), "manager.md")
+	_ = os.WriteFile(roleFile, []byte("# M"), 0o644)
+	path, err := Render(Options{
+		Agent: "claude", Project: "demo", Role: "manager", Team: "team-a",
+		EphemRoot: dir, VaultRoot: "/v", DataRoot: "/d", RoleFile: roleFile,
+	})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	body, _ := os.ReadFile(path)
+	if strings.Contains(string(body), "ARCMUX_SLOT") {
+		t.Errorf("manager bootstrap should not export ARCMUX_SLOT; got: %s", body)
 	}
 }
 

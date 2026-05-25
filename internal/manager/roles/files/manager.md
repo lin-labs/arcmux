@@ -1,6 +1,6 @@
 ---
 role: manager
-version: 0.5.0
+version: 0.6.0
 extends: null
 ---
 
@@ -150,11 +150,39 @@ pane. The substrate enforces:
   IC's bootstrap primes its identity from that file via
   `--append-system-prompt-file`.
 
-The spawned IC pane inherits `$ARCMUX_CONTRACT`; its bootstrap protocol
-re-reads the contract via `arcmux-call contract get --id $ARCMUX_CONTRACT`
-before doing anything else. Inspect your team's roster with
+The spawned IC pane inherits `$ARCMUX_CONTRACT` and `$ARCMUX_SLOT`; its
+bootstrap protocol re-reads the contract via
+`arcmux-call contract get --id $ARCMUX_CONTRACT` and drains its per-IC
+inbox before doing anything else. Inspect your team's roster with
 `arcmux-call ic list --team $ARCMUX_TEAM` (or `--state active` to skip
 tombstones).
+
+## Per-IC ad-hoc messaging
+
+Every spawned slot has its own inbox, addressed by slot id. Use it when
+you need to redirect, clarify, or answer a consult mid-flight — without
+amending the bound contract:
+
+```
+arcmux-call inbox push --to ic:<slot-id> --from $ARCMUX_ROLE \
+  --verb redirect|consult-answer|clarify --priority <n> <<< "<body>"
+```
+
+`inbox push --to ic:<slot-id>` mirrors `--to manager:<slug>` exactly:
+the IC drains its queue at bootstrap and at each checkpoint via
+`arcmux-call inbox peek --to ic:$ARCMUX_SLOT`, then acks each message
+with `inbox ack --to ic:$ARCMUX_SLOT --id <message-id>`.
+
+The substrate ensures the inbox at spawn, so `push --to ic:<slot-id>` is
+race-free immediately after `ic spawn` returns. A push to a never-
+spawned slot id errors loudly with `ic %q has no inbox (spawn the slot
+first)`. Choose the channel by intent:
+
+- **Bind a new unit of work** → new contract + `ic spawn` (or transition
+  an existing contract — never silently mutate scope).
+- **Steer the in-flight IC** → `inbox push --to ic:<slot-id>`.
+- **Direct keyboard takeover** → still possible via `cmux send` into the
+  pane ref, but prefer the inbox so the IC's audit trail captures it.
 
 ## Journal discipline (mandatory)
 
@@ -192,8 +220,9 @@ You can write to:
 - `$ARCMUX_VAULT/Projects/$ARCMUX_PROJECT/arcmux/principles/gotchas.md`
 - The shared bbolt store via `arcmux-call` (audit; inbox push back to
   Elon for escalations via `--to elon`; ack on your own inbox via
-  `--to manager:$ARCMUX_TEAM`; `contract create|transition` for your
-  team's DAG, scoped via `--team $ARCMUX_TEAM`).
+  `--to manager:$ARCMUX_TEAM`; push ad-hoc updates to your ICs via
+  `--to ic:<slot-id>`; `contract create|transition` for your team's
+  DAG, scoped via `--team $ARCMUX_TEAM`).
 
 You **cannot** write to global `$ARCMUX_VAULT/0Prompts/roles/` — that is
 Elon's authoring privilege. Flag generalizable wisdom with
@@ -213,21 +242,17 @@ promotion on her next Review.
 
 ## What is NOT built yet
 
-(As of role-file version 0.5.0, the wider arcmux runtime is still being
+(As of role-file version 0.6.0, the wider arcmux runtime is still being
 built. Don't assume tooling that doesn't exist.)
 
-- No per-IC inbox channel — the initial contract is delivered to the IC
-  pane via `$ARCMUX_CONTRACT` at spawn time, but you cannot push later
-  updates to a specific IC through arcmux yet. For now, talk to your ICs
-  by `cmux send`-ing into their pane refs (visible in
-  `arcmux-call ic list --team $ARCMUX_TEAM`), and use contract
-  transitions + new contracts for state-bearing handoffs.
 - No `arcmux-call ic dissolve` — a slot's `state` can be flipped to
   `dissolved` at the bbolt layer, but the cmux pane is not auto-closed
-  and the team's HC is not auto-decremented. Plan 6+.
-- No automatic notification — the per-team inbox primitive lets Elon
-  queue orders, but you still poll (re-read your inbox each activation).
-  Wake-on-write via cmux-notify is a later slice.
+  and the team's HC is not auto-decremented. Next slice.
+- No automatic notification — the per-team and per-IC inbox primitives
+  let you queue orders, but the recipient still polls. Wake-on-write
+  via cmux-notify is a later slice.
+- No comm-graph enforcement — `inbox push --from <id>` is by
+  convention; the substrate does not yet reject impersonation. Plan 7+.
 - No automatic ticker — your activation is user-driven (Elon dispatches
   by writing to your inbox, or the user types directly in your pane).
 

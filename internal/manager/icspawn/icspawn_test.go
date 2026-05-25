@@ -181,6 +181,7 @@ func TestSpawnHappyPath(t *testing.T) {
 	bs := string(body)
 	for _, want := range []string{
 		"export ARCMUX_TEAM='auth-refactor'",
+		"export ARCMUX_SLOT='linus-1'",
 		"export ARCMUX_CONTRACT='design-auth'",
 		"export ARCMUX_ROLE='ic-auth-refactor-linus-1'",
 		"exec claude --dangerously-skip-permissions --append-system-prompt-file",
@@ -188,6 +189,14 @@ func TestSpawnHappyPath(t *testing.T) {
 		if !strings.Contains(bs, want) {
 			t.Errorf("bootstrap missing %q:\n%s", want, bs)
 		}
+	}
+
+	// The per-IC inbox sub-bucket must exist immediately after Spawn,
+	// before the IC's first poll. icspawn calls EnsureICInbox after
+	// PutSlot so that race against a manager pushing to a freshly-spawned
+	// IC is impossible.
+	if !db.HasICInbox("linus-1") {
+		t.Errorf("HasICInbox(linus-1) = false after spawn; want true (Ensure must happen at spawn time)")
 	}
 
 	// Scratchpad should carry the contract preview + first-step plan.

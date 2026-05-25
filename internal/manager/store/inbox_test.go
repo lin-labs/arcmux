@@ -165,3 +165,140 @@ func TestManagerInboxRequiresMsgID(t *testing.T) {
 		t.Error("PushManagerInbox without ID: want error, got nil")
 	}
 }
+
+// TestICInboxLifecycle mirrors TestManagerInboxLifecycle but against the
+// per-slot inbox surface. The shape is intentionally identical: spawn-time
+// EnsureICInbox followed by push/peek/ack semantics that exactly mirror the
+// manager inbox. If the two diverge in subtle ways, the CLI's --to routing
+// stops being one mental model.
+func TestICInboxLifecycle(t *testing.T) {
+	db := openTestDB(t)
+
+	// Push before Ensure → ErrICInboxMissing.
+	err := db.PushICInbox("slot-a", InboxMsg{ID: "x", Verb: "consult", From: "manager", Body: "hi"})
+	if !errors.Is(err, ErrICInboxMissing) {
+		t.Fatalf("push before ensure: err = %v, want ErrICInboxMissing", err)
+	}
+	if db.HasICInbox("slot-a") {
+		t.Errorf("HasICInbox before ensure = true, want false")
+	}
+
+	if err := db.EnsureICInbox("slot-a"); err != nil {
+		t.Fatalf("EnsureICInbox: %v", err)
+	}
+	if !db.HasICInbox("slot-a") {
+		t.Errorf("HasICInbox after ensure = false, want true")
+	}
+	// Re-ensure is idempotent.
+	if err := db.EnsureICInbox("slot-a"); err != nil {
+		t.Fatalf("re-ensure: %v", err)
+	}
+
+	m1 := InboxMsg{ID: "m1", Verb: "consult", From: "manager", Body: "use lib X", ReceivedAt: time.Now()}
+	m2 := InboxMsg{ID: "m2", Verb: "redirect", From: "manager", Body: "skip step 2", ReceivedAt: time.Now().Add(time.Millisecond)}
+	if err := db.PushICInbox("slot-a", m1); err != nil {
+		t.Fatalf("push m1: %v", err)
+	}
+	if err := db.PushICInbox("slot-a", m2); err != nil {
+		t.Fatalf("push m2: %v", err)
+	}
+
+	msgs, err := db.PeekICInbox("slot-a", 10)
+	if err != nil {
+		t.Fatalf("Peek: %v", err)
+	}
+	if len(msgs) != 2 || msgs[0].ID != "m1" || msgs[1].ID != "m2" {
+		t.Errorf("peek = %+v, want [m1, m2]", msgs)
+	}
+
+	if err := db.AckICInbox("slot-a", "m1"); err != nil {
+		t.Fatalf("ack m1: %v", err)
+	}
+	msgs, _ = db.PeekICInbox("slot-a", 10)
+	if len(msgs) != 1 || msgs[0].ID != "m2" {
+		t.Errorf("after ack = %+v, want [m2]", msgs)
+	}
+
+	if err := db.AckICInbox("slot-a", "ghost"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("ack missing: err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestICInboxIsolation ensures one IC's queue cannot leak into another's,
+// and that IC pushes never leak into Elon's inbox. Two slots that happen to
+// share a name in different teams cannot exist (Slot.ID is project-unique),
+// so the test models cross-slot isolation within one project.
+func TestICInboxIsolation(t *testing.T) {
+	db := openTestDB(t)
+
+	if err := db.EnsureICInbox("slot-a"); err != nil {
+		t.Fatalf("ensure a: %v", err)
+	}
+	if err := db.EnsureICInbox("slot-b"); err != nil {
+		t.Fatalf("ensure b: %v", err)
+	}
+
+	mA := InboxMsg{ID: "ma", Verb: "consult", From: "manager", Body: "for A"}
+	mB := InboxMsg{ID: "mb", Verb: "consult", From: "manager", Body: "for B"}
+	if err := db.PushICInbox("slot-a", mA); err != nil {
+		t.Fatalf("push A: %v", err)
+	}
+	if err := db.PushICInbox("slot-b", mB); err != nil {
+		t.Fatalf("push B: %v", err)
+	}
+
+	gotA, _ := db.PeekICInbox("slot-a", 10)
+	gotB, _ := db.PeekICInbox("slot-b", 10)
+	if len(gotA) != 1 || gotA[0].ID != "ma" {
+		t.Errorf("A inbox = %+v, want [ma]", gotA)
+	}
+	if len(gotB) != 1 || gotB[0].ID != "mb" {
+		t.Errorf("B inbox = %+v, want [mb]", gotB)
+	}
+
+	elon, _ := db.PeekElonInbox(10)
+	if len(elon) != 0 {
+		t.Errorf("Elon inbox leaked from IC push: %+v", elon)
+	}
+	mgr, _ := db.PeekManagerInbox("team-a", 10)
+	if len(mgr) != 0 {
+		// manager inbox bucket doesn't even exist; we expect missing
+		// regardless. The point: pushing to slot-a/slot-b did NOT
+		// create a team inbox.
+		t.Errorf("manager inbox unexpectedly populated by IC push: %+v", mgr)
+	}
+}
+
+func TestICInboxPeekUnknownSlot(t *testing.T) {
+	db := openTestDB(t)
+	_, err := db.PeekICInbox("nonexistent", 10)
+	if !errors.Is(err, ErrICInboxMissing) {
+		t.Errorf("peek unknown: err = %v, want ErrICInboxMissing", err)
+	}
+}
+
+func TestICInboxRejectsEmptySlot(t *testing.T) {
+	db := openTestDB(t)
+	if err := db.EnsureICInbox(""); err == nil {
+		t.Error("EnsureICInbox(empty): want error, got nil")
+	}
+	if err := db.PushICInbox("", InboxMsg{ID: "x"}); err == nil {
+		t.Error("PushICInbox(empty): want error, got nil")
+	}
+	if _, err := db.PeekICInbox("", 1); err == nil {
+		t.Error("PeekICInbox(empty): want error, got nil")
+	}
+	if err := db.AckICInbox("", "x"); err == nil {
+		t.Error("AckICInbox(empty): want error, got nil")
+	}
+}
+
+func TestICInboxRequiresMsgID(t *testing.T) {
+	db := openTestDB(t)
+	if err := db.EnsureICInbox("slot-a"); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if err := db.PushICInbox("slot-a", InboxMsg{}); err == nil {
+		t.Error("PushICInbox without ID: want error, got nil")
+	}
+}

@@ -151,6 +151,131 @@ func managerBucket(tx *bolt.Tx, team string) (*bolt.Bucket, error) {
 	return b, nil
 }
 
+// ErrICInboxMissing is returned when a per-IC inbox operation targets a slot
+// whose nested bucket has not been created (slot was never spawned, or its
+// sub-bucket was dropped). icspawn.Spawn calls EnsureICInbox at slot create,
+// so an active slot always has its inbox bucket ready.
+var ErrICInboxMissing = errors.New("ic inbox bucket missing")
+
+// EnsureICInbox creates the nested inbox bucket for a slot id. Safe to call
+// repeatedly — idempotent. icspawn.Spawn calls this immediately after PutSlot
+// so the inbox is ready before any manager push.
+func (d *DB) EnsureICInbox(slot string) error {
+	if slot == "" {
+		return fmt.Errorf("EnsureICInbox: slot required")
+	}
+	return d.b.Update(func(tx *bolt.Tx) error {
+		parent := tx.Bucket([]byte(BucketInboxICs))
+		if parent == nil {
+			return fmt.Errorf("parent bucket %s missing", BucketInboxICs)
+		}
+		_, err := parent.CreateBucketIfNotExists([]byte(slot))
+		return err
+	})
+}
+
+// HasICInbox reports whether the nested inbox bucket exists for a slot.
+func (d *DB) HasICInbox(slot string) bool {
+	var ok bool
+	_ = d.b.View(func(tx *bolt.Tx) error {
+		parent := tx.Bucket([]byte(BucketInboxICs))
+		if parent == nil {
+			return nil
+		}
+		ok = parent.Bucket([]byte(slot)) != nil
+		return nil
+	})
+	return ok
+}
+
+// PushICInbox enqueues a message to a slot's per-IC inbox. Returns
+// ErrICInboxMissing if the sub-bucket has not been created.
+func (d *DB) PushICInbox(slot string, m InboxMsg) error {
+	if slot == "" {
+		return fmt.Errorf("PushICInbox: slot required")
+	}
+	if m.ID == "" {
+		return fmt.Errorf("InboxMsg.ID required")
+	}
+	if m.ReceivedAt.IsZero() {
+		m.ReceivedAt = time.Now()
+	}
+	return d.b.Update(func(tx *bolt.Tx) error {
+		b, err := icInboxBucket(tx, slot)
+		if err != nil {
+			return err
+		}
+		return putInbox(b, m)
+	})
+}
+
+// PeekICInbox returns up to n messages oldest-first from a slot's per-IC
+// inbox. Returns ErrICInboxMissing if the sub-bucket has not been created.
+func (d *DB) PeekICInbox(slot string, n int) ([]InboxMsg, error) {
+	if slot == "" {
+		return nil, fmt.Errorf("PeekICInbox: slot required")
+	}
+	if n <= 0 {
+		return nil, nil
+	}
+	out := make([]InboxMsg, 0, n)
+	err := d.b.View(func(tx *bolt.Tx) error {
+		b, err := icInboxBucket(tx, slot)
+		if err != nil {
+			return err
+		}
+		c := b.Cursor()
+		for k, v := c.First(); k != nil && len(out) < n; k, v = c.Next() {
+			var m InboxMsg
+			if err := json.Unmarshal(v, &m); err != nil {
+				return err
+			}
+			out = append(out, m)
+		}
+		return nil
+	})
+	return out, err
+}
+
+// AckICInbox removes a single message by ID from a slot's per-IC inbox.
+func (d *DB) AckICInbox(slot, id string) error {
+	if slot == "" {
+		return fmt.Errorf("AckICInbox: slot required")
+	}
+	return d.b.Update(func(tx *bolt.Tx) error {
+		b, err := icInboxBucket(tx, slot)
+		if err != nil {
+			return err
+		}
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var m InboxMsg
+			if err := json.Unmarshal(v, &m); err != nil {
+				continue
+			}
+			if m.ID == id {
+				return b.Delete(k)
+			}
+		}
+		return ErrNotFound
+	})
+}
+
+// icInboxBucket resolves the per-slot nested inbox bucket within the
+// inbox-ics parent. Returns ErrICInboxMissing if either the parent or the
+// sub-bucket is absent.
+func icInboxBucket(tx *bolt.Tx, slot string) (*bolt.Bucket, error) {
+	parent := tx.Bucket([]byte(BucketInboxICs))
+	if parent == nil {
+		return nil, ErrICInboxMissing
+	}
+	b := parent.Bucket([]byte(slot))
+	if b == nil {
+		return nil, fmt.Errorf("%w: slot %q", ErrICInboxMissing, slot)
+	}
+	return b, nil
+}
+
 // putInbox writes one InboxMsg into the supplied bucket using a sortable
 // time-prefixed key. Shared by Elon and manager inbox writes.
 func putInbox(b *bolt.Bucket, m InboxMsg) error {

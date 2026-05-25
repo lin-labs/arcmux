@@ -245,8 +245,12 @@ func TestParseQueue(t *testing.T) {
 		{"manager:", "", "", true},
 		{"manager:../etc", "", "", true},
 		{"manager:has/slash", "", "", true},
+		{"ic:linus-1", "ic", "linus-1", false},
+		{"ic:typescript-validator", "ic", "typescript-validator", false},
+		{"ic:", "", "", true},
+		{"ic:../evil", "", "", true},
+		{"ic:has/slash", "", "", true},
 		{"unknown", "", "", true},
-		{"ic:0", "", "", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {
@@ -402,6 +406,180 @@ func TestInboxManagerPushUnspawnedTeam(t *testing.T) {
 	}
 }
 
+// TestInboxICQueueLifecycle mirrors TestInboxManagerQueueLifecycle but
+// against an `ic:<slot-id>` queue. The IC inbox bucket is pre-created via
+// the store API (as icspawn.Spawn would do in production) so the CLI test
+// can focus on the --to flag plumbing. Push → peek (oldest-first, no
+// cross-queue leak) → ack → empty.
+func TestInboxICQueueLifecycle(t *testing.T) {
+	dataRoot := t.TempDir()
+	project := "icqueue"
+
+	db, _, err := openProjectDB(dataRoot, project)
+	if err != nil {
+		t.Fatalf("openProjectDB: %v", err)
+	}
+	if err := db.EnsureICInbox("linus-1"); err != nil {
+		_ = db.Close()
+		t.Fatalf("EnsureICInbox: %v", err)
+	}
+	_ = db.Close()
+
+	var out bytes.Buffer
+	pushArgs := []string{
+		"--project", project, "--data-root", dataRoot,
+		"--to", "ic:linus-1",
+		"--verb", "consult", "--from", "manager", "--id", "consult-1",
+	}
+	if err := cmdInboxPush(pushArgs, strings.NewReader("use the existing http.Client"), &out); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	var pushAck struct {
+		OK bool   `json:"ok"`
+		ID string `json:"id"`
+		To string `json:"to"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &pushAck); err != nil {
+		t.Fatalf("decode push: %v (raw: %q)", err, out.String())
+	}
+	if !pushAck.OK || pushAck.ID != "consult-1" || pushAck.To != "ic:linus-1" {
+		t.Errorf("push ack = %+v, want ok=true id=consult-1 to=ic:linus-1", pushAck)
+	}
+
+	// Cross-queue isolation: elon + a different ic slug stay empty.
+	out.Reset()
+	if err := cmdInboxPeek([]string{"--project", project, "--data-root", dataRoot}, &out); err != nil {
+		t.Fatalf("peek elon: %v", err)
+	}
+	var elonPeek struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	_ = json.Unmarshal(out.Bytes(), &elonPeek)
+	if len(elonPeek.Messages) != 0 {
+		t.Errorf("elon queue leaked from IC push: %+v", elonPeek.Messages)
+	}
+
+	// Peek the IC queue finds the message.
+	out.Reset()
+	if err := cmdInboxPeek([]string{
+		"--project", project, "--data-root", dataRoot, "--to", "ic:linus-1",
+	}, &out); err != nil {
+		t.Fatalf("peek ic: %v", err)
+	}
+	var icPeek struct {
+		Messages []struct {
+			ID   string `json:"id"`
+			Body string `json:"body"`
+			From string `json:"from"`
+			Verb string `json:"verb"`
+		} `json:"messages"`
+		To string `json:"to"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &icPeek); err != nil {
+		t.Fatalf("decode ic peek: %v", err)
+	}
+	if len(icPeek.Messages) != 1 || icPeek.Messages[0].ID != "consult-1" ||
+		icPeek.Messages[0].Body != "use the existing http.Client" ||
+		icPeek.Messages[0].Verb != "consult" {
+		t.Errorf("ic peek = %+v, want one consult-1 message", icPeek.Messages)
+	}
+	if icPeek.To != "ic:linus-1" {
+		t.Errorf("ic peek 'to' = %q, want ic:linus-1", icPeek.To)
+	}
+
+	// Ack.
+	out.Reset()
+	if err := cmdInboxAck([]string{
+		"--project", project, "--data-root", dataRoot,
+		"--to", "ic:linus-1", "--id", "consult-1",
+	}, &out); err != nil {
+		t.Fatalf("ack ic: %v", err)
+	}
+
+	// Peek again — empty.
+	out.Reset()
+	if err := cmdInboxPeek([]string{
+		"--project", project, "--data-root", dataRoot, "--to", "ic:linus-1",
+	}, &out); err != nil {
+		t.Fatalf("peek ic after ack: %v", err)
+	}
+	icPeek.Messages = nil
+	_ = json.Unmarshal(out.Bytes(), &icPeek)
+	if len(icPeek.Messages) != 0 {
+		t.Errorf("ic queue not empty after ack: %+v", icPeek.Messages)
+	}
+}
+
+// TestInboxICPushUnspawnedSlot proves the CLI surfaces a clear
+// "spawn the slot first" error when pushing to a never-spawned IC.
+func TestInboxICPushUnspawnedSlot(t *testing.T) {
+	dataRoot := t.TempDir()
+	project := "icunspawned"
+	var out bytes.Buffer
+	err := cmdInboxPush(
+		[]string{
+			"--project", project, "--data-root", dataRoot,
+			"--to", "ic:ghost",
+			"--verb", "consult", "--from", "manager",
+		},
+		strings.NewReader("orphan"),
+		&out,
+	)
+	if err == nil {
+		t.Fatalf("want error pushing to unspawned IC, got nil; out=%q", out.String())
+	}
+	if !strings.Contains(err.Error(), "no inbox") || !strings.Contains(err.Error(), "ghost") {
+		t.Errorf("err = %q, want substring about missing inbox and slot id", err)
+	}
+}
+
+// TestInboxICPeekUnspawnedReturnsEmpty mirrors the manager-peek silent-
+// empty contract: peeking a never-spawned slot returns {"messages":[]}
+// instead of erroring, so an IC bootstrap that polls before its inbox is
+// fully ready (race against spawn) sees an empty queue, not a crash.
+func TestInboxICPeekUnspawnedReturnsEmpty(t *testing.T) {
+	dataRoot := t.TempDir()
+	project := "icracey"
+	var out bytes.Buffer
+	if err := cmdInboxPeek([]string{
+		"--project", project, "--data-root", dataRoot, "--to", "ic:ghost",
+	}, &out); err != nil {
+		t.Fatalf("peek: %v", err)
+	}
+	var got struct {
+		Messages []map[string]any `json:"messages"`
+		To       string           `json:"to"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v (raw: %q)", err, out.String())
+	}
+	if len(got.Messages) != 0 {
+		t.Errorf("expected empty, got %d", len(got.Messages))
+	}
+	if got.To != "ic:ghost" {
+		t.Errorf("to = %q, want ic:ghost", got.To)
+	}
+}
+
+// TestInboxICAckUnspawnedSlot proves ack against a never-spawned slot is
+// loud (not silently a no-op). Otherwise an IC could "ack" a typoed slot
+// id and never notice.
+func TestInboxICAckUnspawnedSlot(t *testing.T) {
+	dataRoot := t.TempDir()
+	project := "icackmiss"
+	var out bytes.Buffer
+	err := cmdInboxAck([]string{
+		"--project", project, "--data-root", dataRoot,
+		"--to", "ic:ghost", "--id", "anything",
+	}, &out)
+	if err == nil {
+		t.Fatalf("want error acking unspawned ic, got nil; out=%q", out.String())
+	}
+	if !strings.Contains(err.Error(), "no inbox") {
+		t.Errorf("err = %q, want substring 'no inbox'", err)
+	}
+}
+
 // TestInboxManagerPeekUnspawnedReturnsEmpty proves the polling-friendly
 // behavior: peeking a never-spawned team's inbox returns {"messages":[]}
 // instead of erroring, so cron-like scripts can race with spawn.
@@ -443,7 +621,10 @@ func TestInboxBadQueueRejected(t *testing.T) {
 			"--verb", "add", "--from", "u", "--to", "nope"}},
 		{"push bad slug", []string{"--project", project, "--data-root", dataRoot,
 			"--verb", "add", "--from", "u", "--to", "manager:../evil"}},
-		{"peek bad queue", []string{"--project", project, "--data-root", dataRoot, "--to", "ic:0"}},
+		{"push bad ic slug", []string{"--project", project, "--data-root", dataRoot,
+			"--verb", "add", "--from", "u", "--to", "ic:../evil"}},
+		{"peek bad queue", []string{"--project", project, "--data-root", dataRoot, "--to", "garbage"}},
+		{"peek bad ic slug", []string{"--project", project, "--data-root", dataRoot, "--to", "ic:has/slash"}},
 		{"ack bad queue", []string{"--project", project, "--data-root", dataRoot, "--id", "x", "--to", "nope"}},
 	}
 	for _, tc := range cases {

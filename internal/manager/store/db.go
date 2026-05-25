@@ -25,13 +25,15 @@ const (
 	BucketIdxPriority     = "idx-priority"
 	BucketInboxElon       = "inbox-elon"
 	BucketInboxManagers   = "inbox-managers"
+	BucketInboxICs        = "inbox-ics"
 	BucketAudit           = "audit"
 	BucketMeta            = "meta"
 )
 
-// AllBuckets lists buckets created on Open. BucketInboxManagers is a parent
-// bucket that holds one nested sub-bucket per team slug; the sub-buckets are
-// created lazily by EnsureManagerInbox at team-spawn time.
+// AllBuckets lists buckets created on Open. BucketInboxManagers and
+// BucketInboxICs are parent buckets that hold one nested sub-bucket per
+// team / per slot respectively; the sub-buckets are created lazily by
+// EnsureManagerInbox / EnsureICInbox at spawn time.
 var AllBuckets = []string{
 	BucketTeams,
 	BucketContracts,
@@ -44,6 +46,7 @@ var AllBuckets = []string{
 	BucketIdxPriority,
 	BucketInboxElon,
 	BucketInboxManagers,
+	BucketInboxICs,
 	BucketAudit,
 	BucketMeta,
 }

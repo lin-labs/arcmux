@@ -201,12 +201,17 @@ func Spawn(ctx context.Context, o Opts) (*Result, error) {
 		return nil, fmt.Errorf("seed scratchpad: %w", err)
 	}
 
-	// 2. Render the IC bootstrap script with ARCMUX_TEAM + ARCMUX_CONTRACT.
+	// 2. Render the IC bootstrap script with ARCMUX_TEAM + ARCMUX_CONTRACT
+	// + ARCMUX_SLOT. The slot id is the inbox addressing key (see
+	// store.PushICInbox) — exporting it lets an IC peek its own queue
+	// with the one-liner `arcmux-call inbox peek --to ic:$ARCMUX_SLOT`
+	// without having to derive it from the composite ARCMUX_ROLE.
 	bootstrapPath, err := bootstrap.Render(bootstrap.Options{
 		Agent:      o.Agent,
 		Project:    o.Project,
 		Role:       arcmuxRole,
 		Team:       team,
+		Slot:       slot,
 		Contract:   contractID,
 		ScriptName: fmt.Sprintf("bootstrap-%s.sh", arcmuxRole),
 		EphemRoot:  pp.EphemeralRoot,
@@ -256,6 +261,15 @@ func Spawn(ctx context.Context, o Opts) (*Result, error) {
 	}
 	if err := o.DB.PutSlot(s); err != nil {
 		return nil, fmt.Errorf("put slot: %w", err)
+	}
+
+	// 5b. Ensure the per-IC inbox sub-bucket. Mirrors teamspawn's
+	// EnsureManagerInbox: the queue is ready before the IC's first poll
+	// and before any manager push (cross-thread spawn/push races would
+	// otherwise hit ErrICInboxMissing). Idempotent on respawn over a
+	// dissolved tombstone.
+	if err := o.DB.EnsureICInbox(slot); err != nil {
+		return nil, fmt.Errorf("ensure ic inbox: %w", err)
 	}
 
 	// 6. Bump team HC. The active-slot count we just took is authoritative

@@ -14,8 +14,9 @@ import (
 	"github.com/lin-labs/arcmux/internal/manager/store"
 )
 
-// queueRef identifies an inbox queue. Kind is "elon" or "manager"; Slug is
-// the team slug for manager queues and empty for elon.
+// queueRef identifies an inbox queue. Kind is "elon", "manager", or "ic";
+// Slug is the team slug for manager queues, the slot id for IC queues,
+// and empty for elon.
 type queueRef struct {
 	Kind string
 	Slug string
@@ -24,8 +25,11 @@ type queueRef struct {
 // parseQueue parses a --to value:
 //   - "elon" → {Kind:"elon"}
 //   - "manager:<slug>" → {Kind:"manager", Slug:<slug>} (slug validated)
+//   - "ic:<slot-id>" → {Kind:"ic", Slug:<slot-id>} (slug validated)
 //
-// Empty input returns {Kind:"elon"} so legacy callers (no --to) keep behaving.
+// Empty input returns {Kind:"elon"} so legacy callers (no --to) keep
+// behaving. The three queue kinds are intentionally addressed through the
+// same verb so callers learn one mental model rather than three.
 func parseQueue(s string) (queueRef, error) {
 	s = strings.TrimSpace(s)
 	if s == "" || s == "elon" {
@@ -38,7 +42,14 @@ func parseQueue(s string) (queueRef, error) {
 		}
 		return queueRef{Kind: "manager", Slug: slug}, nil
 	}
-	return queueRef{}, fmt.Errorf("--to: unknown queue %q (want 'elon' or 'manager:<slug>')", s)
+	if strings.HasPrefix(s, "ic:") {
+		slug := strings.TrimPrefix(s, "ic:")
+		if _, err := paths.Validate(slug); err != nil {
+			return queueRef{}, fmt.Errorf("--to ic:<slot-id>: %w", err)
+		}
+		return queueRef{Kind: "ic", Slug: slug}, nil
+	}
+	return queueRef{}, fmt.Errorf("--to: unknown queue %q (want 'elon', 'manager:<slug>', or 'ic:<slot-id>')", s)
 }
 
 // cmdInbox dispatches `arcmux-call inbox <sub>`.
@@ -132,6 +143,13 @@ func cmdInboxPush(args []string, stdin io.Reader, stdout io.Writer) error {
 			}
 			return fmt.Errorf("inbox push: %w", err)
 		}
+	case "ic":
+		if err := db.PushICInbox(q.Slug, m); err != nil {
+			if errors.Is(err, store.ErrICInboxMissing) {
+				return fmt.Errorf("inbox push: ic %q has no inbox (spawn the slot first)", q.Slug)
+			}
+			return fmt.Errorf("inbox push: %w", err)
+		}
 	}
 	return json.NewEncoder(stdout).Encode(map[string]any{
 		"ok":          true,
@@ -178,6 +196,15 @@ func cmdInboxPeek(args []string, stdout io.Writer) error {
 		// {"messages":[]} so polling scripts don't have to special-case
 		// the very first poll before a spawn lands.
 		if errors.Is(err, store.ErrManagerInboxMissing) {
+			msgs, err = nil, nil
+		}
+	case "ic":
+		msgs, err = db.PeekICInbox(q.Slug, *n)
+		// Same silent-empty contract as manager peek: an IC polling its
+		// own inbox in a tight loop while spawn is still in flight sees
+		// {"messages":[]} instead of an error, which keeps the IC's
+		// peek-on-every-loop pattern clean.
+		if errors.Is(err, store.ErrICInboxMissing) {
 			msgs, err = nil, nil
 		}
 	}
@@ -230,6 +257,11 @@ func cmdInboxAck(args []string, stdout io.Writer) error {
 		if errors.Is(err, store.ErrManagerInboxMissing) {
 			return fmt.Errorf("inbox ack: team %q has no inbox", q.Slug)
 		}
+	case "ic":
+		err = db.AckICInbox(q.Slug, *id)
+		if errors.Is(err, store.ErrICInboxMissing) {
+			return fmt.Errorf("inbox ack: ic %q has no inbox", q.Slug)
+		}
 	}
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -247,8 +279,11 @@ func cmdInboxAck(args []string, stdout io.Writer) error {
 // formatQueue renders a queueRef back to the --to string form, for echoing
 // in CLI responses so scripts can confirm routing without re-parsing.
 func formatQueue(q queueRef) string {
-	if q.Kind == "manager" {
+	switch q.Kind {
+	case "manager":
 		return "manager:" + q.Slug
+	case "ic":
+		return "ic:" + q.Slug
 	}
 	return "elon"
 }
