@@ -10,6 +10,7 @@ import (
 
 	"github.com/lin-labs/arcmux/internal/config"
 	"github.com/lin-labs/arcmux/internal/daemon"
+	"github.com/lin-labs/arcmux/internal/manager"
 )
 
 const version = "0.1.0"
@@ -29,6 +30,8 @@ func run(args []string) error {
 	switch args[0] {
 	case "start":
 		return cmdStart(args[1:])
+	case "manager":
+		return manager.CmdManager(context.Background(), args[1:], os.Stdout)
 	case "version":
 		fmt.Printf("arcmux %s\n", version)
 		return nil
@@ -84,9 +87,10 @@ func printUsage() {
 	fmt.Print(`arcmux — Agent Tmux Runtime Service
 
 Usage:
-  arcmux start [--config path]    Start the daemon (default command)
-  arcmux version                  Print version
-  arcmux help                     Show this help
+  arcmux start [--config path]                            Start the daemon (default command)
+  arcmux manager <agent> <project> [--mission "..."]      Launch three-tier manager mode (Elon+Manager+ICs in cmux)
+  arcmux version                                          Print version
+  arcmux help                                             Show this help
 
 The daemon listens on a Unix socket for gRPC requests.
 Orchestrators connect to manage coding agent sessions.
