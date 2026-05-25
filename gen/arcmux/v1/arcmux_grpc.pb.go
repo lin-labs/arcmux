@@ -27,6 +27,11 @@ const (
 	AgentRuntime_ListSessions_FullMethodName  = "/arcmux.v1.AgentRuntime/ListSessions"
 	AgentRuntime_StreamOutput_FullMethodName  = "/arcmux.v1.AgentRuntime/StreamOutput"
 	AgentRuntime_Subscribe_FullMethodName     = "/arcmux.v1.AgentRuntime/Subscribe"
+	AgentRuntime_Send_FullMethodName          = "/arcmux.v1.AgentRuntime/Send"
+	AgentRuntime_PeekInbox_FullMethodName     = "/arcmux.v1.AgentRuntime/PeekInbox"
+	AgentRuntime_AckInbox_FullMethodName      = "/arcmux.v1.AgentRuntime/AckInbox"
+	AgentRuntime_Ready_FullMethodName         = "/arcmux.v1.AgentRuntime/Ready"
+	AgentRuntime_QueryAudit_FullMethodName    = "/arcmux.v1.AgentRuntime/QueryAudit"
 )
 
 // AgentRuntimeClient is the client API for AgentRuntime service.
@@ -43,6 +48,13 @@ type AgentRuntimeClient interface {
 	// Streaming
 	StreamOutput(ctx context.Context, in *StreamOutputRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[OutputChunk], error)
 	Subscribe(ctx context.Context, in *SubscribeRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Event], error)
+	// C1 additions: queueable Send + per-session inbox + readiness + audit query.
+	// These are additive — existing RPCs continue to work unchanged.
+	Send(ctx context.Context, in *SendRequest, opts ...grpc.CallOption) (*SendResponse, error)
+	PeekInbox(ctx context.Context, in *PeekInboxRequest, opts ...grpc.CallOption) (*PeekInboxResponse, error)
+	AckInbox(ctx context.Context, in *AckInboxRequest, opts ...grpc.CallOption) (*AckInboxResponse, error)
+	Ready(ctx context.Context, in *ReadyRequest, opts ...grpc.CallOption) (*ReadyResponse, error)
+	QueryAudit(ctx context.Context, in *QueryAuditRequest, opts ...grpc.CallOption) (*QueryAuditResponse, error)
 }
 
 type agentRuntimeClient struct {
@@ -151,6 +163,56 @@ func (c *agentRuntimeClient) Subscribe(ctx context.Context, in *SubscribeRequest
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type AgentRuntime_SubscribeClient = grpc.ServerStreamingClient[Event]
 
+func (c *agentRuntimeClient) Send(ctx context.Context, in *SendRequest, opts ...grpc.CallOption) (*SendResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SendResponse)
+	err := c.cc.Invoke(ctx, AgentRuntime_Send_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentRuntimeClient) PeekInbox(ctx context.Context, in *PeekInboxRequest, opts ...grpc.CallOption) (*PeekInboxResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PeekInboxResponse)
+	err := c.cc.Invoke(ctx, AgentRuntime_PeekInbox_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentRuntimeClient) AckInbox(ctx context.Context, in *AckInboxRequest, opts ...grpc.CallOption) (*AckInboxResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AckInboxResponse)
+	err := c.cc.Invoke(ctx, AgentRuntime_AckInbox_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentRuntimeClient) Ready(ctx context.Context, in *ReadyRequest, opts ...grpc.CallOption) (*ReadyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReadyResponse)
+	err := c.cc.Invoke(ctx, AgentRuntime_Ready_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentRuntimeClient) QueryAudit(ctx context.Context, in *QueryAuditRequest, opts ...grpc.CallOption) (*QueryAuditResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(QueryAuditResponse)
+	err := c.cc.Invoke(ctx, AgentRuntime_QueryAudit_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AgentRuntimeServer is the server API for AgentRuntime service.
 // All implementations must embed UnimplementedAgentRuntimeServer
 // for forward compatibility.
@@ -165,6 +227,13 @@ type AgentRuntimeServer interface {
 	// Streaming
 	StreamOutput(*StreamOutputRequest, grpc.ServerStreamingServer[OutputChunk]) error
 	Subscribe(*SubscribeRequest, grpc.ServerStreamingServer[Event]) error
+	// C1 additions: queueable Send + per-session inbox + readiness + audit query.
+	// These are additive — existing RPCs continue to work unchanged.
+	Send(context.Context, *SendRequest) (*SendResponse, error)
+	PeekInbox(context.Context, *PeekInboxRequest) (*PeekInboxResponse, error)
+	AckInbox(context.Context, *AckInboxRequest) (*AckInboxResponse, error)
+	Ready(context.Context, *ReadyRequest) (*ReadyResponse, error)
+	QueryAudit(context.Context, *QueryAuditRequest) (*QueryAuditResponse, error)
 	mustEmbedUnimplementedAgentRuntimeServer()
 }
 
@@ -198,6 +267,21 @@ func (UnimplementedAgentRuntimeServer) StreamOutput(*StreamOutputRequest, grpc.S
 }
 func (UnimplementedAgentRuntimeServer) Subscribe(*SubscribeRequest, grpc.ServerStreamingServer[Event]) error {
 	return status.Error(codes.Unimplemented, "method Subscribe not implemented")
+}
+func (UnimplementedAgentRuntimeServer) Send(context.Context, *SendRequest) (*SendResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Send not implemented")
+}
+func (UnimplementedAgentRuntimeServer) PeekInbox(context.Context, *PeekInboxRequest) (*PeekInboxResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PeekInbox not implemented")
+}
+func (UnimplementedAgentRuntimeServer) AckInbox(context.Context, *AckInboxRequest) (*AckInboxResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AckInbox not implemented")
+}
+func (UnimplementedAgentRuntimeServer) Ready(context.Context, *ReadyRequest) (*ReadyResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Ready not implemented")
+}
+func (UnimplementedAgentRuntimeServer) QueryAudit(context.Context, *QueryAuditRequest) (*QueryAuditResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method QueryAudit not implemented")
 }
 func (UnimplementedAgentRuntimeServer) mustEmbedUnimplementedAgentRuntimeServer() {}
 func (UnimplementedAgentRuntimeServer) testEmbeddedByValue()                      {}
@@ -350,6 +434,96 @@ func _AgentRuntime_Subscribe_Handler(srv interface{}, stream grpc.ServerStream) 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type AgentRuntime_SubscribeServer = grpc.ServerStreamingServer[Event]
 
+func _AgentRuntime_Send_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SendRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentRuntimeServer).Send(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentRuntime_Send_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentRuntimeServer).Send(ctx, req.(*SendRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentRuntime_PeekInbox_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PeekInboxRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentRuntimeServer).PeekInbox(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentRuntime_PeekInbox_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentRuntimeServer).PeekInbox(ctx, req.(*PeekInboxRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentRuntime_AckInbox_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AckInboxRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentRuntimeServer).AckInbox(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentRuntime_AckInbox_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentRuntimeServer).AckInbox(ctx, req.(*AckInboxRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentRuntime_Ready_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReadyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentRuntimeServer).Ready(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentRuntime_Ready_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentRuntimeServer).Ready(ctx, req.(*ReadyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentRuntime_QueryAudit_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(QueryAuditRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentRuntimeServer).QueryAudit(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentRuntime_QueryAudit_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentRuntimeServer).QueryAudit(ctx, req.(*QueryAuditRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AgentRuntime_ServiceDesc is the grpc.ServiceDesc for AgentRuntime service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -380,6 +554,26 @@ var AgentRuntime_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListSessions",
 			Handler:    _AgentRuntime_ListSessions_Handler,
+		},
+		{
+			MethodName: "Send",
+			Handler:    _AgentRuntime_Send_Handler,
+		},
+		{
+			MethodName: "PeekInbox",
+			Handler:    _AgentRuntime_PeekInbox_Handler,
+		},
+		{
+			MethodName: "AckInbox",
+			Handler:    _AgentRuntime_AckInbox_Handler,
+		},
+		{
+			MethodName: "Ready",
+			Handler:    _AgentRuntime_Ready_Handler,
+		},
+		{
+			MethodName: "QueryAudit",
+			Handler:    _AgentRuntime_QueryAudit_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

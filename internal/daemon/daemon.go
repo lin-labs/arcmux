@@ -17,6 +17,7 @@ import (
 	"github.com/lin-labs/arcmux/internal/health"
 	"github.com/lin-labs/arcmux/internal/hooks"
 	"github.com/lin-labs/arcmux/internal/manager/cmuxcli"
+	"github.com/lin-labs/arcmux/internal/manager/store"
 	"github.com/lin-labs/arcmux/internal/profile"
 	"github.com/lin-labs/arcmux/internal/session"
 	"github.com/lin-labs/arcmux/internal/tmux"
@@ -48,6 +49,15 @@ type Daemon struct {
 	cancel   context.CancelFunc
 
 	pulse *PulseSupervisor
+
+	// state is the daemon-level bbolt store backing the C1 substrate RPCs
+	// (Send/PeekInbox/AckInbox/QueryAudit). Opened at Start, lazily on
+	// first need if Start hasn't been called (test path). One file:
+	// <DataRoot>/arcmux/_daemon/state.bolt. Distinct from per-project
+	// state.bolt files the pulse supervisor opens — those still live at
+	// <DataRoot>/arcmux/<project>/state.bolt.
+	stateMu sync.Mutex
+	state   *store.DB
 }
 
 // New creates a new daemon instance.
@@ -90,6 +100,15 @@ func (d *Daemon) Start(ctx context.Context) error {
 	}
 	if err := os.MkdirAll(d.cfg.Hooks.HookOutputDir, 0o755); err != nil {
 		return fmt.Errorf("create hook output dir: %w", err)
+	}
+
+	// Open daemon-level state.bolt for the C1 substrate surfaces
+	// (Send/PeekInbox/AckInbox/QueryAudit). Best-effort: a failure to
+	// open is non-fatal — the daemon still serves legacy RPCs. The C1
+	// handlers re-check d.state and return Unavailable if it's nil.
+	if err := d.openState(); err != nil {
+		d.logger.Warn("open daemon state.bolt failed; C1 inbox/audit RPCs will return Unavailable",
+			"error", err)
 	}
 
 	// Restore sessions from persistence
@@ -198,6 +217,114 @@ func (d *Daemon) Stop() {
 	}
 
 	d.eventBus.Close()
+
+	// Close daemon state.bolt last so any in-flight C1 audits flush.
+	d.stateMu.Lock()
+	if d.state != nil {
+		_ = d.state.Close()
+		d.state = nil
+	}
+	d.stateMu.Unlock()
+}
+
+// openState opens the daemon-level state.bolt under
+// <DataRoot>/arcmux/_daemon/state.bolt. Called from Start; safe to call
+// once. A nil d.state after this is the signal to C1 RPCs that the
+// substrate is unavailable.
+func (d *Daemon) openState() error {
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
+	if d.state != nil {
+		return nil
+	}
+	root := d.cfg.Pulse.DataRoot
+	if root == "" {
+		// Pulse may be disabled and DataRoot left empty; fall back to a
+		// stable per-user path so the daemon still has somewhere to
+		// write. Match the install convention: ~/data/arcmux.
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("resolve home: %w", err)
+		}
+		root = filepath.Join(home, "data")
+	}
+	dir := filepath.Join(root, "arcmux", "_daemon")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", dir, err)
+	}
+	path := filepath.Join(dir, "state.bolt")
+	db, err := store.Open(path)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", path, err)
+	}
+	d.state = db
+	d.logger.Info("daemon state.bolt opened", "path", path)
+	return nil
+}
+
+// State returns the daemon-level bbolt store backing the C1 substrate
+// RPCs, or nil if it wasn't opened. C1 RPC handlers use this to short-
+// circuit cleanly when the substrate is unavailable.
+func (d *Daemon) State() *store.DB {
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
+	return d.state
+}
+
+// SetState lets tests inject a pre-opened bbolt store. Mirrors the
+// pulse_supervisor_test injection pattern so we can exercise the C1
+// RPCs without going through Start().
+func (d *Daemon) SetState(s *store.DB) {
+	d.stateMu.Lock()
+	defer d.stateMu.Unlock()
+	d.state = s
+}
+
+// auditSessionEvent appends an audit row tagged with the session's
+// owner_id + session_id when the daemon-level store is open. Best-effort:
+// no-op if the store hasn't been opened (test paths that bypass Start).
+func (d *Daemon) auditSessionEvent(action string, sess *session.Session, detail map[string]any) {
+	st := d.State()
+	if st == nil || sess == nil {
+		return
+	}
+	snap := sess.Snapshot()
+	if detail == nil {
+		detail = map[string]any{}
+	}
+	// Mirror substrate-wide convention: owner_id + session_id travel in
+	// Detail so the existing AuditEntry shape doesn't have to grow new
+	// top-level columns in C1 (it will when C2/C3 land — see plan §11).
+	if _, ok := detail["owner_id"]; !ok && snap.OwnerID != "" {
+		detail["owner_id"] = snap.OwnerID
+	}
+	if _, ok := detail["session_id"]; !ok {
+		detail["session_id"] = snap.ID
+	}
+	_ = st.AppendAudit(store.AuditEntry{
+		Timestamp: time.Now(),
+		Action:    action,
+		Actor:     "arcmux",
+		Subject:   snap.Name,
+		Detail:    detail,
+	})
+}
+
+// FindSessionByName returns the in-memory session with the given Name,
+// or nil if none exists. The C1 RPCs key off the human-readable name
+// rather than the opaque session_id because (a) elonco-style callers
+// manage their own naming, and (b) tests can assert against stable
+// names instead of generated IDs. Same lookup helper the HTTP layer
+// uses via findByName.
+func (d *Daemon) FindSessionByName(name string) *session.Session {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	for _, s := range d.sessions {
+		if s.Snapshot().Name == name {
+			return s
+		}
+	}
+	return nil
 }
 
 // CreateSession starts a new agent session.
@@ -224,6 +351,16 @@ func (d *Daemon) CreateSession(ctx context.Context, req CreateSessionRequest) (*
 	sess.SetTransport(prof.Transport)
 	sess.SetEnv(req.Env)
 	sess.SetAutoClose(req.AutoClose)
+	sess.SetOwnerID(req.OwnerID)
+
+	// Audit the create. Best-effort — the store may not be open yet (test
+	// paths that don't call Start), in which case auditState returns nil
+	// and we skip the row.
+	d.auditSessionEvent("session.create", sess, map[string]any{
+		"agent": req.Agent,
+		"cwd":   req.CWD,
+		"name":  name,
+	})
 
 	d.logger.Info("creating session",
 		"session_id", id,
@@ -735,6 +872,10 @@ type CreateSessionRequest struct {
 	TmuxWindow  string
 	Env         map[string]string
 	AutoClose   bool // exec transport only: transition to StateExited on subprocess exit
+	// OwnerID is a free-form caller-attribution tag (e.g. "elonco:my-project"),
+	// recorded on the Session and on every audit row the daemon writes for
+	// that session. Empty default for legacy callers.
+	OwnerID string
 }
 
 func generateSessionID() string {

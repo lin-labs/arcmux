@@ -34,6 +34,7 @@ func (s *GRPCServer) CreateSession(ctx context.Context, req *arcmuxv1.CreateSess
 		TmuxWindow:  req.TmuxWindow,
 		Env:         req.Env,
 		AutoClose:   req.AutoClose,
+		OwnerID:     req.OwnerId,
 	})
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "create session: %v", err)
@@ -45,6 +46,7 @@ func (s *GRPCServer) CreateSession(ctx context.Context, req *arcmuxv1.CreateSess
 		TmuxTarget: snap.TmuxTarget,
 		Pid:        int64(snap.PID),
 		State:      string(snap.State),
+		OwnerId:    snap.OwnerID,
 	}, nil
 }
 
@@ -117,6 +119,7 @@ func (s *GRPCServer) Status(ctx context.Context, req *arcmuxv1.StatusRequest) (*
 		LastActivityAt: snap.LastActivityAt.Format(time.RFC3339),
 		Health:         snap.Health,
 		NudgeCount:     int32(snap.NudgeCount),
+		OwnerId:        snap.OwnerID,
 	}
 
 	// Populate hook state from watcher
@@ -167,6 +170,7 @@ func (s *GRPCServer) ListSessions(ctx context.Context, req *arcmuxv1.ListSession
 			TmuxTarget:  snap.TmuxTarget,
 			StartedAt:   snap.StartedAt.Format(time.RFC3339),
 			SessionName: snap.Name,
+			OwnerId:     snap.OwnerID,
 		})
 	}
 

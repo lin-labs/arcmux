@@ -28,6 +28,14 @@ const (
 	BucketInboxICs        = "inbox-ics"
 	BucketAudit           = "audit"
 	BucketMeta            = "meta"
+
+	// BucketSessionInbox (C1, additive) is the parent bucket holding one
+	// nested sub-bucket per arcmux Session — keyed by session name. Each
+	// nested bucket stores InboxMsg JSON values under time-sortable keys,
+	// same shape as the elon/manager/ic inboxes. Created lazily by
+	// EnsureSessionInbox; readers tolerate a missing sub-bucket as "no
+	// queue exists yet".
+	BucketSessionInbox = "session-inbox"
 )
 
 // AllBuckets lists buckets created on Open. BucketInboxManagers and
@@ -49,6 +57,7 @@ var AllBuckets = []string{
 	BucketInboxICs,
 	BucketAudit,
 	BucketMeta,
+	BucketSessionInbox,
 }
 
 // DB wraps a bbolt handle with arcmux-specific helpers.

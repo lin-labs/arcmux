@@ -39,7 +39,8 @@ type Session struct {
 	IdleSince        *time.Time
 	NudgeCount       int
 	Env              map[string]string
-	AutoClose        bool // for exec transport: transition to StateExited on subprocess exit
+	AutoClose        bool   // for exec transport: transition to StateExited on subprocess exit
+	OwnerID          string // C1: free-form caller attribution tag (e.g. "elonco:my-project"); empty for legacy callers
 }
 
 // NewSession creates a session in starting state.
@@ -136,6 +137,13 @@ func (s *Session) SetAutoClose(v bool) {
 	s.AutoClose = v
 }
 
+// SetOwnerID records the caller-attribution tag. Empty is allowed.
+func (s *Session) SetOwnerID(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.OwnerID = id
+}
+
 // SetEnv replaces the session environment snapshot.
 func (s *Session) SetEnv(env map[string]string) {
 	s.mu.Lock()
@@ -170,6 +178,7 @@ type Snapshot struct {
 	IdleSince        *time.Time
 	NudgeCount       int
 	AutoClose        bool
+	OwnerID          string
 }
 
 func (s *Session) Snapshot() Snapshot {
@@ -193,6 +202,7 @@ func (s *Session) Snapshot() Snapshot {
 		IdleSince:        s.IdleSince,
 		NudgeCount:       s.NudgeCount,
 		AutoClose:        s.AutoClose,
+		OwnerID:          s.OwnerID,
 	}
 }
 

@@ -16,6 +16,14 @@ service AgentRuntime {
   // Streaming
   rpc StreamOutput(StreamOutputRequest) returns (stream OutputChunk);
   rpc Subscribe(SubscribeRequest) returns (stream Event);
+
+  // C1 additions: queueable Send + per-session inbox + readiness + audit query.
+  // These are additive — existing RPCs continue to work unchanged.
+  rpc Send(SendRequest) returns (SendResponse);
+  rpc PeekInbox(PeekInboxRequest) returns (PeekInboxResponse);
+  rpc AckInbox(AckInboxRequest) returns (AckInboxResponse);
+  rpc Ready(ReadyRequest) returns (ReadyResponse);
+  rpc QueryAudit(QueryAuditRequest) returns (QueryAuditResponse);
 }
 
 // --- CreateSession ---
@@ -33,6 +41,10 @@ message CreateSessionRequest {
   // entry instead of keeping it as a resumable-but-dead handle. Ignored for
   // tmux transport.
   bool auto_close = 8;
+  // Caller tag for attribution: free-form, persisted on the Session and
+  // included in audit rows. Empty default for backwards-compat — direct
+  // legacy callers (voxtop, current arcmux-call) leave it blank.
+  string owner_id = 9;
 }
 
 message CreateSessionResponse {
@@ -40,6 +52,7 @@ message CreateSessionResponse {
   string tmux_target = 2;     // e.g. "agents:myapp.%42"
   int64 pid = 3;
   string state = 4;
+  string owner_id = 5;        // echoed back; empty if request didn't set it
 }
 
 // --- SendPrompt ---
@@ -88,6 +101,7 @@ message StatusResponse {
   string health = 8;          // "healthy", "stuck", "escalated"
   int32 nudge_count = 9;
   HookState hook_state = 10;
+  string owner_id = 11;       // C1: echo for attribution
 }
 
 message HookState {
@@ -126,6 +140,7 @@ message SessionSummary {
   string tmux_target = 5;
   string started_at = 6;
   string session_name = 7;
+  string owner_id = 8;        // C1: echo for attribution
 }
 
 // --- StreamOutput ---
@@ -153,4 +168,91 @@ message Event {
   string state = 4;
   string message = 5;
   map<string, string> data = 6;
+}
+
+// --- C1: Send (queueable variant of SendPrompt) ---
+
+// Send delivers a prompt body to a session by NAME. Routing semantics:
+//   - If the session is ready (idle / safely interruptible), deliver
+//     immediately like SendPrompt and return delivered=true, queued=false.
+//   - Otherwise, push the body onto the session's persistent inbox and
+//     return delivered=false, queued=true with the assigned msg_id.
+//
+// This is the substrate primitive elonco (and future orchestrators) call
+// instead of choosing SendPrompt-vs-PushInbox themselves.
+message SendRequest {
+  string session_name = 1;
+  string body = 2;
+  string from = 3;            // optional: caller-supplied "actor" tag for the inbox entry
+}
+
+message SendResponse {
+  string msg_id = 1;          // populated whether or not we queued; on direct deliver, it's the audit handle
+  bool delivered = 2;         // true == sent into the agent pane synchronously
+  bool queued = 3;            // true == enqueued; the pulse loop / next Ready will deliver
+}
+
+// --- C1: PeekInbox ---
+
+message PeekInboxRequest {
+  string session_name = 1;
+  int32 n = 2;                // max number of messages (oldest-first); <=0 returns all
+}
+
+message PeekInboxResponse {
+  repeated InboxMessage messages = 1;
+}
+
+message InboxMessage {
+  string id = 1;
+  string body = 2;
+  string received_at = 3;     // RFC3339
+  string from = 4;            // empty when caller didn't tag
+}
+
+// --- C1: AckInbox ---
+
+message AckInboxRequest {
+  string session_name = 1;
+  string msg_id = 2;
+}
+
+message AckInboxResponse {
+  bool acked = 1;             // idempotent: false ONLY if the inbox bucket itself is missing; missing msg_id returns true
+}
+
+// --- C1: Ready ---
+
+message ReadyRequest {
+  string session_name = 1;
+}
+
+message ReadyResponse {
+  bool ready = 1;
+  string reason = 2;          // human-readable: "idle", "working", "no-such-session", etc.
+  string last_signal_at = 3;  // RFC3339 of last observed activity / hook signal
+  string state = 4;           // current session state, for callers that want the raw label
+}
+
+// --- C1: QueryAudit ---
+
+message QueryAuditRequest {
+  string owner_id = 1;        // optional filter
+  string session_id = 2;      // optional filter
+  string since = 3;           // optional RFC3339 lower bound
+  int32 limit = 4;            // <=0 means "default" (handler picks a sane cap)
+}
+
+message QueryAuditResponse {
+  repeated AuditEntry entries = 1;
+}
+
+message AuditEntry {
+  string timestamp = 1;       // RFC3339
+  string action = 2;          // lowercase verb, e.g. "session.create" / "inbox.push"
+  string actor = 3;
+  string subject = 4;
+  string owner_id = 5;        // free-form attribution tag (mirrors Session.owner_id)
+  string session_id = 6;      // optional, when the row pertains to a specific session
+  map<string, string> detail = 7;
 }

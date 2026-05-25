@@ -34,7 +34,11 @@ type CreateSessionRequest struct {
 	// than StateIdle) after the subprocess exits, so the persist layer drops the
 	// entry instead of keeping it as a resumable-but-dead handle. Ignored for
 	// tmux transport.
-	AutoClose     bool `protobuf:"varint,8,opt,name=auto_close,json=autoClose,proto3" json:"auto_close,omitempty"`
+	AutoClose bool `protobuf:"varint,8,opt,name=auto_close,json=autoClose,proto3" json:"auto_close,omitempty"`
+	// Caller tag for attribution: free-form, persisted on the Session and
+	// included in audit rows. Empty default for backwards-compat — direct
+	// legacy callers (voxtop, current arcmux-call) leave it blank.
+	OwnerId       string `protobuf:"bytes,9,opt,name=owner_id,json=ownerId,proto3" json:"owner_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -125,12 +129,20 @@ func (x *CreateSessionRequest) GetAutoClose() bool {
 	return false
 }
 
+func (x *CreateSessionRequest) GetOwnerId() string {
+	if x != nil {
+		return x.OwnerId
+	}
+	return ""
+}
+
 type CreateSessionResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	TmuxTarget    string                 `protobuf:"bytes,2,opt,name=tmux_target,json=tmuxTarget,proto3" json:"tmux_target,omitempty"` // e.g. "agents:myapp.%42"
 	Pid           int64                  `protobuf:"varint,3,opt,name=pid,proto3" json:"pid,omitempty"`
 	State         string                 `protobuf:"bytes,4,opt,name=state,proto3" json:"state,omitempty"`
+	OwnerId       string                 `protobuf:"bytes,5,opt,name=owner_id,json=ownerId,proto3" json:"owner_id,omitempty"` // echoed back; empty if request didn't set it
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -189,6 +201,13 @@ func (x *CreateSessionResponse) GetPid() int64 {
 func (x *CreateSessionResponse) GetState() string {
 	if x != nil {
 		return x.State
+	}
+	return ""
+}
+
+func (x *CreateSessionResponse) GetOwnerId() string {
+	if x != nil {
+		return x.OwnerId
 	}
 	return ""
 }
@@ -497,6 +516,7 @@ type StatusResponse struct {
 	Health         string                 `protobuf:"bytes,8,opt,name=health,proto3" json:"health,omitempty"` // "healthy", "stuck", "escalated"
 	NudgeCount     int32                  `protobuf:"varint,9,opt,name=nudge_count,json=nudgeCount,proto3" json:"nudge_count,omitempty"`
 	HookState      *HookState             `protobuf:"bytes,10,opt,name=hook_state,json=hookState,proto3" json:"hook_state,omitempty"`
+	OwnerId        string                 `protobuf:"bytes,11,opt,name=owner_id,json=ownerId,proto3" json:"owner_id,omitempty"` // C1: echo for attribution
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -599,6 +619,13 @@ func (x *StatusResponse) GetHookState() *HookState {
 		return x.HookState
 	}
 	return nil
+}
+
+func (x *StatusResponse) GetOwnerId() string {
+	if x != nil {
+		return x.OwnerId
+	}
+	return ""
 }
 
 type HookState struct {
@@ -870,6 +897,7 @@ type SessionSummary struct {
 	TmuxTarget    string                 `protobuf:"bytes,5,opt,name=tmux_target,json=tmuxTarget,proto3" json:"tmux_target,omitempty"`
 	StartedAt     string                 `protobuf:"bytes,6,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
 	SessionName   string                 `protobuf:"bytes,7,opt,name=session_name,json=sessionName,proto3" json:"session_name,omitempty"`
+	OwnerId       string                 `protobuf:"bytes,8,opt,name=owner_id,json=ownerId,proto3" json:"owner_id,omitempty"` // C1: echo for attribution
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -949,6 +977,13 @@ func (x *SessionSummary) GetStartedAt() string {
 func (x *SessionSummary) GetSessionName() string {
 	if x != nil {
 		return x.SessionName
+	}
+	return ""
+}
+
+func (x *SessionSummary) GetOwnerId() string {
+	if x != nil {
+		return x.OwnerId
 	}
 	return ""
 }
@@ -1185,11 +1220,715 @@ func (x *Event) GetData() map[string]string {
 	return nil
 }
 
+// Send delivers a prompt body to a session by NAME. Routing semantics:
+//   - If the session is ready (idle / safely interruptible), deliver
+//     immediately like SendPrompt and return delivered=true, queued=false.
+//   - Otherwise, push the body onto the session's persistent inbox and
+//     return delivered=false, queued=true with the assigned msg_id.
+//
+// This is the substrate primitive elonco (and future orchestrators) call
+// instead of choosing SendPrompt-vs-PushInbox themselves.
+type SendRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionName   string                 `protobuf:"bytes,1,opt,name=session_name,json=sessionName,proto3" json:"session_name,omitempty"`
+	Body          string                 `protobuf:"bytes,2,opt,name=body,proto3" json:"body,omitempty"`
+	From          string                 `protobuf:"bytes,3,opt,name=from,proto3" json:"from,omitempty"` // optional: caller-supplied "actor" tag for the inbox entry
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SendRequest) Reset() {
+	*x = SendRequest{}
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SendRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SendRequest) ProtoMessage() {}
+
+func (x *SendRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SendRequest.ProtoReflect.Descriptor instead.
+func (*SendRequest) Descriptor() ([]byte, []int) {
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *SendRequest) GetSessionName() string {
+	if x != nil {
+		return x.SessionName
+	}
+	return ""
+}
+
+func (x *SendRequest) GetBody() string {
+	if x != nil {
+		return x.Body
+	}
+	return ""
+}
+
+func (x *SendRequest) GetFrom() string {
+	if x != nil {
+		return x.From
+	}
+	return ""
+}
+
+type SendResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	MsgId         string                 `protobuf:"bytes,1,opt,name=msg_id,json=msgId,proto3" json:"msg_id,omitempty"` // populated whether or not we queued; on direct deliver, it's the audit handle
+	Delivered     bool                   `protobuf:"varint,2,opt,name=delivered,proto3" json:"delivered,omitempty"`     // true == sent into the agent pane synchronously
+	Queued        bool                   `protobuf:"varint,3,opt,name=queued,proto3" json:"queued,omitempty"`           // true == enqueued; the pulse loop / next Ready will deliver
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SendResponse) Reset() {
+	*x = SendResponse{}
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SendResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SendResponse) ProtoMessage() {}
+
+func (x *SendResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SendResponse.ProtoReflect.Descriptor instead.
+func (*SendResponse) Descriptor() ([]byte, []int) {
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *SendResponse) GetMsgId() string {
+	if x != nil {
+		return x.MsgId
+	}
+	return ""
+}
+
+func (x *SendResponse) GetDelivered() bool {
+	if x != nil {
+		return x.Delivered
+	}
+	return false
+}
+
+func (x *SendResponse) GetQueued() bool {
+	if x != nil {
+		return x.Queued
+	}
+	return false
+}
+
+type PeekInboxRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionName   string                 `protobuf:"bytes,1,opt,name=session_name,json=sessionName,proto3" json:"session_name,omitempty"`
+	N             int32                  `protobuf:"varint,2,opt,name=n,proto3" json:"n,omitempty"` // max number of messages (oldest-first); <=0 returns all
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PeekInboxRequest) Reset() {
+	*x = PeekInboxRequest{}
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PeekInboxRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PeekInboxRequest) ProtoMessage() {}
+
+func (x *PeekInboxRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PeekInboxRequest.ProtoReflect.Descriptor instead.
+func (*PeekInboxRequest) Descriptor() ([]byte, []int) {
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *PeekInboxRequest) GetSessionName() string {
+	if x != nil {
+		return x.SessionName
+	}
+	return ""
+}
+
+func (x *PeekInboxRequest) GetN() int32 {
+	if x != nil {
+		return x.N
+	}
+	return 0
+}
+
+type PeekInboxResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Messages      []*InboxMessage        `protobuf:"bytes,1,rep,name=messages,proto3" json:"messages,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PeekInboxResponse) Reset() {
+	*x = PeekInboxResponse{}
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PeekInboxResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PeekInboxResponse) ProtoMessage() {}
+
+func (x *PeekInboxResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PeekInboxResponse.ProtoReflect.Descriptor instead.
+func (*PeekInboxResponse) Descriptor() ([]byte, []int) {
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *PeekInboxResponse) GetMessages() []*InboxMessage {
+	if x != nil {
+		return x.Messages
+	}
+	return nil
+}
+
+type InboxMessage struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Body          string                 `protobuf:"bytes,2,opt,name=body,proto3" json:"body,omitempty"`
+	ReceivedAt    string                 `protobuf:"bytes,3,opt,name=received_at,json=receivedAt,proto3" json:"received_at,omitempty"` // RFC3339
+	From          string                 `protobuf:"bytes,4,opt,name=from,proto3" json:"from,omitempty"`                               // empty when caller didn't tag
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *InboxMessage) Reset() {
+	*x = InboxMessage{}
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InboxMessage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InboxMessage) ProtoMessage() {}
+
+func (x *InboxMessage) ProtoReflect() protoreflect.Message {
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InboxMessage.ProtoReflect.Descriptor instead.
+func (*InboxMessage) Descriptor() ([]byte, []int) {
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *InboxMessage) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *InboxMessage) GetBody() string {
+	if x != nil {
+		return x.Body
+	}
+	return ""
+}
+
+func (x *InboxMessage) GetReceivedAt() string {
+	if x != nil {
+		return x.ReceivedAt
+	}
+	return ""
+}
+
+func (x *InboxMessage) GetFrom() string {
+	if x != nil {
+		return x.From
+	}
+	return ""
+}
+
+type AckInboxRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionName   string                 `protobuf:"bytes,1,opt,name=session_name,json=sessionName,proto3" json:"session_name,omitempty"`
+	MsgId         string                 `protobuf:"bytes,2,opt,name=msg_id,json=msgId,proto3" json:"msg_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AckInboxRequest) Reset() {
+	*x = AckInboxRequest{}
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AckInboxRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AckInboxRequest) ProtoMessage() {}
+
+func (x *AckInboxRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AckInboxRequest.ProtoReflect.Descriptor instead.
+func (*AckInboxRequest) Descriptor() ([]byte, []int) {
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *AckInboxRequest) GetSessionName() string {
+	if x != nil {
+		return x.SessionName
+	}
+	return ""
+}
+
+func (x *AckInboxRequest) GetMsgId() string {
+	if x != nil {
+		return x.MsgId
+	}
+	return ""
+}
+
+type AckInboxResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Acked         bool                   `protobuf:"varint,1,opt,name=acked,proto3" json:"acked,omitempty"` // idempotent: false ONLY if the inbox bucket itself is missing; missing msg_id returns true
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AckInboxResponse) Reset() {
+	*x = AckInboxResponse{}
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AckInboxResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AckInboxResponse) ProtoMessage() {}
+
+func (x *AckInboxResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AckInboxResponse.ProtoReflect.Descriptor instead.
+func (*AckInboxResponse) Descriptor() ([]byte, []int) {
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *AckInboxResponse) GetAcked() bool {
+	if x != nil {
+		return x.Acked
+	}
+	return false
+}
+
+type ReadyRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionName   string                 `protobuf:"bytes,1,opt,name=session_name,json=sessionName,proto3" json:"session_name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReadyRequest) Reset() {
+	*x = ReadyRequest{}
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReadyRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReadyRequest) ProtoMessage() {}
+
+func (x *ReadyRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReadyRequest.ProtoReflect.Descriptor instead.
+func (*ReadyRequest) Descriptor() ([]byte, []int) {
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *ReadyRequest) GetSessionName() string {
+	if x != nil {
+		return x.SessionName
+	}
+	return ""
+}
+
+type ReadyResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Ready         bool                   `protobuf:"varint,1,opt,name=ready,proto3" json:"ready,omitempty"`
+	Reason        string                 `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`                                   // human-readable: "idle", "working", "no-such-session", etc.
+	LastSignalAt  string                 `protobuf:"bytes,3,opt,name=last_signal_at,json=lastSignalAt,proto3" json:"last_signal_at,omitempty"` // RFC3339 of last observed activity / hook signal
+	State         string                 `protobuf:"bytes,4,opt,name=state,proto3" json:"state,omitempty"`                                     // current session state, for callers that want the raw label
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReadyResponse) Reset() {
+	*x = ReadyResponse{}
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReadyResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReadyResponse) ProtoMessage() {}
+
+func (x *ReadyResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReadyResponse.ProtoReflect.Descriptor instead.
+func (*ReadyResponse) Descriptor() ([]byte, []int) {
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *ReadyResponse) GetReady() bool {
+	if x != nil {
+		return x.Ready
+	}
+	return false
+}
+
+func (x *ReadyResponse) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *ReadyResponse) GetLastSignalAt() string {
+	if x != nil {
+		return x.LastSignalAt
+	}
+	return ""
+}
+
+func (x *ReadyResponse) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+type QueryAuditRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	OwnerId       string                 `protobuf:"bytes,1,opt,name=owner_id,json=ownerId,proto3" json:"owner_id,omitempty"`       // optional filter
+	SessionId     string                 `protobuf:"bytes,2,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"` // optional filter
+	Since         string                 `protobuf:"bytes,3,opt,name=since,proto3" json:"since,omitempty"`                          // optional RFC3339 lower bound
+	Limit         int32                  `protobuf:"varint,4,opt,name=limit,proto3" json:"limit,omitempty"`                         // <=0 means "default" (handler picks a sane cap)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *QueryAuditRequest) Reset() {
+	*x = QueryAuditRequest{}
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *QueryAuditRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*QueryAuditRequest) ProtoMessage() {}
+
+func (x *QueryAuditRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use QueryAuditRequest.ProtoReflect.Descriptor instead.
+func (*QueryAuditRequest) Descriptor() ([]byte, []int) {
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{27}
+}
+
+func (x *QueryAuditRequest) GetOwnerId() string {
+	if x != nil {
+		return x.OwnerId
+	}
+	return ""
+}
+
+func (x *QueryAuditRequest) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *QueryAuditRequest) GetSince() string {
+	if x != nil {
+		return x.Since
+	}
+	return ""
+}
+
+func (x *QueryAuditRequest) GetLimit() int32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+type QueryAuditResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Entries       []*AuditEntry          `protobuf:"bytes,1,rep,name=entries,proto3" json:"entries,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *QueryAuditResponse) Reset() {
+	*x = QueryAuditResponse{}
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *QueryAuditResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*QueryAuditResponse) ProtoMessage() {}
+
+func (x *QueryAuditResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use QueryAuditResponse.ProtoReflect.Descriptor instead.
+func (*QueryAuditResponse) Descriptor() ([]byte, []int) {
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *QueryAuditResponse) GetEntries() []*AuditEntry {
+	if x != nil {
+		return x.Entries
+	}
+	return nil
+}
+
+type AuditEntry struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Timestamp     string                 `protobuf:"bytes,1,opt,name=timestamp,proto3" json:"timestamp,omitempty"` // RFC3339
+	Action        string                 `protobuf:"bytes,2,opt,name=action,proto3" json:"action,omitempty"`       // lowercase verb, e.g. "session.create" / "inbox.push"
+	Actor         string                 `protobuf:"bytes,3,opt,name=actor,proto3" json:"actor,omitempty"`
+	Subject       string                 `protobuf:"bytes,4,opt,name=subject,proto3" json:"subject,omitempty"`
+	OwnerId       string                 `protobuf:"bytes,5,opt,name=owner_id,json=ownerId,proto3" json:"owner_id,omitempty"`       // free-form attribution tag (mirrors Session.owner_id)
+	SessionId     string                 `protobuf:"bytes,6,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"` // optional, when the row pertains to a specific session
+	Detail        map[string]string      `protobuf:"bytes,7,rep,name=detail,proto3" json:"detail,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AuditEntry) Reset() {
+	*x = AuditEntry{}
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AuditEntry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AuditEntry) ProtoMessage() {}
+
+func (x *AuditEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AuditEntry.ProtoReflect.Descriptor instead.
+func (*AuditEntry) Descriptor() ([]byte, []int) {
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *AuditEntry) GetTimestamp() string {
+	if x != nil {
+		return x.Timestamp
+	}
+	return ""
+}
+
+func (x *AuditEntry) GetAction() string {
+	if x != nil {
+		return x.Action
+	}
+	return ""
+}
+
+func (x *AuditEntry) GetActor() string {
+	if x != nil {
+		return x.Actor
+	}
+	return ""
+}
+
+func (x *AuditEntry) GetSubject() string {
+	if x != nil {
+		return x.Subject
+	}
+	return ""
+}
+
+func (x *AuditEntry) GetOwnerId() string {
+	if x != nil {
+		return x.OwnerId
+	}
+	return ""
+}
+
+func (x *AuditEntry) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *AuditEntry) GetDetail() map[string]string {
+	if x != nil {
+		return x.Detail
+	}
+	return nil
+}
+
 var File_arcmux_v1_arcmux_proto protoreflect.FileDescriptor
 
 const file_arcmux_v1_arcmux_proto_rawDesc = "" +
 	"\n" +
-	"\x16arcmux/v1/arcmux.proto\x12\tarcmux.v1\"\xd0\x02\n" +
+	"\x16arcmux/v1/arcmux.proto\x12\tarcmux.v1\"\xeb\x02\n" +
 	"\x14CreateSessionRequest\x12\x14\n" +
 	"\x05agent\x18\x01 \x01(\tR\x05agent\x12\x10\n" +
 	"\x03cwd\x18\x02 \x01(\tR\x03cwd\x12\x16\n" +
@@ -1200,17 +1939,19 @@ const file_arcmux_v1_arcmux_proto_rawDesc = "" +
 	"tmuxWindow\x12:\n" +
 	"\x03env\x18\a \x03(\v2(.arcmux.v1.CreateSessionRequest.EnvEntryR\x03env\x12\x1d\n" +
 	"\n" +
-	"auto_close\x18\b \x01(\bR\tautoClose\x1a6\n" +
+	"auto_close\x18\b \x01(\bR\tautoClose\x12\x19\n" +
+	"\bowner_id\x18\t \x01(\tR\aownerId\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x7f\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x9a\x01\n" +
 	"\x15CreateSessionResponse\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x1f\n" +
 	"\vtmux_target\x18\x02 \x01(\tR\n" +
 	"tmuxTarget\x12\x10\n" +
 	"\x03pid\x18\x03 \x01(\x03R\x03pid\x12\x14\n" +
-	"\x05state\x18\x04 \x01(\tR\x05state\"\x8e\x01\n" +
+	"\x05state\x18\x04 \x01(\tR\x05state\x12\x19\n" +
+	"\bowner_id\x18\x05 \x01(\tR\aownerId\"\x8e\x01\n" +
 	"\x11SendPromptRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x12\n" +
@@ -1233,7 +1974,7 @@ const file_arcmux_v1_arcmux_proto_rawDesc = "" +
 	"idle_since\x18\x05 \x01(\tR\tidleSince\".\n" +
 	"\rStatusRequest\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x01 \x01(\tR\tsessionId\"\xc5\x02\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\"\xe0\x02\n" +
 	"\x0eStatusResponse\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x14\n" +
@@ -1250,7 +1991,8 @@ const file_arcmux_v1_arcmux_proto_rawDesc = "" +
 	"nudgeCount\x123\n" +
 	"\n" +
 	"hook_state\x18\n" +
-	" \x01(\v2\x14.arcmux.v1.HookStateR\thookState\"\x92\x01\n" +
+	" \x01(\v2\x14.arcmux.v1.HookStateR\thookState\x12\x19\n" +
+	"\bowner_id\x18\v \x01(\tR\aownerId\"\x92\x01\n" +
 	"\tHookState\x12\x16\n" +
 	"\x06source\x18\x01 \x01(\tR\x06source\x12\"\n" +
 	"\rlast_tool_use\x18\x02 \x01(\tR\vlastToolUse\x12#\n" +
@@ -1267,7 +2009,7 @@ const file_arcmux_v1_arcmux_proto_rawDesc = "" +
 	"finalState\"\x15\n" +
 	"\x13ListSessionsRequest\"M\n" +
 	"\x14ListSessionsResponse\x125\n" +
-	"\bsessions\x18\x01 \x03(\v2\x19.arcmux.v1.SessionSummaryR\bsessions\"\xd0\x01\n" +
+	"\bsessions\x18\x01 \x03(\v2\x19.arcmux.v1.SessionSummaryR\bsessions\"\xeb\x01\n" +
 	"\x0eSessionSummary\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x14\n" +
@@ -1278,7 +2020,8 @@ const file_arcmux_v1_arcmux_proto_rawDesc = "" +
 	"tmuxTarget\x12\x1d\n" +
 	"\n" +
 	"started_at\x18\x06 \x01(\tR\tstartedAt\x12!\n" +
-	"\fsession_name\x18\a \x01(\tR\vsessionName\"4\n" +
+	"\fsession_name\x18\a \x01(\tR\vsessionName\x12\x19\n" +
+	"\bowner_id\x18\b \x01(\tR\aownerId\"4\n" +
 	"\x13StreamOutputRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\"?\n" +
@@ -1300,7 +2043,59 @@ const file_arcmux_v1_arcmux_proto_rawDesc = "" +
 	"\x04data\x18\x06 \x03(\v2\x1a.arcmux.v1.Event.DataEntryR\x04data\x1a7\n" +
 	"\tDataEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x012\xc0\x04\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"X\n" +
+	"\vSendRequest\x12!\n" +
+	"\fsession_name\x18\x01 \x01(\tR\vsessionName\x12\x12\n" +
+	"\x04body\x18\x02 \x01(\tR\x04body\x12\x12\n" +
+	"\x04from\x18\x03 \x01(\tR\x04from\"[\n" +
+	"\fSendResponse\x12\x15\n" +
+	"\x06msg_id\x18\x01 \x01(\tR\x05msgId\x12\x1c\n" +
+	"\tdelivered\x18\x02 \x01(\bR\tdelivered\x12\x16\n" +
+	"\x06queued\x18\x03 \x01(\bR\x06queued\"C\n" +
+	"\x10PeekInboxRequest\x12!\n" +
+	"\fsession_name\x18\x01 \x01(\tR\vsessionName\x12\f\n" +
+	"\x01n\x18\x02 \x01(\x05R\x01n\"H\n" +
+	"\x11PeekInboxResponse\x123\n" +
+	"\bmessages\x18\x01 \x03(\v2\x17.arcmux.v1.InboxMessageR\bmessages\"g\n" +
+	"\fInboxMessage\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
+	"\x04body\x18\x02 \x01(\tR\x04body\x12\x1f\n" +
+	"\vreceived_at\x18\x03 \x01(\tR\n" +
+	"receivedAt\x12\x12\n" +
+	"\x04from\x18\x04 \x01(\tR\x04from\"K\n" +
+	"\x0fAckInboxRequest\x12!\n" +
+	"\fsession_name\x18\x01 \x01(\tR\vsessionName\x12\x15\n" +
+	"\x06msg_id\x18\x02 \x01(\tR\x05msgId\"(\n" +
+	"\x10AckInboxResponse\x12\x14\n" +
+	"\x05acked\x18\x01 \x01(\bR\x05acked\"1\n" +
+	"\fReadyRequest\x12!\n" +
+	"\fsession_name\x18\x01 \x01(\tR\vsessionName\"y\n" +
+	"\rReadyResponse\x12\x14\n" +
+	"\x05ready\x18\x01 \x01(\bR\x05ready\x12\x16\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reason\x12$\n" +
+	"\x0elast_signal_at\x18\x03 \x01(\tR\flastSignalAt\x12\x14\n" +
+	"\x05state\x18\x04 \x01(\tR\x05state\"y\n" +
+	"\x11QueryAuditRequest\x12\x19\n" +
+	"\bowner_id\x18\x01 \x01(\tR\aownerId\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x02 \x01(\tR\tsessionId\x12\x14\n" +
+	"\x05since\x18\x03 \x01(\tR\x05since\x12\x14\n" +
+	"\x05limit\x18\x04 \x01(\x05R\x05limit\"E\n" +
+	"\x12QueryAuditResponse\x12/\n" +
+	"\aentries\x18\x01 \x03(\v2\x15.arcmux.v1.AuditEntryR\aentries\"\xa2\x02\n" +
+	"\n" +
+	"AuditEntry\x12\x1c\n" +
+	"\ttimestamp\x18\x01 \x01(\tR\ttimestamp\x12\x16\n" +
+	"\x06action\x18\x02 \x01(\tR\x06action\x12\x14\n" +
+	"\x05actor\x18\x03 \x01(\tR\x05actor\x12\x18\n" +
+	"\asubject\x18\x04 \x01(\tR\asubject\x12\x19\n" +
+	"\bowner_id\x18\x05 \x01(\tR\aownerId\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x06 \x01(\tR\tsessionId\x129\n" +
+	"\x06detail\x18\a \x03(\v2!.arcmux.v1.AuditEntry.DetailEntryR\x06detail\x1a9\n" +
+	"\vDetailEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x012\x8d\a\n" +
 	"\fAgentRuntime\x12R\n" +
 	"\rCreateSession\x12\x1f.arcmux.v1.CreateSessionRequest\x1a .arcmux.v1.CreateSessionResponse\x12I\n" +
 	"\n" +
@@ -1310,7 +2105,13 @@ const file_arcmux_v1_arcmux_proto_rawDesc = "" +
 	"\x04Kill\x12\x16.arcmux.v1.KillRequest\x1a\x17.arcmux.v1.KillResponse\x12O\n" +
 	"\fListSessions\x12\x1e.arcmux.v1.ListSessionsRequest\x1a\x1f.arcmux.v1.ListSessionsResponse\x12H\n" +
 	"\fStreamOutput\x12\x1e.arcmux.v1.StreamOutputRequest\x1a\x16.arcmux.v1.OutputChunk0\x01\x12<\n" +
-	"\tSubscribe\x12\x1b.arcmux.v1.SubscribeRequest\x1a\x10.arcmux.v1.Event0\x01B3Z1github.com/lin-labs/arcmux/gen/arcmux/v1;arcmuxv1b\x06proto3"
+	"\tSubscribe\x12\x1b.arcmux.v1.SubscribeRequest\x1a\x10.arcmux.v1.Event0\x01\x127\n" +
+	"\x04Send\x12\x16.arcmux.v1.SendRequest\x1a\x17.arcmux.v1.SendResponse\x12F\n" +
+	"\tPeekInbox\x12\x1b.arcmux.v1.PeekInboxRequest\x1a\x1c.arcmux.v1.PeekInboxResponse\x12C\n" +
+	"\bAckInbox\x12\x1a.arcmux.v1.AckInboxRequest\x1a\x1b.arcmux.v1.AckInboxResponse\x12:\n" +
+	"\x05Ready\x12\x17.arcmux.v1.ReadyRequest\x1a\x18.arcmux.v1.ReadyResponse\x12I\n" +
+	"\n" +
+	"QueryAudit\x12\x1c.arcmux.v1.QueryAuditRequest\x1a\x1d.arcmux.v1.QueryAuditResponseB3Z1github.com/lin-labs/arcmux/gen/arcmux/v1;arcmuxv1b\x06proto3"
 
 var (
 	file_arcmux_v1_arcmux_proto_rawDescOnce sync.Once
@@ -1324,7 +2125,7 @@ func file_arcmux_v1_arcmux_proto_rawDescGZIP() []byte {
 	return file_arcmux_v1_arcmux_proto_rawDescData
 }
 
-var file_arcmux_v1_arcmux_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
+var file_arcmux_v1_arcmux_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
 var file_arcmux_v1_arcmux_proto_goTypes = []any{
 	(*CreateSessionRequest)(nil),  // 0: arcmux.v1.CreateSessionRequest
 	(*CreateSessionResponse)(nil), // 1: arcmux.v1.CreateSessionResponse
@@ -1344,35 +2145,61 @@ var file_arcmux_v1_arcmux_proto_goTypes = []any{
 	(*OutputChunk)(nil),           // 15: arcmux.v1.OutputChunk
 	(*SubscribeRequest)(nil),      // 16: arcmux.v1.SubscribeRequest
 	(*Event)(nil),                 // 17: arcmux.v1.Event
-	nil,                           // 18: arcmux.v1.CreateSessionRequest.EnvEntry
-	nil,                           // 19: arcmux.v1.Event.DataEntry
+	(*SendRequest)(nil),           // 18: arcmux.v1.SendRequest
+	(*SendResponse)(nil),          // 19: arcmux.v1.SendResponse
+	(*PeekInboxRequest)(nil),      // 20: arcmux.v1.PeekInboxRequest
+	(*PeekInboxResponse)(nil),     // 21: arcmux.v1.PeekInboxResponse
+	(*InboxMessage)(nil),          // 22: arcmux.v1.InboxMessage
+	(*AckInboxRequest)(nil),       // 23: arcmux.v1.AckInboxRequest
+	(*AckInboxResponse)(nil),      // 24: arcmux.v1.AckInboxResponse
+	(*ReadyRequest)(nil),          // 25: arcmux.v1.ReadyRequest
+	(*ReadyResponse)(nil),         // 26: arcmux.v1.ReadyResponse
+	(*QueryAuditRequest)(nil),     // 27: arcmux.v1.QueryAuditRequest
+	(*QueryAuditResponse)(nil),    // 28: arcmux.v1.QueryAuditResponse
+	(*AuditEntry)(nil),            // 29: arcmux.v1.AuditEntry
+	nil,                           // 30: arcmux.v1.CreateSessionRequest.EnvEntry
+	nil,                           // 31: arcmux.v1.Event.DataEntry
+	nil,                           // 32: arcmux.v1.AuditEntry.DetailEntry
 }
 var file_arcmux_v1_arcmux_proto_depIdxs = []int32{
-	18, // 0: arcmux.v1.CreateSessionRequest.env:type_name -> arcmux.v1.CreateSessionRequest.EnvEntry
+	30, // 0: arcmux.v1.CreateSessionRequest.env:type_name -> arcmux.v1.CreateSessionRequest.EnvEntry
 	8,  // 1: arcmux.v1.StatusResponse.hook_state:type_name -> arcmux.v1.HookState
 	13, // 2: arcmux.v1.ListSessionsResponse.sessions:type_name -> arcmux.v1.SessionSummary
-	19, // 3: arcmux.v1.Event.data:type_name -> arcmux.v1.Event.DataEntry
-	0,  // 4: arcmux.v1.AgentRuntime.CreateSession:input_type -> arcmux.v1.CreateSessionRequest
-	2,  // 5: arcmux.v1.AgentRuntime.SendPrompt:input_type -> arcmux.v1.SendPromptRequest
-	4,  // 6: arcmux.v1.AgentRuntime.Capture:input_type -> arcmux.v1.CaptureRequest
-	6,  // 7: arcmux.v1.AgentRuntime.Status:input_type -> arcmux.v1.StatusRequest
-	9,  // 8: arcmux.v1.AgentRuntime.Kill:input_type -> arcmux.v1.KillRequest
-	11, // 9: arcmux.v1.AgentRuntime.ListSessions:input_type -> arcmux.v1.ListSessionsRequest
-	14, // 10: arcmux.v1.AgentRuntime.StreamOutput:input_type -> arcmux.v1.StreamOutputRequest
-	16, // 11: arcmux.v1.AgentRuntime.Subscribe:input_type -> arcmux.v1.SubscribeRequest
-	1,  // 12: arcmux.v1.AgentRuntime.CreateSession:output_type -> arcmux.v1.CreateSessionResponse
-	3,  // 13: arcmux.v1.AgentRuntime.SendPrompt:output_type -> arcmux.v1.SendPromptResponse
-	5,  // 14: arcmux.v1.AgentRuntime.Capture:output_type -> arcmux.v1.CaptureResponse
-	7,  // 15: arcmux.v1.AgentRuntime.Status:output_type -> arcmux.v1.StatusResponse
-	10, // 16: arcmux.v1.AgentRuntime.Kill:output_type -> arcmux.v1.KillResponse
-	12, // 17: arcmux.v1.AgentRuntime.ListSessions:output_type -> arcmux.v1.ListSessionsResponse
-	15, // 18: arcmux.v1.AgentRuntime.StreamOutput:output_type -> arcmux.v1.OutputChunk
-	17, // 19: arcmux.v1.AgentRuntime.Subscribe:output_type -> arcmux.v1.Event
-	12, // [12:20] is the sub-list for method output_type
-	4,  // [4:12] is the sub-list for method input_type
-	4,  // [4:4] is the sub-list for extension type_name
-	4,  // [4:4] is the sub-list for extension extendee
-	0,  // [0:4] is the sub-list for field type_name
+	31, // 3: arcmux.v1.Event.data:type_name -> arcmux.v1.Event.DataEntry
+	22, // 4: arcmux.v1.PeekInboxResponse.messages:type_name -> arcmux.v1.InboxMessage
+	29, // 5: arcmux.v1.QueryAuditResponse.entries:type_name -> arcmux.v1.AuditEntry
+	32, // 6: arcmux.v1.AuditEntry.detail:type_name -> arcmux.v1.AuditEntry.DetailEntry
+	0,  // 7: arcmux.v1.AgentRuntime.CreateSession:input_type -> arcmux.v1.CreateSessionRequest
+	2,  // 8: arcmux.v1.AgentRuntime.SendPrompt:input_type -> arcmux.v1.SendPromptRequest
+	4,  // 9: arcmux.v1.AgentRuntime.Capture:input_type -> arcmux.v1.CaptureRequest
+	6,  // 10: arcmux.v1.AgentRuntime.Status:input_type -> arcmux.v1.StatusRequest
+	9,  // 11: arcmux.v1.AgentRuntime.Kill:input_type -> arcmux.v1.KillRequest
+	11, // 12: arcmux.v1.AgentRuntime.ListSessions:input_type -> arcmux.v1.ListSessionsRequest
+	14, // 13: arcmux.v1.AgentRuntime.StreamOutput:input_type -> arcmux.v1.StreamOutputRequest
+	16, // 14: arcmux.v1.AgentRuntime.Subscribe:input_type -> arcmux.v1.SubscribeRequest
+	18, // 15: arcmux.v1.AgentRuntime.Send:input_type -> arcmux.v1.SendRequest
+	20, // 16: arcmux.v1.AgentRuntime.PeekInbox:input_type -> arcmux.v1.PeekInboxRequest
+	23, // 17: arcmux.v1.AgentRuntime.AckInbox:input_type -> arcmux.v1.AckInboxRequest
+	25, // 18: arcmux.v1.AgentRuntime.Ready:input_type -> arcmux.v1.ReadyRequest
+	27, // 19: arcmux.v1.AgentRuntime.QueryAudit:input_type -> arcmux.v1.QueryAuditRequest
+	1,  // 20: arcmux.v1.AgentRuntime.CreateSession:output_type -> arcmux.v1.CreateSessionResponse
+	3,  // 21: arcmux.v1.AgentRuntime.SendPrompt:output_type -> arcmux.v1.SendPromptResponse
+	5,  // 22: arcmux.v1.AgentRuntime.Capture:output_type -> arcmux.v1.CaptureResponse
+	7,  // 23: arcmux.v1.AgentRuntime.Status:output_type -> arcmux.v1.StatusResponse
+	10, // 24: arcmux.v1.AgentRuntime.Kill:output_type -> arcmux.v1.KillResponse
+	12, // 25: arcmux.v1.AgentRuntime.ListSessions:output_type -> arcmux.v1.ListSessionsResponse
+	15, // 26: arcmux.v1.AgentRuntime.StreamOutput:output_type -> arcmux.v1.OutputChunk
+	17, // 27: arcmux.v1.AgentRuntime.Subscribe:output_type -> arcmux.v1.Event
+	19, // 28: arcmux.v1.AgentRuntime.Send:output_type -> arcmux.v1.SendResponse
+	21, // 29: arcmux.v1.AgentRuntime.PeekInbox:output_type -> arcmux.v1.PeekInboxResponse
+	24, // 30: arcmux.v1.AgentRuntime.AckInbox:output_type -> arcmux.v1.AckInboxResponse
+	26, // 31: arcmux.v1.AgentRuntime.Ready:output_type -> arcmux.v1.ReadyResponse
+	28, // 32: arcmux.v1.AgentRuntime.QueryAudit:output_type -> arcmux.v1.QueryAuditResponse
+	20, // [20:33] is the sub-list for method output_type
+	7,  // [7:20] is the sub-list for method input_type
+	7,  // [7:7] is the sub-list for extension type_name
+	7,  // [7:7] is the sub-list for extension extendee
+	0,  // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_arcmux_v1_arcmux_proto_init() }
@@ -1386,7 +2213,7 @@ func file_arcmux_v1_arcmux_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_arcmux_v1_arcmux_proto_rawDesc), len(file_arcmux_v1_arcmux_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   20,
+			NumMessages:   33,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
