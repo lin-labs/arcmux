@@ -6,14 +6,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
-	"regexp"
 	"time"
 
-	"github.com/lin-labs/arcmux/internal/manager/paths"
+	"github.com/lin-labs/arcmux/internal/manager/scratchpad"
 )
-
-var roleSlug = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
 
 // cmdScratchpad dispatches `arcmux-call scratchpad <sub>`.
 func cmdScratchpad(args []string, stdin io.Reader, stdout io.Writer) error {
@@ -38,9 +34,12 @@ func cmdScratchpadRead(args []string, stdout io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	path, err := scratchpadPath(*dataRoot, *project, *role, "read")
+	if *project == "" {
+		return fmt.Errorf("scratchpad read: --project or $ARCMUX_PROJECT required")
+	}
+	path, err := scratchpad.Path(*dataRoot, *project, *role)
 	if err != nil {
-		return err
+		return fmt.Errorf("scratchpad read: %w", err)
 	}
 
 	info, err := os.Stat(path)
@@ -71,17 +70,19 @@ func cmdScratchpadWrite(args []string, stdin io.Reader, stdout io.Writer) error 
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	path, err := scratchpadPath(*dataRoot, *project, *role, "write")
+	if *project == "" {
+		return fmt.Errorf("scratchpad write: --project or $ARCMUX_PROJECT required")
+	}
+	path, err := scratchpad.Path(*dataRoot, *project, *role)
 	if err != nil {
-		return err
+		return fmt.Errorf("scratchpad write: %w", err)
 	}
 
 	body, err := io.ReadAll(stdin)
 	if err != nil {
 		return fmt.Errorf("scratchpad write: read body from stdin: %w", err)
 	}
-
-	if err := atomicWrite(path, body); err != nil {
+	if err := scratchpad.Write(path, body); err != nil {
 		return fmt.Errorf("scratchpad write: %w", err)
 	}
 	return json.NewEncoder(stdout).Encode(map[string]any{
@@ -89,70 +90,4 @@ func cmdScratchpadWrite(args []string, stdin io.Reader, stdout io.Writer) error 
 		"path": path,
 		"size": len(body),
 	})
-}
-
-// scratchpadPath validates inputs, ensures the scratchpads dir exists, and
-// returns the canonical file path. label is the subcommand name used in
-// error messages.
-func scratchpadPath(dataRoot, project, role, label string) (string, error) {
-	if role == "" {
-		return "", fmt.Errorf("scratchpad %s: --role required", label)
-	}
-	if !roleSlug.MatchString(role) {
-		return "", fmt.Errorf("scratchpad %s: invalid --role %q (must match [A-Za-z0-9][A-Za-z0-9_.-]{0,63})", label, role)
-	}
-	if project == "" {
-		return "", fmt.Errorf("scratchpad %s: --project or $ARCMUX_PROJECT required", label)
-	}
-	if _, err := paths.Validate(project); err != nil {
-		return "", err
-	}
-	p := paths.ForProject(dataRoot, "", project)
-	if err := os.MkdirAll(p.Scratchpads, 0o700); err != nil {
-		return "", fmt.Errorf("scratchpad %s: ensure %s: %w", label, p.Scratchpads, err)
-	}
-	return filepath.Join(p.Scratchpads, role+".json"), nil
-}
-
-// atomicWrite writes body to path via a sibling tmp file + rename, with
-// fsync on both file and parent dir to survive crashes between rename and
-// flush. Permissions are 0600 (machine-local ephemeral state).
-func atomicWrite(path string, body []byte) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+"-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	cleanup := func() { _ = os.Remove(tmpName) }
-
-	if _, err := tmp.Write(body); err != nil {
-		tmp.Close()
-		cleanup()
-		return err
-	}
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		cleanup()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		cleanup()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		cleanup()
-		return err
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		cleanup()
-		return err
-	}
-	// Best-effort parent dir fsync so the rename survives a power cut.
-	if d, err := os.Open(dir); err == nil {
-		_ = d.Sync()
-		_ = d.Close()
-	}
-	return nil
 }

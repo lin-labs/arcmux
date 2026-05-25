@@ -1,6 +1,23 @@
 package store
 
-import "time"
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"time"
+)
+
+// NewInboxID returns a sortable id of the form "<unix-ns>-<6-hex>", suitable
+// for InboxMsg.ID. The time prefix gives natural chronological ordering in
+// logs and tooling; the hex suffix avoids collisions on identical-nano
+// writes from independent processes.
+func NewInboxID() (string, error) {
+	var b [3]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%d-%s", time.Now().UnixNano(), hex.EncodeToString(b[:])), nil
+}
 
 // Team is a manager-led group of ICs working a domain.
 type Team struct {

@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -68,7 +66,7 @@ func cmdInboxPush(args []string, stdin io.Reader, stdout io.Writer) error {
 
 	msgID := *id
 	if msgID == "" {
-		msgID, err = generateInboxID()
+		msgID, err = store.NewInboxID()
 		if err != nil {
 			return fmt.Errorf("inbox push: generate id: %w", err)
 		}
@@ -163,11 +161,3 @@ func cmdInboxAck(args []string, stdout io.Writer) error {
 	return json.NewEncoder(stdout).Encode(map[string]any{"ok": true, "id": *id})
 }
 
-// generateInboxID returns a sortable-ish id: unix-ns + 6 random hex chars.
-func generateInboxID() (string, error) {
-	var b [3]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%d-%s", time.Now().UnixNano(), hex.EncodeToString(b[:])), nil
-}

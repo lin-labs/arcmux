@@ -18,7 +18,7 @@ import (
 func CmdManager(ctx context.Context, args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("manager", flag.ContinueOnError)
 	mission := fs.String("mission", "", "initial mission statement (free text)")
-	dataRoot := fs.String("data-root", "", "override data root (default $HOME/data)")
+	dataRoot := fs.String("data-root", os.Getenv("ARCMUX_DATA"), "override data root (default $ARCMUX_DATA, then $HOME/data)")
 	vaultRoot := fs.String("vault-root", os.Getenv("OBS_AGENTS"), "override vault root (default $OBS_AGENTS)")
 	updateRoles := fs.Bool("update-roles", false, "overwrite global role-file seeds with the binary's embedded versions")
 	focus := fs.Bool("focus", true, "focus the new cmux workspace after creation")
