@@ -1,4 +1,4 @@
-.PHONY: build install proto test validate validate-e2e validate-all clean start stop restart status logs tail release deploy
+.PHONY: build install proto test validate validate-e2e validate-eval validate-all clean start stop restart status logs tail release deploy
 
 BINARY := arcmux
 INSTALL_DIR := $(HOME)/.local/bin
@@ -15,6 +15,7 @@ build:
 	go build -o bin/$(BINARY) ./cmd/arcmux
 	go build -o bin/$(BINARY)-call ./cmd/arcmux-call
 	go build -o bin/$(BINARY)-e2e ./cmd/arcmux-e2e
+	go build -o bin/$(BINARY)-eval ./cmd/arcmux-eval
 
 install: build
 	mkdir -p $(INSTALL_DIR)
@@ -46,7 +47,23 @@ validate-e2e: build
 
 # Full validation pass: structural (validate.sh) AND behavioral (e2e). Use
 # this on Elon-turn cycles that touched substrate code or wire shape.
+#
+# Note: validate-all does NOT include validate-eval. eval spends real tokens
+# (spawns claude headless against scenarios in testdata/eval-scenarios/) and
+# is run on demand, not per-commit.
 validate-all: validate validate-e2e
+
+# Agent-behavioral eval harness: spawns real claude -p invocations against
+# scenario prompts, validates artifacts in a sandboxed workrepo. Optional
+# SCENARIO= filter selects one or more scenario names; default runs all.
+# Burns tokens — run intentionally, not as part of the per-commit gate.
+#
+#   make validate-eval                          # all scenarios
+#   make validate-eval SCENARIO=hello-server    # one scenario by name
+#
+# See cmd/arcmux-eval/ and testdata/eval-scenarios/.
+validate-eval: build
+	@./bin/$(BINARY)-eval $(if $(SCENARIO),--scenario $(SCENARIO))
 
 clean:
 	rm -rf bin/ gen/
