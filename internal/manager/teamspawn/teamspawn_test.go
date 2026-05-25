@@ -212,6 +212,93 @@ func TestSpawnHappyPath(t *testing.T) {
 	if got, _ := a.Detail["vision_seeded"].(bool); !got {
 		t.Errorf("audit vision_seeded = false, want true")
 	}
+	if got, _ := a.Detail["vision_inbox_id"].(string); got != r.VisionInboxID {
+		t.Errorf("audit vision_inbox_id = %q, want %q", got, r.VisionInboxID)
+	}
+
+	// Vision landed in the per-team manager inbox.
+	if r.VisionInboxID == "" {
+		t.Fatal("Result.VisionInboxID empty, want a generated id")
+	}
+	if !db.HasManagerInbox("auth-refactor") {
+		t.Fatal("manager inbox bucket missing for spawned team")
+	}
+	mgrMsgs, err := db.PeekManagerInbox("auth-refactor", 10)
+	if err != nil {
+		t.Fatalf("PeekManagerInbox: %v", err)
+	}
+	if len(mgrMsgs) != 1 {
+		t.Fatalf("manager inbox = %d msgs, want 1", len(mgrMsgs))
+	}
+	m := mgrMsgs[0]
+	if m.ID != r.VisionInboxID {
+		t.Errorf("inbox msg id = %q, want %q", m.ID, r.VisionInboxID)
+	}
+	if m.Verb != "add" {
+		t.Errorf("inbox msg verb = %q, want add", m.Verb)
+	}
+	if m.From != "elon" {
+		t.Errorf("inbox msg from = %q, want elon", m.From)
+	}
+	if m.Body != "ship the new oauth bridge" {
+		t.Errorf("inbox msg body = %q, want the raw vision", m.Body)
+	}
+
+	// Scratchpad bootstrap.vision_inbox_id matches the inbox id.
+	var withInbox struct {
+		Bootstrap struct {
+			VisionInboxID string `json:"vision_inbox_id"`
+		} `json:"bootstrap"`
+	}
+	if err := json.Unmarshal(pad, &withInbox); err != nil {
+		t.Fatalf("re-unmarshal scratchpad: %v", err)
+	}
+	if withInbox.Bootstrap.VisionInboxID != r.VisionInboxID {
+		t.Errorf("scratchpad vision_inbox_id = %q, want %q",
+			withInbox.Bootstrap.VisionInboxID, r.VisionInboxID)
+	}
+}
+
+// TestSpawnEmptyVisionLeavesInboxBucketEmpty ensures that a spawn with no
+// vision still creates the inbox bucket (so the manager can poll for later
+// orders) but does not push a placeholder message.
+func TestSpawnEmptyVisionLeavesInboxBucketEmpty(t *testing.T) {
+	dataRoot := t.TempDir()
+	vault := t.TempDir()
+	_, cli := okCmux()
+	db := openTestDB(t)
+
+	r, err := Spawn(context.Background(), Opts{
+		DB: db, Cmux: cli, Project: "p", Slug: "silent",
+		Vision: "  \n\t", Agent: "claude",
+		VaultRoot: vault, DataRoot: dataRoot,
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if r.VisionInboxID != "" {
+		t.Errorf("VisionInboxID = %q, want empty for whitespace-only vision", r.VisionInboxID)
+	}
+	if !db.HasManagerInbox("silent") {
+		t.Error("expected inbox bucket to exist even when no vision pushed")
+	}
+	msgs, _ := db.PeekManagerInbox("silent", 5)
+	if len(msgs) != 0 {
+		t.Errorf("expected empty inbox after empty-vision spawn, got %+v", msgs)
+	}
+
+	// Audit detail confirms vision_seeded=false, vision_inbox_id="".
+	entries, _ := db.RecentAudit(5)
+	if len(entries) == 0 || entries[0].Action != "team-spawned" {
+		t.Fatalf("expected team-spawned audit, got %+v", entries)
+	}
+	a := entries[0]
+	if got, _ := a.Detail["vision_seeded"].(bool); got {
+		t.Errorf("audit vision_seeded = true, want false")
+	}
+	if got, _ := a.Detail["vision_inbox_id"].(string); got != "" {
+		t.Errorf("audit vision_inbox_id = %q, want empty", got)
+	}
 }
 
 func TestSpawnEmptyVision(t *testing.T) {

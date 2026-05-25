@@ -55,6 +55,9 @@ type Result struct {
 	BootstrapPath  string
 	ScratchpadPath string
 	CharterPath    string
+	// VisionInboxID is the manager-inbox message ID for the seeded vision.
+	// Empty when Vision was empty/whitespace-only.
+	VisionInboxID string
 }
 
 // Spawn creates a new team. See package doc for the full sequence.
@@ -98,6 +101,18 @@ func Spawn(ctx context.Context, o Opts) (*Result, error) {
 	startedAt := time.Now()
 	vision := strings.TrimSpace(o.Vision)
 
+	// Generate the vision inbox ID up front so the scratchpad bootstrap
+	// fields and the actual inbox push agree on a single value. Empty when
+	// no vision was supplied.
+	var visionInboxID string
+	if vision != "" {
+		id, err := store.NewInboxID()
+		if err != nil {
+			return nil, fmt.Errorf("generate vision inbox id: %w", err)
+		}
+		visionInboxID = id
+	}
+
 	// 1. Seed the manager scratchpad. role = "manager-<slug>" so multiple
 	// managers within one project keep separate files.
 	role := "manager-" + slug
@@ -105,7 +120,7 @@ func Spawn(ctx context.Context, o Opts) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("scratchpad path: %w", err)
 	}
-	pad := initialManagerScratchpad(o.Project, slug, o, startedAt)
+	pad := initialManagerScratchpad(o.Project, slug, o, startedAt, visionInboxID)
 	padBody, err := json.MarshalIndent(pad, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("marshal scratchpad: %w", err)
@@ -186,7 +201,32 @@ func Spawn(ctx context.Context, o Opts) (*Result, error) {
 		return nil, fmt.Errorf("put team: %w", err)
 	}
 
-	// 6. Audit. Direct AppendAudit because this caller already holds the
+	// 6. Create the per-team manager inbox bucket. This is the recurring
+	// channel by which Elon (or any out-of-process caller) dispatches new
+	// orders to the manager after spawn — charter is one-shot, inbox is
+	// recurring. Mirrors how BucketInboxElon underpins user→Elon orders.
+	if err := o.DB.EnsureManagerInbox(slug); err != nil {
+		return nil, fmt.Errorf("ensure manager inbox: %w", err)
+	}
+
+	// 7. If a vision was supplied, push it as the first inbox message so the
+	// manager's bootstrap protocol can consume it through the same primitive
+	// as every subsequent order. Verb "add" mirrors mission delivery to
+	// Elon (see project.go Step 3).
+	if vision != "" {
+		if err := o.DB.PushManagerInbox(slug, store.InboxMsg{
+			ID:         visionInboxID,
+			Verb:       "add",
+			From:       "elon",
+			Priority:   0,
+			Body:       o.Vision,
+			ReceivedAt: startedAt,
+		}); err != nil {
+			return nil, fmt.Errorf("push vision: %w", err)
+		}
+	}
+
+	// 8. Audit. Direct AppendAudit because this caller already holds the
 	// bbolt write lock for the dispatch.
 	_ = o.DB.AppendAudit(store.AuditEntry{
 		Timestamp: startedAt,
@@ -194,14 +234,15 @@ func Spawn(ctx context.Context, o Opts) (*Result, error) {
 		Actor:     "arcmux",
 		Subject:   slug,
 		Detail: map[string]any{
-			"agent":           o.Agent,
-			"workspace_ref":   ws.Ref,
-			"manager_pane":    managerPane.Ref,
-			"bootstrap_path":  bootstrapPath,
-			"scratchpad_path": spPath,
-			"charter_path":    charterPath,
-			"vision_bytes":    len(o.Vision),
-			"vision_seeded":   vision != "",
+			"agent":            o.Agent,
+			"workspace_ref":    ws.Ref,
+			"manager_pane":     managerPane.Ref,
+			"bootstrap_path":   bootstrapPath,
+			"scratchpad_path":  spPath,
+			"charter_path":     charterPath,
+			"vision_bytes":     len(o.Vision),
+			"vision_seeded":    vision != "",
+			"vision_inbox_id":  visionInboxID,
 		},
 	})
 
@@ -212,6 +253,7 @@ func Spawn(ctx context.Context, o Opts) (*Result, error) {
 		BootstrapPath:  bootstrapPath,
 		ScratchpadPath: spPath,
 		CharterPath:    charterPath,
+		VisionInboxID:  visionInboxID,
 	}, nil
 }
 
@@ -247,18 +289,20 @@ See teams/%s/journal.md (append-only, created on first manager activation).
 `, project, slug, startedAt.UTC().Format("2006-01-02"), slug, body, slug)
 }
 
-func initialManagerScratchpad(project, slug string, o Opts, startedAt time.Time) map[string]any {
+func initialManagerScratchpad(project, slug string, o Opts, startedAt time.Time, visionInboxID string) map[string]any {
 	vision := strings.TrimSpace(o.Vision)
-	focus := "Fresh team spawn — read charter, write turn-0 journal, decompose vision into IC contracts."
+	focus := "Fresh team spawn — read charter + inbox, write turn-0 journal, decompose vision into IC contracts."
 	next := []string{
+		"arcmux-call inbox peek --to manager:" + slug + " --n 5 (read seeded vision)",
 		"Read $ARCMUX_VAULT/Projects/" + project + "/teams/" + slug + "/charter.md",
 		"Append turn-0 entry to teams/" + slug + "/journal.md",
-		"Decompose vision into IC contracts (CLI surface lands in Plan 4+)",
+		"Decompose vision into IC contracts (CLI surface lands in Plan 5+)",
 	}
 	if vision == "" {
 		focus = "(no vision supplied) — solicit clarification from Elon before dispatching ICs."
 		next = []string{
 			"Re-read charter for any updates",
+			"arcmux-call inbox peek --to manager:" + slug + " --n 5 (poll for Elon clarification)",
 			"Until Elon clarifies, no spawn decisions to make",
 		}
 	}
@@ -274,17 +318,18 @@ func initialManagerScratchpad(project, slug string, o Opts, startedAt time.Time)
 		"next_steps":    next,
 		"deferred":      []string{},
 		"bootstrap": map[string]any{
-			"project":        project,
-			"team":           slug,
-			"role":           "manager",
-			"agent":          o.Agent,
-			"vault_root":     o.VaultRoot,
+			"project":         project,
+			"team":            slug,
+			"role":            "manager",
+			"agent":           o.Agent,
+			"vault_root":      o.VaultRoot,
 			"data_root":      o.DataRoot,
-			"ephemeral_root": filepath.Join(o.DataRoot, "arcmux", project),
-			"started_at":     startedAt.Format(time.RFC3339Nano),
-			"vision_seeded":  vision != "",
-			"vision_bytes":   len(o.Vision),
-			"vision_sha256":  hex.EncodeToString(sum[:]),
+			"ephemeral_root":  filepath.Join(o.DataRoot, "arcmux", project),
+			"started_at":      startedAt.Format(time.RFC3339Nano),
+			"vision_seeded":   vision != "",
+			"vision_bytes":    len(o.Vision),
+			"vision_sha256":   hex.EncodeToString(sum[:]),
+			"vision_inbox_id": visionInboxID,
 		},
 	}
 }
