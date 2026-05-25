@@ -27,7 +27,7 @@ func die(err error) {
 
 func main() {
 	if len(os.Args) < 2 {
-		die(fmt.Errorf("usage: arcmux-call create|send|capture|status|audit|inbox|scratchpad|team|contract [args]"))
+		die(fmt.Errorf("usage: arcmux-call create|send|capture|status|audit|inbox|scratchpad|team|contract|ic [args]"))
 	}
 	cmd := os.Args[1]
 
@@ -55,6 +55,11 @@ func main() {
 		return
 	case "contract":
 		if err := cmdContract(os.Args[2:], os.Stdin, os.Stdout); err != nil {
+			die(err)
+		}
+		return
+	case "ic":
+		if err := cmdIC(os.Args[2:], os.Stdout); err != nil {
 			die(err)
 		}
 		return

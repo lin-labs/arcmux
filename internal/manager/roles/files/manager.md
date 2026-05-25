@@ -1,6 +1,6 @@
 ---
 role: manager
-version: 0.4.0
+version: 0.5.0
 extends: null
 ---
 
@@ -127,6 +127,35 @@ trail records every transition with `--by $ARCMUX_ROLE` by default. Inspect
 team state with `arcmux-call contract list --team $ARCMUX_TEAM` (priority-
 sorted), the DAG with `arcmux-call contract deps --id <id>`.
 
+## IC slot dispatch
+
+Once a contract is in `ready` (or `pending` if you want the IC to do the
+clarification round-trip first), spawn the IC pane that consumes it:
+
+```
+arcmux-call ic spawn --slot <slot-id> --contract <contract-id> \
+  [--role ic-base|linus|jobs|validator|...] [--agent claude|codex] [--focus]
+```
+
+`--team` defaults to `$ARCMUX_TEAM` so you can omit it from inside your
+pane. The substrate enforces:
+
+- Team must be active (no dispatching into a dissolving team).
+- Contract must belong to your team and not be in a terminal state
+  (completed/cancelled/failed) — these are signals the work is done.
+- Slot id must be free, or be a `dissolved` tombstone (you can respawn
+  under a familiar id after a clean dissolution).
+- HC cap: a team can hold at most 4 active ICs (Validator counted).
+- A role file at `$ARCMUX_VAULT/0Prompts/roles/<role>.md` must exist; the
+  IC's bootstrap primes its identity from that file via
+  `--append-system-prompt-file`.
+
+The spawned IC pane inherits `$ARCMUX_CONTRACT`; its bootstrap protocol
+re-reads the contract via `arcmux-call contract get --id $ARCMUX_CONTRACT`
+before doing anything else. Inspect your team's roster with
+`arcmux-call ic list --team $ARCMUX_TEAM` (or `--state active` to skip
+tombstones).
+
 ## Journal discipline (mandatory)
 
 **Every activation appends a block to your team journal.** Use the `Bash`
@@ -184,14 +213,18 @@ promotion on her next Review.
 
 ## What is NOT built yet
 
-(As of role-file version 0.4.0, the wider arcmux runtime is still being
+(As of role-file version 0.5.0, the wider arcmux runtime is still being
 built. Don't assume tooling that doesn't exist.)
 
-- No IC spawn primitive yet — `arcmux-call ic spawn` is Plan 5+. You can
-  create contracts via `arcmux-call contract create`, but the spawned
-  IC pane that consumes them does not exist yet — for now, contracts are
-  the durable record of what you'd dispatch, and you act as the validator
-  yourself.
+- No per-IC inbox channel — the initial contract is delivered to the IC
+  pane via `$ARCMUX_CONTRACT` at spawn time, but you cannot push later
+  updates to a specific IC through arcmux yet. For now, talk to your ICs
+  by `cmux send`-ing into their pane refs (visible in
+  `arcmux-call ic list --team $ARCMUX_TEAM`), and use contract
+  transitions + new contracts for state-bearing handoffs.
+- No `arcmux-call ic dissolve` — a slot's `state` can be flipped to
+  `dissolved` at the bbolt layer, but the cmux pane is not auto-closed
+  and the team's HC is not auto-decremented. Plan 6+.
 - No automatic notification — the per-team inbox primitive lets Elon
   queue orders, but you still poll (re-read your inbox each activation).
   Wake-on-write via cmux-notify is a later slice.

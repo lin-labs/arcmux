@@ -16,7 +16,9 @@ const CurrentSchemaVersion uint64 = 1
 const (
 	BucketTeams           = "teams"
 	BucketContracts       = "contracts"
+	BucketSlots           = "slots"
 	BucketIdxTeamContract = "idx-team-contract"
+	BucketIdxTeamSlot     = "idx-team-slot"
 	BucketIdxDepsParent   = "idx-deps-parent"
 	BucketIdxDepsChild    = "idx-deps-child"
 	BucketIdxState        = "idx-state"
@@ -33,7 +35,9 @@ const (
 var AllBuckets = []string{
 	BucketTeams,
 	BucketContracts,
+	BucketSlots,
 	BucketIdxTeamContract,
+	BucketIdxTeamSlot,
 	BucketIdxDepsParent,
 	BucketIdxDepsChild,
 	BucketIdxState,

@@ -25,6 +25,7 @@ type Options struct {
 	DataRoot  string // ~/data/
 	RoleFile  string // absolute path to the role markdown file
 	Team      string // team slug, for manager/IC bootstraps (optional)
+	Contract  string // initial contract id, for IC bootstraps (optional)
 	ScriptName string // override script filename; defaults to bootstrap-<role>.sh
 }
 
@@ -76,6 +77,9 @@ func buildScript(o Options) (string, error) {
 	b.WriteString(fmt.Sprintf("export ARCMUX_ROLE_FILE=%s\n", shellQuote(o.RoleFile)))
 	if o.Team != "" {
 		b.WriteString(fmt.Sprintf("export ARCMUX_TEAM=%s\n", shellQuote(o.Team)))
+	}
+	if o.Contract != "" {
+		b.WriteString(fmt.Sprintf("export ARCMUX_CONTRACT=%s\n", shellQuote(o.Contract)))
 	}
 	b.WriteString("\n")
 	b.WriteString(agentCmd)

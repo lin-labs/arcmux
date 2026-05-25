@@ -91,6 +91,36 @@ type InboxMsg struct {
 	ReceivedAt time.Time      `json:"received_at"`
 }
 
+// Slot is one IC headcount slot within a team. Spawned via Plan 5's
+// icspawn primitive; the bbolt record is the durable handle that lets a
+// respawn locate the pane, the seeded scratchpad, and the IC's bootstrap
+// script.
+type Slot struct {
+	ID             string    `json:"id"`              // unique slot id within project (slug)
+	Team           string    `json:"team"`            // owning team slug
+	Role           string    `json:"role"`            // specialization (ic-base | linus | jobs | validator | ...)
+	Contract       string    `json:"contract"`        // currently-bound contract id (may be reassigned in Plan 6+)
+	PaneRef        string    `json:"pane_ref"`        // cmux pane reference (split inside team workspace)
+	WorkspaceRef   string    `json:"workspace_ref"`   // same as team.WorkspaceRef
+	ScratchpadPath string    `json:"scratchpad_path"` // ~/data/arcmux/<project>/scratchpads/<arcmux_role>.json
+	BootstrapPath  string    `json:"bootstrap_path"`  // shell script that exec's the agent CLI
+	Agent          string    `json:"agent"`           // "claude" | "codex"
+	State          string    `json:"state"`           // active | idle | dissolved
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+// Valid slot states.
+const (
+	SlotActive    = "active"
+	SlotIdle      = "idle"
+	SlotDissolved = "dissolved"
+)
+
+// MaxICsPerTeam caps active IC slots per team (spec §10). Includes the
+// Validator (mandatory at HC ≥ 2) but excludes the manager.
+const MaxICsPerTeam = 4
+
 // Valid contract states.
 const (
 	ContractPending    = "pending"

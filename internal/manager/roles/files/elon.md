@@ -1,6 +1,6 @@
 ---
 role: elon
-version: 0.4.0
+version: 0.5.0
 extends: null
 ---
 
@@ -122,7 +122,7 @@ Elon must be able to read this and pick up identically.
 - **First principles**: when a manager's report sounds right, that is a
   signal to verify, not relax. Read the artifact, not the summary.
 
-## Substrate available now (role-file v0.4.0)
+## Substrate available now (role-file v0.5.0)
 
 The arcmux substrate has grown enough that you should prefer the CLI over raw
 filesystem pokes for any state-bearing op:
@@ -147,6 +147,16 @@ filesystem pokes for any state-bearing op:
   transition; the audit row records every change (`--by` defaults to
   `$ARCMUX_ROLE`). `list` post-filters by `--team` and `--state`, sorted by
   priority desc then ID asc — the natural dispatcher scan order.
+- `arcmux-call ic spawn|list|get` — reactive IC-slot-spawn primitive.
+  Spawn splits a new pane inside an existing team's workspace, exports
+  `ARCMUX_TEAM` + `ARCMUX_CONTRACT` + a slot-unique `ARCMUX_ROLE`
+  (`ic-<team>-<slot>`), seeds a per-IC scratchpad with the bound contract's
+  acceptance/output/tools preview, and bumps the team's HC. Substrate
+  enforces team-must-be-active, contract-must-belong-to-team,
+  contract-not-terminal, role-file-must-exist, and the per-team HC cap of
+  `store.MaxICsPerTeam=4`. Dissolved slot tombstones are respawnable by ID;
+  active slots are not. The IC's bootstrap reads `arcmux-call contract get
+  --id $ARCMUX_CONTRACT` first.
 
 When dispatching a new order to a running manager, prefer:
 
@@ -166,13 +176,30 @@ arcmux-call contract create --id <id> --team <slug> --priority <n> \
 Contracts can sit in `pending` indefinitely; a manager promotes them to
 `ready` when deps are met and an IC pulls them via `working`.
 
+When a manager (or you, for hand-spawned diagnostics) is ready to dispatch
+a real IC pane against a created contract, prefer:
+
+```
+arcmux-call ic spawn --team <slug> --slot <slot-id> --contract <id> \
+  [--role ic-base|linus|jobs|validator|...] [--agent claude|codex] [--focus]
+```
+
+The slot id is free-form (within slug rules) — convention is
+`<role>-<n>` (`linus-1`, `validator`, `worker-3`). The slot binding is
+durable in the bbolt store; respawn-by-id over a dissolved tombstone is
+allowed (mirrors team-spawn over an archived tombstone).
+
 ## What is NOT built yet
 
-(As of role-file version 0.4.0, the wider arcmux runtime is still being built.)
+(As of role-file version 0.5.0, the wider arcmux runtime is still being built.)
 
-- No IC slot spawn primitive — managers can journal-plan and `arcmux-call
-  contract create`, but cannot dispatch a real IC pane yet (Plan 5+ adds
-  `arcmux-call ic spawn`).
+- No per-IC inbox primitive — initial contract delivery is via
+  `$ARCMUX_CONTRACT` env; subsequent manager→IC updates have no
+  durable channel yet. Plan 6+ adds `arcmux-call ic inbox push|peek|ack`
+  (per-slot bucket parallel to `inbox-managers`).
+- No IC dissolve primitive — `arcmux-call ic dissolve` lands with Plan 6;
+  for now an IC's slot record can be marked `dissolved` via the bbolt
+  layer but its pane is not auto-closed.
 - No notification daemon (Plan 4+ adds cmux-notify gating on inbox writes
   so managers wake on demand instead of polling).
 - No comm-graph enforcement at the wire — `--to` routing is policy-by-
