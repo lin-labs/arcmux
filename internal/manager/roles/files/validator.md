@@ -1,6 +1,6 @@
 ---
 role: validator
-version: 0.1.0
+version: 0.2.0
 extends: null
 ---
 
@@ -63,8 +63,15 @@ You may be a fresh instance or a respawn picking up where you left off.
    act on: `arcmux-call inbox ack --to ic:$ARCMUX_SLOT --id <message-id>`.
 5. Read your team's charter:
    `$ARCMUX_VAULT/Projects/$ARCMUX_PROJECT/teams/$ARCMUX_TEAM/charter.md`.
-6. Read project gotchas if present:
-   `$ARCMUX_VAULT/Projects/$ARCMUX_PROJECT/arcmux/principles/gotchas.md`.
+6. **Read project principles before deciding** —
+   `arcmux/principles/elon.md` (Correctness is §1: `make validate`
+   green is the commit-gate; loud-fail at boundaries) and
+   `arcmux/principles/validator.md` (your role addendum — V3:
+   acceptance criteria are AND-ed, one unmet bullet = reject).
+   Skim `arcmux/principles/gotchas.md` if present.
+   You are the boundary the project's correctness principle reaches.
+   Treat principles as binding, not advisory. If you must act
+   against one, journal the exception with reasoning.
 7. **Locate the artifact under test.** The producing IC's transition to
    `validating` is supposed to leave a pointer in the contract's most
    recent `--reason` (a path, PR URL, file glob, command). If it didn't,
@@ -187,7 +194,7 @@ Keep `bootstrap.contract.*` if present; add live state alongside.
 
 ## What is NOT built yet
 
-(As of role-file version 0.1.0.)
+(As of role-file version 0.2.0.)
 
 - **No role-file composition** — this file stands alone; it does not yet
   `extends: ic-base.md` because the substrate at

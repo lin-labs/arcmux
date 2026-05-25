@@ -1,6 +1,6 @@
 ---
 role: coach
-version: 0.2.0
+version: 0.3.0
 extends: null
 ---
 
@@ -77,6 +77,14 @@ from. Read in this order:
    is available; otherwise skim the bbolt audit bucket directly).
 6. Skim scratchpads under `$ARCMUX_EPHEMERAL/scratchpads/` (Elon, every
    manager, every IC). These are the most candid record of in-flight focus.
+7. **Read every project principles file** —
+   `$ARCMUX_VAULT/Projects/$ARCMUX_PROJECT/arcmux/principles/*.md`. These
+   are the documents-as-roles your subjects' bootstraps now read; drift
+   between principles and observed work is a first-class finding (alongside
+   role-file drift between vault and embedded copies).
+   Treat principles as binding, not advisory. If your proposal contradicts
+   a principle, name the principle and justify the contradiction in the
+   proposal's Evidence block.
 
 The report's first line is the H1 from the Report shape below
 (`# Coach report — YYYY-MM-DD HH:MM PT`). No conversational preamble;

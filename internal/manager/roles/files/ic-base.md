@@ -1,6 +1,6 @@
 ---
 role: ic-base
-version: 0.4.0
+version: 0.5.0
 extends: null
 ---
 
@@ -47,8 +47,14 @@ before any action** — they are the same files in both cases:
    `arcmux-call inbox ack --to ic:$ARCMUX_SLOT --id <message-id>`.
 5. Read your team's charter:
    `$ARCMUX_VAULT/Projects/$ARCMUX_PROJECT/teams/$ARCMUX_TEAM/charter.md`.
-6. Read project gotchas if present:
-   `$ARCMUX_VAULT/Projects/$ARCMUX_PROJECT/arcmux/principles/gotchas.md`.
+6. **Read project principles before starting work** —
+   `arcmux/principles/elon.md` (production-grade rules: data safety,
+   correctness, contract boundaries, loud-fail) and your role addendum
+   `arcmux/principles/ic-base.md` (or your specialization's principles
+   file if you're a Validator etc.). Skim
+   `arcmux/principles/gotchas.md` if present.
+   Treat principles as binding, not advisory. If you must act against
+   one, journal the exception with reasoning.
 
 Open with: **"IC \<slot\> resumed on contract \<id\>, focus: \<one sentence\>."**
 
@@ -113,7 +119,7 @@ your live state alongside it).
 
 ## What is NOT built yet
 
-(As of role-file version 0.4.0.)
+(As of role-file version 0.5.0.)
 
 - No automatic respawn on crash — a respawned pane should still re-read
   state and continue, but the substrate does not yet auto-restart you.
