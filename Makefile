@@ -1,4 +1,4 @@
-.PHONY: build install proto test clean start stop restart status logs tail release deploy
+.PHONY: build install proto test validate clean start stop restart status logs tail release deploy
 
 BINARY := arcmux
 INSTALL_DIR := $(HOME)/.local/bin
@@ -28,6 +28,13 @@ proto:
 
 test:
 	go test ./...
+
+# Self-validating dev cycle: gofmt + go vet + go test + build + e2e smoke
+# against the built binaries; writes a structured JSON report under
+# $ARCMUX_EPHEMERAL/validate-reports/ (or ./.validate-reports if unset).
+# Convention: any Elon-turn cycle should end with `make validate` before commit.
+validate:
+	@./scripts/validate.sh
 
 clean:
 	rm -rf bin/ gen/

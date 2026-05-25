@@ -104,8 +104,8 @@ func seedTeamAndContract(t *testing.T, dataRoot, vaultRoot, project, teamSlug, c
 	if err := db.PutContract(store.Contract{
 		ID: contractID, Team: teamSlug, Priority: 5, State: store.ContractPending,
 		Objective: "design the auth flow end-to-end", OutputFormat: "PR",
-		Tools: []string{"go", "bbolt"},
-		Boundaries: []string{"no breaking API"},
+		Tools:              []string{"go", "bbolt"},
+		Boundaries:         []string{"no breaking API"},
 		AcceptanceCriteria: []string{"tests pass", "audit row written"},
 	}); err != nil {
 		t.Fatalf("put contract: %v", err)

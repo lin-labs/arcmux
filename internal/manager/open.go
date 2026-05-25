@@ -13,9 +13,9 @@ import (
 
 // OpenOptions configure Open.
 type OpenOptions struct {
-	Project   string         // slug
-	DataRoot  string         // typically ~/data
-	VaultRoot string         // typically $OBS_AGENTS
+	Project   string          // slug
+	DataRoot  string          // typically ~/data
+	VaultRoot string          // typically $OBS_AGENTS
 	Cmux      *cmuxcli.Client // optional; defaults to real cmux client
 }
 

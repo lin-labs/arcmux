@@ -1,0 +1,20 @@
+{
+  "stamp": "2026-05-25-03-26",
+  "timezone": "America/Los_Angeles",
+  "repo_root": "/Users/blin/Projects/arcmux",
+  "report_dir": "/Users/blin/Projects/arcmux/.validate-reports",
+  "log": "/Users/blin/Projects/arcmux/.validate-reports/2026-05-25-03-26.log",
+  "overall": "pass",
+  "steps": [
+    {"name": "gofmt", "status": "pass", "duration_s": 0, "detail": ""},
+    {"name": "go vet", "status": "pass", "duration_s": 0, "detail": ""},
+    {"name": "go test", "status": "pass", "duration_s": 1, "detail": ""},
+    {"name": "build arcmux", "status": "pass", "duration_s": 0, "detail": ""},
+    {"name": "build arcmux-call", "status": "pass", "duration_s": 0, "detail": ""},
+    {"name": "smoke: arcmux --help", "status": "pass", "duration_s": 0, "detail": ""},
+    {"name": "smoke: arcmux-call dispatch", "status": "pass", "duration_s": 0, "detail": ""},
+    {"name": "smoke: ic dispatcher", "status": "pass", "duration_s": 0, "detail": ""},
+    {"name": "smoke: inbox dispatcher", "status": "pass", "duration_s": 0, "detail": ""},
+    {"name": "smoke: contract dispatcher", "status": "pass", "duration_s": 0, "detail": ""}
+  ]
+}

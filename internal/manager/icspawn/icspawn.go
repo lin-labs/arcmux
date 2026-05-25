@@ -461,15 +461,15 @@ func Dissolve(ctx context.Context, o DissolveOpts) (*DissolveResult, error) {
 	// 5. Audit. Record the from-state, team HC after, contract id, and
 	// any pane-close error so a postmortem can reconstruct the dissolve.
 	auditDetail := map[string]any{
-		"team":           slot.Team,
-		"role":           slot.Role,
-		"contract":       slot.Contract,
-		"pane_ref":       slot.PaneRef,
-		"workspace_ref":  slot.WorkspaceRef,
-		"agent":          slot.Agent,
-		"prev_state":     prevState,
-		"hc_after":       team.HC,
-		"inbox_dropped":  true,
+		"team":          slot.Team,
+		"role":          slot.Role,
+		"contract":      slot.Contract,
+		"pane_ref":      slot.PaneRef,
+		"workspace_ref": slot.WorkspaceRef,
+		"agent":         slot.Agent,
+		"prev_state":    prevState,
+		"hc_after":      team.HC,
+		"inbox_dropped": true,
 	}
 	if paneErr != nil {
 		auditDetail["pane_close_error"] = paneErr.Error()

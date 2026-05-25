@@ -17,10 +17,10 @@ type Event struct {
 
 // EventBus manages event subscriptions.
 type EventBus struct {
-	mu      sync.RWMutex
-	subs    map[int]*subscription
-	nextID  int
-	closed  bool
+	mu     sync.RWMutex
+	subs   map[int]*subscription
+	nextID int
+	closed bool
 }
 
 type subscription struct {

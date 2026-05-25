@@ -1,0 +1,32 @@
+=== gofmt ===
+=== go vet ===
+=== go test ===
+?   	github.com/lin-labs/arcmux/cmd/arcmux	[no test files]
+ok  	github.com/lin-labs/arcmux/cmd/arcmux-call	(cached)
+?   	github.com/lin-labs/arcmux/gen/arcmux/v1	[no test files]
+ok  	github.com/lin-labs/arcmux/internal/config	(cached)
+ok  	github.com/lin-labs/arcmux/internal/daemon	(cached)
+ok  	github.com/lin-labs/arcmux/internal/delivery	(cached)
+?   	github.com/lin-labs/arcmux/internal/health	[no test files]
+ok  	github.com/lin-labs/arcmux/internal/hooks	(cached)
+ok  	github.com/lin-labs/arcmux/internal/manager	(cached)
+ok  	github.com/lin-labs/arcmux/internal/manager/bootstrap	(cached)
+ok  	github.com/lin-labs/arcmux/internal/manager/cmuxcli	(cached)
+ok  	github.com/lin-labs/arcmux/internal/manager/icspawn	(cached)
+ok  	github.com/lin-labs/arcmux/internal/manager/paths	(cached)
+ok  	github.com/lin-labs/arcmux/internal/manager/roles	(cached)
+ok  	github.com/lin-labs/arcmux/internal/manager/scaffold	(cached)
+ok  	github.com/lin-labs/arcmux/internal/manager/scratchpad	(cached)
+ok  	github.com/lin-labs/arcmux/internal/manager/store	(cached)
+ok  	github.com/lin-labs/arcmux/internal/manager/teamspawn	(cached)
+ok  	github.com/lin-labs/arcmux/internal/profile	(cached)
+ok  	github.com/lin-labs/arcmux/internal/session	(cached)
+ok  	github.com/lin-labs/arcmux/internal/tmux	(cached)
+ok  	github.com/lin-labs/arcmux/internal/typesafe	(cached)
+=== build arcmux ===
+=== build arcmux-call ===
+=== smoke: arcmux --help ===
+=== smoke: arcmux-call dispatch ===
+=== smoke: ic dispatcher ===
+=== smoke: inbox dispatcher ===
+=== smoke: contract dispatcher ===

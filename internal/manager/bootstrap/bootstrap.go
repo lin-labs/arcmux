@@ -17,16 +17,16 @@ import (
 
 // Options describe one bootstrap script to materialize.
 type Options struct {
-	Agent     string // "claude" | "codex"
-	Project   string // slug
-	Role      string // "elon" | "manager" | "ic-<role>"
-	EphemRoot string // ~/data/arcmux/<project>/
-	VaultRoot string // $OBS_AGENTS
-	DataRoot  string // ~/data/
-	RoleFile  string // absolute path to the role markdown file
-	Team      string // team slug, for manager/IC bootstraps (optional)
-	Slot      string // slot id, for IC bootstraps only — exports ARCMUX_SLOT (optional)
-	Contract  string // initial contract id, for IC bootstraps (optional)
+	Agent      string // "claude" | "codex"
+	Project    string // slug
+	Role       string // "elon" | "manager" | "ic-<role>"
+	EphemRoot  string // ~/data/arcmux/<project>/
+	VaultRoot  string // $OBS_AGENTS
+	DataRoot   string // ~/data/
+	RoleFile   string // absolute path to the role markdown file
+	Team       string // team slug, for manager/IC bootstraps (optional)
+	Slot       string // slot id, for IC bootstraps only — exports ARCMUX_SLOT (optional)
+	Contract   string // initial contract id, for IC bootstraps (optional)
 	ScriptName string // override script filename; defaults to bootstrap-<role>.sh
 }
 

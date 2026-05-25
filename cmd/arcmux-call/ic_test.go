@@ -78,7 +78,7 @@ func preseedTeamAndContract(t *testing.T, dataRoot, vault, project, teamSlug, co
 	}
 	if err := db.PutContract(store.Contract{
 		ID: contractID, Team: teamSlug, Priority: 3,
-		State:    store.ContractPending,
+		State:     store.ContractPending,
 		Objective: "do the thing",
 	}); err != nil {
 		t.Fatalf("put contract: %v", err)

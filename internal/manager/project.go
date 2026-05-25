@@ -27,11 +27,11 @@ import (
 
 // Options configure Start.
 type Options struct {
-	Agent        string         // "claude" | "codex"
-	Project      string         // slug
-	Mission      string         // free-text mission statement (initial)
-	DataRoot     string         // typically ~/data
-	VaultRoot    string         // typically $OBS_AGENTS
+	Agent        string // "claude" | "codex"
+	Project      string // slug
+	Mission      string // free-text mission statement (initial)
+	DataRoot     string // typically ~/data
+	VaultRoot    string // typically $OBS_AGENTS
 	Cmux         *cmuxcli.Client
 	Focus        bool           // focus the new workspace after creation
 	ScaffoldOpts []scaffold.Opt // optional flags forwarded to scaffold.Project
@@ -231,14 +231,14 @@ func initialElonScratchpad(slug string, o Options, startedAt time.Time, missionI
 
 	sum := sha256.Sum256([]byte(o.Mission))
 	return map[string]any{
-		"as_of":          startedAt.Format(time.RFC3339Nano),
-		"turn":           0,
-		"active_goals":   []string{},
-		"current_focus":  focus,
-		"key_decisions":  map[string]any{},
-		"open_consults":  []string{},
-		"next_steps":     next,
-		"deferred":       []string{},
+		"as_of":         startedAt.Format(time.RFC3339Nano),
+		"turn":          0,
+		"active_goals":  []string{},
+		"current_focus": focus,
+		"key_decisions": map[string]any{},
+		"open_consults": []string{},
+		"next_steps":    next,
+		"deferred":      []string{},
 		"bootstrap": map[string]any{
 			"project":          slug,
 			"role":             "elon",

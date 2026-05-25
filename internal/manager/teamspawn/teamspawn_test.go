@@ -169,13 +169,13 @@ func TestSpawnHappyPath(t *testing.T) {
 	var parsed struct {
 		Turn      int `json:"turn"`
 		Bootstrap struct {
-			Project       string `json:"project"`
-			Team          string `json:"team"`
-			Role          string `json:"role"`
-			Agent         string `json:"agent"`
-			VisionSeeded  bool   `json:"vision_seeded"`
-			VisionBytes   int    `json:"vision_bytes"`
-			VisionSHA256  string `json:"vision_sha256"`
+			Project      string `json:"project"`
+			Team         string `json:"team"`
+			Role         string `json:"role"`
+			Agent        string `json:"agent"`
+			VisionSeeded bool   `json:"vision_seeded"`
+			VisionBytes  int    `json:"vision_bytes"`
+			VisionSHA256 string `json:"vision_sha256"`
 		} `json:"bootstrap"`
 	}
 	if err := json.Unmarshal(pad, &parsed); err != nil {
