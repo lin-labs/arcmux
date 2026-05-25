@@ -237,9 +237,14 @@ func Spawn(ctx context.Context, o Opts) (*Result, error) {
 		return nil, fmt.Errorf("cmux new-pane: %w", err)
 	}
 
-	// 4. Send the bootstrap command. The script's first line is the
-	// shebang; sending the absolute path is equivalent to running it.
-	if err := o.Cmux.Send(ctx, pane.Ref, bootstrapPath); err != nil {
+	// 4. Send the bootstrap command. Use the pane's focused surface — cmux
+	// send requires --surface, and a pane ref is not accepted there.
+	// NewPane populates SelectedSurf from cmux's multi-token OK output.
+	sendTarget := pane.SelectedSurf
+	if sendTarget == "" {
+		sendTarget = pane.Ref // fallback for unit-test fakes that don't echo surface
+	}
+	if err := o.Cmux.Send(ctx, sendTarget, bootstrapPath); err != nil {
 		return nil, fmt.Errorf("send bootstrap to pane: %w", err)
 	}
 

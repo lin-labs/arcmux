@@ -952,8 +952,12 @@ func TestSpawnSendsBootstrapIntoPane(t *testing.T) {
 			}
 		case strings.Contains(joined, "send"):
 			sawSend = true
-			if !strings.Contains(joined, "--target pane:55") {
-				t.Errorf("send wrong target: %s", joined)
+			// cmux send uses --surface. Pane refs are rejected; the surface
+			// ref must come from NewPane's multi-token OK response, or the
+			// fake-runner's fallback to the pane ref (since the fake-runner
+			// doesn't echo a surface today).
+			if !strings.Contains(joined, "--surface ") {
+				t.Errorf("send missing --surface: %s", joined)
 			}
 			if !strings.Contains(joined, "bootstrap-ic-t1-watcher.sh") {
 				t.Errorf("send did not carry bootstrap path: %s", joined)

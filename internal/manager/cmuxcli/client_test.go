@@ -102,9 +102,47 @@ func TestSend(t *testing.T) {
 	if err := c.Send(context.Background(), "surface:5", "hello"); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	got := strings.Join(f.calls[0], " ")
-	if !strings.Contains(got, "send") || !strings.Contains(got, "surface:5") {
-		t.Errorf("call = %q", got)
+	if len(f.calls) != 1 {
+		t.Fatalf("calls = %d, want 1", len(f.calls))
+	}
+	args := f.calls[0]
+	got := strings.Join(args, " ")
+	// Must use --surface (NOT --target — that was the bug; --target is not a
+	// real cmux flag, which turned the wake into literal text in the input box).
+	if !strings.Contains(got, "send") || !strings.Contains(got, "--surface") || !strings.Contains(got, "surface:5") {
+		t.Errorf("call = %q (must contain send, --surface, surface:5)", got)
+	}
+	if strings.Contains(got, "--target") {
+		t.Errorf("call leaked --target: %q (must use --surface)", got)
+	}
+	// Last positional arg must end with `\n` so cmux fires Enter and submits.
+	last := args[len(args)-1]
+	if !strings.HasSuffix(last, `\n`) {
+		t.Errorf("payload missing trailing literal \\n (got %q)", last)
+	}
+}
+
+func TestSendDoesNotDoubleNewline(t *testing.T) {
+	f := &fakeRunner{out: ""}
+	c := newWithRunner(f)
+	if err := c.Send(context.Background(), "surface:5", `already\n`); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	last := f.calls[0][len(f.calls[0])-1]
+	if last != `already\n` {
+		t.Errorf("payload = %q, want %q (existing \\n must not be doubled)", last, `already\n`)
+	}
+}
+
+func TestSendRawNoNewline(t *testing.T) {
+	f := &fakeRunner{out: ""}
+	c := newWithRunner(f)
+	if err := c.SendRaw(context.Background(), "surface:5", "edit me"); err != nil {
+		t.Fatalf("SendRaw: %v", err)
+	}
+	last := f.calls[0][len(f.calls[0])-1]
+	if last != "edit me" {
+		t.Errorf("payload = %q, want %q (SendRaw must not append)", last, "edit me")
 	}
 }
 

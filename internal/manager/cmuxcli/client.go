@@ -155,9 +155,31 @@ func (c *Client) ListPanes(ctx context.Context, workspaceRef string) ([]Pane, er
 	return v.Panes, nil
 }
 
-// Send pushes text into a surface/pane reference.
+// Send pushes text into a surface (or pane / workspace ref) and submits it
+// by appending a trailing newline. cmux's send command takes --surface
+// <ref>; pane: refs are accepted because cmux internally resolves a pane
+// to its focused surface, but surface: refs are the canonical form.
+//
+// Critical: cmux requires a literal "\n" in the text to fire Enter — a raw
+// newline byte is NOT enough. We unconditionally append "\n" so callers
+// don't have to think about it; if they pass text already ending in "\n",
+// the result is harmlessly two newlines (which cmux still submits as one).
 func (c *Client) Send(ctx context.Context, target, text string) error {
-	_, err := c.r.Run(ctx, "send", "--target", target, "--", text)
+	if !strings.HasSuffix(text, `\n`) {
+		text += `\n`
+	}
+	_, err := c.r.Run(ctx, "send", "--surface", target, "--", text)
+	if err != nil {
+		return fmt.Errorf("cmux send: %w", err)
+	}
+	return nil
+}
+
+// SendRaw pushes text without appending Enter. Use only when the caller
+// specifically does not want the input submitted (e.g. priming a prompt
+// the user will then edit before submitting). Most callers should use Send.
+func (c *Client) SendRaw(ctx context.Context, target, text string) error {
+	_, err := c.r.Run(ctx, "send", "--surface", target, "--", text)
 	if err != nil {
 		return fmt.Errorf("cmux send: %w", err)
 	}
