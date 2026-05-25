@@ -27,7 +27,7 @@ func die(err error) {
 
 func main() {
 	if len(os.Args) < 2 {
-		die(fmt.Errorf("usage: arcmux-call create|send|capture|status|audit|inbox [args]"))
+		die(fmt.Errorf("usage: arcmux-call create|send|capture|status|audit|inbox|scratchpad [args]"))
 	}
 	cmd := os.Args[1]
 
@@ -40,6 +40,11 @@ func main() {
 		return
 	case "inbox":
 		if err := cmdInbox(os.Args[2:], os.Stdin, os.Stdout); err != nil {
+			die(err)
+		}
+		return
+	case "scratchpad":
+		if err := cmdScratchpad(os.Args[2:], os.Stdin, os.Stdout); err != nil {
 			die(err)
 		}
 		return
