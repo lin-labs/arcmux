@@ -1,4 +1,4 @@
-.PHONY: build install proto test validate clean start stop restart status logs tail release deploy
+.PHONY: build install proto test validate validate-e2e validate-all clean start stop restart status logs tail release deploy
 
 BINARY := arcmux
 INSTALL_DIR := $(HOME)/.local/bin
@@ -14,6 +14,7 @@ LABS_REPO ?= ~/Projects/arcmux
 build:
 	go build -o bin/$(BINARY) ./cmd/arcmux
 	go build -o bin/$(BINARY)-call ./cmd/arcmux-call
+	go build -o bin/$(BINARY)-e2e ./cmd/arcmux-e2e
 
 install: build
 	mkdir -p $(INSTALL_DIR)
@@ -35,6 +36,17 @@ test:
 # Convention: any Elon-turn cycle should end with `make validate` before commit.
 validate:
 	@./scripts/validate.sh
+
+# Behavioral end-to-end harness: SETUP→ACT→ASSERT→TEARDOWN scenarios that
+# spawn isolated daemons / scaffold throwaway projects and assert the
+# substrate observably DID the right thing. See cmd/arcmux-e2e/.
+# Requires `make build` first; the harness invokes ./bin/arcmux* directly.
+validate-e2e: build
+	@./bin/$(BINARY)-e2e
+
+# Full validation pass: structural (validate.sh) AND behavioral (e2e). Use
+# this on Elon-turn cycles that touched substrate code or wire shape.
+validate-all: validate validate-e2e
 
 clean:
 	rm -rf bin/ gen/
