@@ -1,2 +1,4 @@
+# arcmux runtime artifacts — local-only
+.validate-reports/
 bin/
 *.sock
