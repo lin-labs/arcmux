@@ -92,7 +92,9 @@ func (c *Client) NewWorkspace(ctx context.Context, opts NewWorkspaceOptions) (Wo
 	if err != nil {
 		return Workspace{}, fmt.Errorf("cmux new-workspace: %w", err)
 	}
-	ref := parseOKRef(out)
+	// cmux new-workspace returns "OK workspace:N" (single token today, may
+	// gain more in future); pick the workspace explicitly to be robust.
+	ref := parseOKRefKind(out, "workspace")
 	if ref == "" {
 		return Workspace{}, fmt.Errorf("cmux new-workspace: unparsable output %q", out)
 	}
@@ -125,11 +127,13 @@ func (c *Client) NewPane(ctx context.Context, opts NewPaneOptions) (Pane, error)
 	if err != nil {
 		return Pane{}, fmt.Errorf("cmux new-pane: %w", err)
 	}
-	ref := parseOKRef(out)
+	// cmux new-pane returns "OK surface:N pane:N workspace:N" — pick the pane.
+	ref := parseOKRefKind(out, "pane")
 	if ref == "" {
 		return Pane{}, fmt.Errorf("cmux new-pane: unparsable output %q", out)
 	}
-	return Pane{Ref: ref}, nil
+	surf := parseOKRefKind(out, "surface")
+	return Pane{Ref: ref, SelectedSurf: surf}, nil
 }
 
 // ListPanes returns panes in a workspace.
@@ -211,16 +215,54 @@ func (c *Client) Identify(ctx context.Context) (string, error) {
 	return c.r.Run(ctx, "--json", "identify")
 }
 
-// parseOKRef extracts the ref from cmux's standard "OK <ref>\n" output.
+// parseOKRef extracts the first ref from cmux's "OK <ref> [<ref>...]" output.
+// Some cmux commands return one ref (e.g. new-workspace → "OK workspace:N");
+// others return several (e.g. new-pane → "OK surface:N pane:N workspace:N").
+// Callers that need a specific kind use parseOKRefKind.
 func parseOKRef(out string) string {
-	s := strings.TrimSpace(out)
-	s = strings.TrimPrefix(s, "OK ")
-	s = strings.TrimSpace(s)
-	if strings.Contains(s, " ") || strings.Contains(s, "\n") {
-		// Malformed; return empty to signal parse failure.
+	toks := strings.Fields(strings.TrimSpace(out))
+	if len(toks) < 2 || toks[0] != "OK" {
 		return ""
 	}
-	return s
+	for _, tok := range toks[1:] {
+		if isRefShaped(tok) {
+			return tok
+		}
+		return "" // first non-OK token isn't ref-shaped — malformed
+	}
+	return ""
+}
+
+// parseOKRefKind extracts a ref of the requested kind (e.g. "pane", "workspace",
+// "surface") from cmux's multi-token "OK …" output. Returns "" if absent or if
+// the output is not an OK line.
+func parseOKRefKind(out, kind string) string {
+	toks := strings.Fields(strings.TrimSpace(out))
+	if len(toks) < 2 || toks[0] != "OK" {
+		return ""
+	}
+	prefix := kind + ":"
+	for _, tok := range toks[1:] {
+		if strings.HasPrefix(tok, prefix) && isRefShaped(tok) {
+			return tok
+		}
+	}
+	return ""
+}
+
+// isRefShaped reports whether s looks like a cmux ref "<kind>:<id>". The kind
+// is a non-empty lowercase identifier; the id is non-empty.
+func isRefShaped(s string) bool {
+	i := strings.Index(s, ":")
+	if i <= 0 || i == len(s)-1 {
+		return false
+	}
+	for _, r := range s[:i] {
+		if !(r >= 'a' && r <= 'z') {
+			return false
+		}
+	}
+	return true
 }
 
 func boolStr(b bool) string {

@@ -150,6 +150,8 @@ func TestParseOKRef(t *testing.T) {
 		{"OK workspace:32\n", "workspace:32"},
 		{"OK pane:5", "pane:5"},
 		{"  OK surface:9\n", "surface:9"},
+		// Multi-token output — first ref-shaped token wins.
+		{"OK surface:149 pane:63 workspace:56\n", "surface:149"},
 		{"Error: something", ""},
 		{"OK foo bar", ""},
 	} {
@@ -157,5 +159,35 @@ func TestParseOKRef(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("parseOKRef(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestParseOKRefKind(t *testing.T) {
+	out := "OK surface:149 pane:63 workspace:56\n"
+	cases := map[string]string{
+		"pane":      "pane:63",
+		"workspace": "workspace:56",
+		"surface":   "surface:149",
+		"missing":   "",
+	}
+	for kind, want := range cases {
+		if got := parseOKRefKind(out, kind); got != want {
+			t.Errorf("parseOKRefKind(%q, %q) = %q, want %q", out, kind, got, want)
+		}
+	}
+}
+
+func TestNewPaneMultiToken(t *testing.T) {
+	f := &fakeRunner{out: "OK surface:149 pane:63 workspace:56\n"}
+	c := newWithRunner(f)
+	p, err := c.NewPane(context.Background(), NewPaneOptions{Workspace: "workspace:56", Direction: "right"})
+	if err != nil {
+		t.Fatalf("NewPane: %v", err)
+	}
+	if p.Ref != "pane:63" {
+		t.Errorf("pane ref = %q, want pane:63", p.Ref)
+	}
+	if p.SelectedSurf != "surface:149" {
+		t.Errorf("surface ref = %q, want surface:149", p.SelectedSurf)
 	}
 }
