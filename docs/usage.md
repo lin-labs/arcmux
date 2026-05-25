@@ -308,32 +308,39 @@ ls -t "$OBS_AGENTS/Projects/my-project/elon/coach-reports/" | head -1 | \
 
 ## Validation tiers — when to run which
 
-arcmux has three validation tiers, each appropriate for a different cadence:
+arcmux has two canonical validation gates plus a fast iteration path:
 
 | Tier | Command | What it checks | Speed / cost | When to run |
 |---|---|---|---|---|
-| **Structural** | `make validate` | gofmt + vet + go test + build + 5 dispatcher smokes (11 steps) | ~10s, free | Before every commit |
-| **Behavioral (substrate)** | `make validate-e2e` | 3 scenarios: bootstrap, pulse-wake, team-spawn-pipeline — real cmux + real daemon, asserts substrate primitives | ~17s, free | Before every commit (`make validate-all` runs both) |
-| **Agent-behavioral (sandbox eval)** | `make validate-eval` | Real claude drives real artifact production in a sandboxed workrepo; validation script asserts the produced artifact works | ~1 min/scenario, **costs Anthropic tokens** | **Big feature update gate**, not per-commit |
+| **Per-commit gate** | `make validate` | Structural (gofmt + vet + test + build + 5 dispatcher smokes) **plus** substrate-behavioral (3 scenarios: bootstrap, pulse-wake, team-spawn-pipeline — real cmux + real daemon, asserts substrate primitives) | ~17s, free | Before every commit |
+| **Big-feature gate** | `make validate-e2e` | Real `claude -p` drives real artifact production in a sandboxed workrepo; validation scripts assert the produced artifact actually works | ~1 min/scenario, **costs Anthropic tokens** | **Charter-level merges only**, not per-commit |
+| Fast iteration | `make validate-structural` | Structural only (no behavioral) | ~10s, free | Quick local loop while iterating; promote to `make validate` before commit |
 
-### When to invoke `make validate-eval`
+### When to invoke `make validate-e2e`
 
 This tier burns real tokens by running `claude -p` against scenario prompts. Use it as a **release-quality gate**, not a fast-iteration loop:
 
 - Before merging a charter-level feature (e.g. arcmux-board v1, daemon rewrites)
 - After a substrate refactor that could break agent dispatch (e.g. role-file overhaul, contract DAO changes)
 - Before tagging a release
-- When investigating a regression that survives structural validation
+- When investigating a regression that survives `make validate`
 
 Run individually or all:
 
 ```bash
-make validate-eval                              # all scenarios
-make validate-eval ARGS="--scenario hello-server"  # one scenario
-./bin/arcmux-eval --list                        # see available scenarios
+make validate-e2e                            # all scenarios
+make validate-e2e SCENARIO=hello-server      # one scenario by name
+./bin/arcmux-eval --list                     # see available scenarios
 ```
 
 Reports land at `$ARCMUX_EPHEMERAL/validate-reports/eval-YYYY-MM-DD-HH-MM.json` with per-scenario pass/fail + token usage + wall-time.
+
+### Back-compat aliases
+
+The pre-rename names still work for one release cycle:
+
+- `make validate-all` → `make validate` (the new canonical per-commit gate)
+- `make validate-eval` → `make validate-e2e` (the new canonical big-feature gate)
 
 ### Adding scenarios
 

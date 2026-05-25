@@ -1,4 +1,4 @@
-.PHONY: build install proto test validate validate-e2e validate-eval validate-all clean start stop restart status logs tail release deploy
+.PHONY: build install proto test validate validate-structural validate-e2e validate-eval validate-all clean start stop restart status logs tail release deploy
 
 BINARY := arcmux
 INSTALL_DIR := $(HOME)/.local/bin
@@ -31,39 +31,42 @@ proto:
 test:
 	go test ./...
 
-# Self-validating dev cycle: gofmt + go vet + go test + build + e2e smoke
-# against the built binaries; writes a structured JSON report under
-# $ARCMUX_EPHEMERAL/validate-reports/ (or ./.validate-reports if unset).
+# Per-commit gate: structural (gofmt + vet + test + build + dispatcher
+# smokes via scripts/validate.sh) AND substrate-behavioral (cmd/arcmux-e2e/
+# scenarios that spawn isolated daemons and assert observable substrate
+# effects). Free, fast (~17s).
+#
 # Convention: any Elon-turn cycle should end with `make validate` before commit.
-validate:
+validate: validate-structural validate-substrate-e2e
+
+# Structural-only path (gofmt + vet + test + build + 5 dispatcher smokes).
+# Use this for the fast loop while iterating; the canonical per-commit gate
+# is `make validate` which also runs the substrate behavioral scenarios.
+validate-structural:
 	@./scripts/validate.sh
 
-# Behavioral end-to-end harness: SETUP→ACT→ASSERT→TEARDOWN scenarios that
-# spawn isolated daemons / scaffold throwaway projects and assert the
-# substrate observably DID the right thing. See cmd/arcmux-e2e/.
-# Requires `make build` first; the harness invokes ./bin/arcmux* directly.
-validate-e2e: build
+# Substrate-behavioral scenarios: SETUP→ACT→ASSERT→TEARDOWN against isolated
+# daemons / throwaway projects, asserting that the substrate observably DID
+# the right thing. See cmd/arcmux-e2e/. Requires `make build` first.
+validate-substrate-e2e: build
 	@./bin/$(BINARY)-e2e
 
-# Full validation pass: structural (validate.sh) AND behavioral (e2e). Use
-# this on Elon-turn cycles that touched substrate code or wire shape.
+# Big-feature gate: agent-behavioral eval harness. Spawns real `claude -p`
+# invocations against scenario prompts and validates the produced artifacts
+# in a sandboxed workrepo. **Burns real Anthropic tokens.** Run intentionally
+# — before a charter-level merge, after a substrate refactor that could
+# break agent dispatch, before a release tag.
 #
-# Note: validate-all does NOT include validate-eval. eval spends real tokens
-# (spawns claude headless against scenarios in testdata/eval-scenarios/) and
-# is run on demand, not per-commit.
-validate-all: validate validate-e2e
-
-# Agent-behavioral eval harness: spawns real claude -p invocations against
-# scenario prompts, validates artifacts in a sandboxed workrepo. Optional
-# SCENARIO= filter selects one or more scenario names; default runs all.
-# Burns tokens — run intentionally, not as part of the per-commit gate.
-#
-#   make validate-eval                          # all scenarios
-#   make validate-eval SCENARIO=hello-server    # one scenario by name
+#   make validate-e2e                          # all scenarios
+#   make validate-e2e SCENARIO=hello-server    # one scenario by name
 #
 # See cmd/arcmux-eval/ and testdata/eval-scenarios/.
-validate-eval: build
+validate-e2e: build
 	@./bin/$(BINARY)-eval $(if $(SCENARIO),--scenario $(SCENARIO))
+
+# Back-compat aliases — keep one cycle while callers migrate.
+validate-eval: validate-e2e
+validate-all: validate
 
 clean:
 	rm -rf bin/ gen/
