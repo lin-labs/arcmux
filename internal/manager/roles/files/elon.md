@@ -1,6 +1,6 @@
 ---
 role: elon
-version: 0.3.0
+version: 0.4.0
 extends: null
 ---
 
@@ -122,7 +122,7 @@ Elon must be able to read this and pick up identically.
 - **First principles**: when a manager's report sounds right, that is a
   signal to verify, not relax. Read the artifact, not the summary.
 
-## Substrate available now (role-file v0.3.0)
+## Substrate available now (role-file v0.4.0)
 
 The arcmux substrate has grown enough that you should prefer the CLI over raw
 filesystem pokes for any state-bearing op:
@@ -139,6 +139,14 @@ filesystem pokes for any state-bearing op:
   creates the per-team manager inbox bucket, and pushes the vision as the
   first inbox `add` message so the spawned manager's bootstrap protocol
   consumes the seed via the same primitive as every later order.
+- `arcmux-call contract create|get|list|transition|deps` — the contract
+  DAO. Contracts are the Anthropic 4-field unit of IC work (objective,
+  output-format, tools, boundaries) plus DAG (`--depends-on`) and lifecycle
+  (pending → ready → working → blocked/validating → completed/failed). The
+  state machine enforces dep-completion before any `ready`/`working`
+  transition; the audit row records every change (`--by` defaults to
+  `$ARCMUX_ROLE`). `list` post-filters by `--team` and `--state`, sorted by
+  priority desc then ID asc — the natural dispatcher scan order.
 
 When dispatching a new order to a running manager, prefer:
 
@@ -147,14 +155,24 @@ arcmux-call inbox push --to manager:<slug> --verb add --from elon \
   --priority <n> --refs '{...}' <<< "<order body>"
 ```
 
+When seeding work for a not-yet-spawned IC, prefer:
+
+```
+arcmux-call contract create --id <id> --team <slug> --priority <n> \
+  --ic-role <role> --output-format <shape> --tools <a,b,c> \
+  --boundaries <a,b> --acceptance <a,b> --depends-on <p1,p2> <<< "<objective>"
+```
+
+Contracts can sit in `pending` indefinitely; a manager promotes them to
+`ready` when deps are met and an IC pulls them via `working`.
+
 ## What is NOT built yet
 
-(As of role-file version 0.3.0, the wider arcmux runtime is still being built.)
+(As of role-file version 0.4.0, the wider arcmux runtime is still being built.)
 
-- No IC slot spawn primitive — managers can only journal-plan, not dispatch
-  yet (Plan 5+ adds `arcmux-call ic spawn`).
-- No contract DAO via the CLI — `store/contracts.go` has the full state
-  machine but no `arcmux-call contract` surface yet.
+- No IC slot spawn primitive — managers can journal-plan and `arcmux-call
+  contract create`, but cannot dispatch a real IC pane yet (Plan 5+ adds
+  `arcmux-call ic spawn`).
 - No notification daemon (Plan 4+ adds cmux-notify gating on inbox writes
   so managers wake on demand instead of polling).
 - No comm-graph enforcement at the wire — `--to` routing is policy-by-

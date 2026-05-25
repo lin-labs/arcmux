@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -63,6 +64,44 @@ func (d *DB) ListContractsByTeam(team string) ([]string, error) {
 // ListContractsByState returns contract IDs in a given state via the index.
 func (d *DB) ListContractsByState(state string) ([]string, error) {
 	return d.listSuffixes(BucketIdxState, state+"/")
+}
+
+// ListContracts scans BucketContracts and returns the full Contract structs,
+// optionally filtered by team and/or state. An empty filter is a wildcard.
+// Results are sorted by Priority desc (higher first), then ID asc — a stable
+// order that matches how a human dispatcher would scan a queue. A v0 design
+// choice: full-bucket scan with in-memory filter rather than index walk +
+// per-ID GetContract, because (a) one read transaction is cheaper than N+1,
+// (b) the bucket is small at this stage, (c) callers usually want the whole
+// struct, not just the ID. Optimize when contract counts justify it.
+func (d *DB) ListContracts(team, state string) ([]Contract, error) {
+	var out []Contract
+	err := d.b.View(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte(BucketContracts)).ForEach(func(_, raw []byte) error {
+			var c Contract
+			if err := json.Unmarshal(raw, &c); err != nil {
+				return err
+			}
+			if team != "" && c.Team != team {
+				return nil
+			}
+			if state != "" && c.State != state {
+				return nil
+			}
+			out = append(out, c)
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Priority != out[j].Priority {
+			return out[i].Priority > out[j].Priority
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
 }
 
 // ChildrenOf returns contracts that depend on parent.

@@ -152,6 +152,65 @@ func TestContractTransitionDepsMet(t *testing.T) {
 	}
 }
 
+func TestListContractsFilters(t *testing.T) {
+	db := openTestDB(t)
+
+	now := time.Now()
+	seeds := []Contract{
+		{ID: "alpha-1", Team: "alpha", State: ContractPending, Priority: 1, CreatedAt: now, UpdatedAt: now},
+		{ID: "alpha-2", Team: "alpha", State: ContractReady, Priority: 5, CreatedAt: now, UpdatedAt: now},
+		{ID: "alpha-3", Team: "alpha", State: ContractPending, Priority: 9, CreatedAt: now, UpdatedAt: now},
+		{ID: "beta-1", Team: "beta", State: ContractPending, Priority: 3, CreatedAt: now, UpdatedAt: now},
+		{ID: "beta-2", Team: "beta", State: ContractCompleted, Priority: 9, CreatedAt: now, UpdatedAt: now},
+	}
+	for _, c := range seeds {
+		if err := db.PutContract(c); err != nil {
+			t.Fatalf("seed %s: %v", c.ID, err)
+		}
+	}
+
+	cases := []struct {
+		name    string
+		team    string
+		state   string
+		wantIDs []string // expected order
+	}{
+		{"all", "", "", []string{"alpha-3", "beta-2", "alpha-2", "beta-1", "alpha-1"}},
+		{"team-alpha", "alpha", "", []string{"alpha-3", "alpha-2", "alpha-1"}},
+		{"state-pending", "", ContractPending, []string{"alpha-3", "beta-1", "alpha-1"}},
+		{"team-and-state", "alpha", ContractPending, []string{"alpha-3", "alpha-1"}},
+		{"team-empty-filter", "ghost", "", nil},
+		{"state-empty-filter", "", ContractFailed, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := db.ListContracts(tc.team, tc.state)
+			if err != nil {
+				t.Fatalf("ListContracts: %v", err)
+			}
+			ids := make([]string, len(got))
+			for i, c := range got {
+				ids[i] = c.ID
+			}
+			if !equalStrings(ids, tc.wantIDs) {
+				t.Errorf("ids = %v, want %v", ids, tc.wantIDs)
+			}
+		})
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestContractInvalidTransition(t *testing.T) {
 	db := openTestDB(t)
 	c := Contract{ID: "c-1", Team: "team-a", State: ContractCompleted, CreatedAt: time.Now(), UpdatedAt: time.Now()}
