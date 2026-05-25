@@ -313,6 +313,182 @@ func Spawn(ctx context.Context, o Opts) (*Result, error) {
 	}, nil
 }
 
+// ErrSlotNotFound is returned by Dissolve when no slot record exists under
+// the requested id. Distinguished from ErrAlreadyDissolved so callers can
+// react differently (a typo vs. a double-dissolve).
+var ErrSlotNotFound = errors.New("slot not found")
+
+// ErrAlreadyDissolved is returned by Dissolve when the slot is already in
+// the dissolved tombstone state. Loud rejection (not idempotent) because a
+// double-dissolve is almost always a caller bug — the manager that wanted
+// to retire the slot already did, and a second call is racing against an
+// unknown party. The store-layer DropICInbox is the idempotent primitive;
+// Dissolve sits one level up and treats the act as a discrete decision.
+var ErrAlreadyDissolved = errors.New("slot already dissolved")
+
+// ErrContractInFlight is returned by Dissolve when the slot's bound
+// contract is in an active-execution state (working or validating). The
+// caller must first transition the contract to a terminal state (cancelled
+// / failed / completed) so the contract isn't orphaned — a contract with
+// no IC is recoverable, but a contract still flagged "working" with no IC
+// is a state lie the audit log can't easily explain. blocked / ready /
+// pending / terminal states are all OK to dissolve over.
+var ErrContractInFlight = errors.New("bound contract still in flight")
+
+// DissolveOpts configure Dissolve.
+type DissolveOpts struct {
+	DB   *store.DB       // open project store; caller owns Close
+	Cmux *cmuxcli.Client // cmux client; pane close is best-effort
+	Slot string          // slot id to dissolve (validated as slug)
+	By   string          // audit actor; defaults to "arcmux-call" when empty
+}
+
+// DissolveResult returns the artifacts of a successful Dissolve.
+type DissolveResult struct {
+	Slot           store.Slot // post-dissolve slot record (state=dissolved)
+	Team           store.Team // post-dissolve team record (HC decremented)
+	PaneCloseError error      // non-nil if cmux close-pane returned an error
+	// (best-effort; the dissolve still succeeded). Inspect when you need
+	// to know whether the pane was actually torn down or is a zombie.
+}
+
+// Dissolve retires an active IC slot. Steps, in order:
+//
+//  1. Validate the slot slug.
+//  2. Load slot, contract, team; reject if slot is missing or already
+//     dissolved, or if the bound contract is in working/validating.
+//  3. State updates (bbolt): mark slot dissolved, decrement team HC to
+//     match the post-dissolve active count, drop the per-IC inbox bucket,
+//     append an ic-dissolved audit row.
+//  4. Best-effort `cmux close-pane`. If cmux returns an error, record it
+//     in PaneCloseError and in the audit row but DO NOT roll back state —
+//     the slot record is the source of truth, and a zombie pane is the
+//     less-bad failure mode than a half-dissolved slot.
+//
+// The dropped inbox bucket makes a respawn over the dissolved tombstone
+// (same slot id) a genuinely fresh queue, not an inheritance of whatever
+// the prior IC didn't ack. This matches the spec §10 stance that a slot
+// id is a name, not a continuous identity.
+func Dissolve(ctx context.Context, o DissolveOpts) (*DissolveResult, error) {
+	if o.DB == nil {
+		return nil, fmt.Errorf("Dissolve: DB required")
+	}
+	if o.Cmux == nil {
+		return nil, fmt.Errorf("Dissolve: Cmux required")
+	}
+	slotID, err := paths.Validate(o.Slot)
+	if err != nil {
+		return nil, fmt.Errorf("slot: %w", err)
+	}
+	by := o.By
+	if by == "" {
+		by = "arcmux-call"
+	}
+
+	slot, err := o.DB.GetSlot(slotID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, fmt.Errorf("%w: %q", ErrSlotNotFound, slotID)
+		}
+		return nil, fmt.Errorf("get slot: %w", err)
+	}
+	if slot.State == store.SlotDissolved {
+		return nil, fmt.Errorf("%w: slot %q (team %q)", ErrAlreadyDissolved, slot.ID, slot.Team)
+	}
+
+	// Contract guard. A slot may have outlived its contract (rare but
+	// possible if the manager already transitioned it) — that case is
+	// fine, dissolve proceeds. The only forbidden case is an IC walking
+	// off in the middle of working/validating.
+	if slot.Contract != "" {
+		contract, err := o.DB.GetContract(slot.Contract)
+		if err == nil {
+			switch contract.State {
+			case store.ContractWorking, store.ContractValidating:
+				return nil, fmt.Errorf("%w: contract %q is %s (transition to cancelled/failed/completed first)",
+					ErrContractInFlight, contract.ID, contract.State)
+			}
+		}
+		// A not-found contract is OK to dissolve over (contract DAO is
+		// the contract's source of truth; slot keeps a stale ref but
+		// that's recoverable).
+	}
+
+	team, err := o.DB.GetTeam(slot.Team)
+	if err != nil {
+		return nil, fmt.Errorf("get team for HC update: %w", err)
+	}
+
+	dissolvedAt := time.Now()
+	prevState := slot.State
+
+	// 1. Mark slot dissolved. Preserves all other fields so the tombstone
+	// retains the historical pane ref, contract binding, and bootstrap
+	// path for forensics.
+	slot.State = store.SlotDissolved
+	slot.UpdatedAt = dissolvedAt
+	if err := o.DB.PutSlot(slot); err != nil {
+		return nil, fmt.Errorf("put dissolved slot: %w", err)
+	}
+
+	// 2. Recompute team HC from authoritative active-slot count. Cheaper
+	// and safer than "HC--" (concurrent dissolves would compound).
+	active, err := o.DB.ListSlots(slot.Team, store.SlotActive)
+	if err != nil {
+		return nil, fmt.Errorf("recount active slots: %w", err)
+	}
+	team.HC = len(active)
+	if err := o.DB.PutTeam(team); err != nil {
+		return nil, fmt.Errorf("update team HC: %w", err)
+	}
+
+	// 3. Drop per-IC inbox sub-bucket (purges any queued-but-unacked
+	// messages). Idempotent at the store layer — never an error from a
+	// missing bucket, so spawn-then-immediate-dissolve before any push
+	// also works.
+	if err := o.DB.DropICInbox(slot.ID); err != nil {
+		return nil, fmt.Errorf("drop ic inbox: %w", err)
+	}
+
+	// 4. Best-effort pane close. Capture but do not return the error.
+	var paneErr error
+	if slot.PaneRef != "" {
+		if cerr := o.Cmux.ClosePane(ctx, slot.PaneRef); cerr != nil {
+			paneErr = cerr
+		}
+	}
+
+	// 5. Audit. Record the from-state, team HC after, contract id, and
+	// any pane-close error so a postmortem can reconstruct the dissolve.
+	auditDetail := map[string]any{
+		"team":           slot.Team,
+		"role":           slot.Role,
+		"contract":       slot.Contract,
+		"pane_ref":       slot.PaneRef,
+		"workspace_ref":  slot.WorkspaceRef,
+		"agent":          slot.Agent,
+		"prev_state":     prevState,
+		"hc_after":       team.HC,
+		"inbox_dropped":  true,
+	}
+	if paneErr != nil {
+		auditDetail["pane_close_error"] = paneErr.Error()
+	}
+	_ = o.DB.AppendAudit(store.AuditEntry{
+		Timestamp: dissolvedAt,
+		Action:    "ic-dissolved",
+		Actor:     by,
+		Subject:   slot.ID,
+		Detail:    auditDetail,
+	})
+
+	return &DissolveResult{
+		Slot:           slot,
+		Team:           team,
+		PaneCloseError: paneErr,
+	}, nil
+}
+
 // initialICScratchpad seeds the IC's per-role scratchpad with everything a
 // respawned IC needs to pick up identically: its identity, its bootstrap
 // breadcrumb, the bound contract's headline fields (objective, format,

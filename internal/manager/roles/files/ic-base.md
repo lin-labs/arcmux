@@ -1,6 +1,6 @@
 ---
 role: ic-base
-version: 0.3.0
+version: 0.4.0
 extends: null
 ---
 
@@ -113,16 +113,18 @@ your live state alongside it).
 
 ## What is NOT built yet
 
-(As of role-file version 0.3.0.)
+(As of role-file version 0.4.0.)
 
-- No `arcmux-call ic dissolve` verb — completed slots stay marked
-  `active` until the manager kills the pane manually. The next slice
-  adds dissolve + auto-HC-decrement.
 - No automatic respawn on crash — a respawned pane should still re-read
   state and continue, but the substrate does not yet auto-restart you.
 - No comm-graph enforcement — `inbox push --from <id>` is by
   convention; the substrate does not yet reject impersonation. Treat
   `--from` honestly.
+- No self-dissolve — only your manager (or Elon) can call
+  `arcmux-call ic dissolve --slot <id>` to retire your slot. When your
+  contract is in a terminal state and you're done, leave a final
+  scratchpad checkpoint and yield; your manager will dissolve you and
+  the substrate will purge your inbox.
 
 When a task depends on machinery that doesn't exist, write the gap into
 your scratchpad's `deferred` list and surface it via a `blocked`

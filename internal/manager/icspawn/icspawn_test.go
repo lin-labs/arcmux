@@ -498,6 +498,421 @@ func TestSpawnMissingRoleFile(t *testing.T) {
 	}
 }
 
+// okCmuxForDissolve combines IC-spawn outputs with a close-pane ack so a
+// single fake runner can drive spawn+dissolve in one test.
+func okCmuxForDissolve() (*fakeRunner, *cmuxcli.Client) {
+	f := &fakeRunner{outs: map[string]string{
+		"new-pane":   "OK pane:55\n",
+		"send":       "OK\n",
+		"close-pane": "OK\n",
+	}}
+	return f, cmuxcli.NewWithRunnerForTest(f)
+}
+
+// failingClosePaneCmux makes the close-pane call return an error so the
+// test can verify Dissolve does NOT roll back state on a pane-close
+// failure (state is the source of truth, zombie pane is the lesser evil).
+type failingClosePaneRunner struct {
+	*fakeRunner
+}
+
+func (r *failingClosePaneRunner) Run(ctx context.Context, args ...string) (string, error) {
+	r.calls = append(r.calls, args)
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "close-pane") {
+		return "", fmt.Errorf("cmux daemon unreachable")
+	}
+	for k, v := range r.outs {
+		if strings.Contains(joined, k) {
+			return v, nil
+		}
+	}
+	return "", nil
+}
+
+func cmuxForSpawnButFailingClose() (*failingClosePaneRunner, *cmuxcli.Client) {
+	f := &failingClosePaneRunner{fakeRunner: &fakeRunner{outs: map[string]string{
+		"new-pane": "OK pane:55\n",
+		"send":     "OK\n",
+	}}}
+	return f, cmuxcli.NewWithRunnerForTest(f)
+}
+
+func TestDissolveHappyPath(t *testing.T) {
+	dataRoot := t.TempDir()
+	vaultRoot := t.TempDir()
+	project := "demo"
+	team := "auth-refactor"
+	contract := "design-auth"
+
+	ensureProjectDir(t, dataRoot, project)
+	writeRoleFile(t, vaultRoot, "ic-base", "# IC base")
+	seedTeamAndContract(t, dataRoot, vaultRoot, project, team, contract)
+
+	db, err := store.Open(projectDBPath(dataRoot, project))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	f, cli := okCmuxForDissolve()
+	if _, err := Spawn(context.Background(), Opts{
+		DB: db, Cmux: cli, Project: project, Team: team,
+		Slot: "linus-1", Role: "ic-base", Contract: contract, Agent: "claude",
+		VaultRoot: vaultRoot, DataRoot: dataRoot,
+	}); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+
+	// Queue a manager push so we can prove DropICInbox purged it.
+	if err := db.PushICInbox("linus-1", store.InboxMsg{ID: "ghost-msg", Verb: "consult", Body: "x"}); err != nil {
+		t.Fatalf("push pre-dissolve: %v", err)
+	}
+
+	pre, _ := db.GetTeam(team)
+	if pre.HC != 1 {
+		t.Fatalf("pre-dissolve team HC = %d, want 1", pre.HC)
+	}
+
+	r, err := Dissolve(context.Background(), DissolveOpts{
+		DB: db, Cmux: cli, Slot: "linus-1", By: "manager:" + team,
+	})
+	if err != nil {
+		t.Fatalf("Dissolve: %v", err)
+	}
+	if r.Slot.State != store.SlotDissolved {
+		t.Errorf("post-dissolve slot state = %q, want %q", r.Slot.State, store.SlotDissolved)
+	}
+	if r.Team.HC != 0 {
+		t.Errorf("post-dissolve team HC = %d, want 0", r.Team.HC)
+	}
+	if r.PaneCloseError != nil {
+		t.Errorf("happy path PaneCloseError = %v, want nil", r.PaneCloseError)
+	}
+
+	// Persisted on disk too.
+	got, _ := db.GetSlot("linus-1")
+	if got.State != store.SlotDissolved {
+		t.Errorf("persisted slot state = %q, want dissolved", got.State)
+	}
+	gotTeam, _ := db.GetTeam(team)
+	if gotTeam.HC != 0 {
+		t.Errorf("persisted team HC = %d, want 0", gotTeam.HC)
+	}
+
+	// Inbox bucket gone — peek now errors with ErrICInboxMissing.
+	if db.HasICInbox("linus-1") {
+		t.Errorf("HasICInbox after dissolve = true, want false (DropICInbox should have purged)")
+	}
+
+	// cmux close-pane was called with the slot's pane ref.
+	sawClose := false
+	for _, call := range f.calls {
+		joined := strings.Join(call, " ")
+		if strings.Contains(joined, "close-pane") {
+			sawClose = true
+			if !strings.Contains(joined, "--pane pane:55") {
+				t.Errorf("close-pane wrong target: %s", joined)
+			}
+		}
+	}
+	if !sawClose {
+		t.Error("expected close-pane call")
+	}
+
+	// Audit row recorded with prev_state, hc_after, inbox_dropped.
+	rows, _ := db.RecentAudit(20)
+	sawDissolve := false
+	for _, e := range rows {
+		if e.Action == "ic-dissolved" && e.Subject == "linus-1" {
+			sawDissolve = true
+			if e.Actor != "manager:"+team {
+				t.Errorf("audit actor = %q, want %q", e.Actor, "manager:"+team)
+			}
+			if e.Detail["prev_state"] != store.SlotActive {
+				t.Errorf("audit prev_state = %v, want %q", e.Detail["prev_state"], store.SlotActive)
+			}
+			if e.Detail["hc_after"] != float64(0) && e.Detail["hc_after"] != 0 {
+				t.Errorf("audit hc_after = %v, want 0", e.Detail["hc_after"])
+			}
+			if e.Detail["inbox_dropped"] != true {
+				t.Errorf("audit inbox_dropped = %v, want true", e.Detail["inbox_dropped"])
+			}
+			if _, hasErr := e.Detail["pane_close_error"]; hasErr {
+				t.Errorf("happy path audit unexpectedly has pane_close_error: %v", e.Detail)
+			}
+		}
+	}
+	if !sawDissolve {
+		t.Errorf("no ic-dissolved audit row found in %+v", rows)
+	}
+}
+
+func TestDissolveAllowsRespawnUnderSameID(t *testing.T) {
+	dataRoot := t.TempDir()
+	vaultRoot := t.TempDir()
+	project := "demo"
+	team := "t1"
+	contract := "c1"
+
+	ensureProjectDir(t, dataRoot, project)
+	writeRoleFile(t, vaultRoot, "ic-base", "# IC base")
+	seedTeamAndContract(t, dataRoot, vaultRoot, project, team, contract)
+
+	db, err := store.Open(projectDBPath(dataRoot, project))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	_, cli := okCmuxForDissolve()
+	if _, err := Spawn(context.Background(), Opts{
+		DB: db, Cmux: cli, Project: project, Team: team,
+		Slot: "phoenix", Role: "ic-base", Contract: contract, Agent: "claude",
+		VaultRoot: vaultRoot, DataRoot: dataRoot,
+	}); err != nil {
+		t.Fatalf("first Spawn: %v", err)
+	}
+	if _, err := Dissolve(context.Background(), DissolveOpts{DB: db, Cmux: cli, Slot: "phoenix"}); err != nil {
+		t.Fatalf("Dissolve: %v", err)
+	}
+	// Respawn under the same id — the dissolved tombstone is overwritable
+	// (already tested in TestSpawnAllowsRespawnOverDissolvedSlot) AND the
+	// fresh spawn re-creates the inbox bucket.
+	r2, err := Spawn(context.Background(), Opts{
+		DB: db, Cmux: cli, Project: project, Team: team,
+		Slot: "phoenix", Role: "ic-base", Contract: contract, Agent: "claude",
+		VaultRoot: vaultRoot, DataRoot: dataRoot,
+	})
+	if err != nil {
+		t.Fatalf("respawn after dissolve: %v", err)
+	}
+	if r2.Slot.State != store.SlotActive {
+		t.Errorf("respawned slot state = %q, want active", r2.Slot.State)
+	}
+	if !db.HasICInbox("phoenix") {
+		t.Error("HasICInbox after respawn = false, want true (EnsureICInbox should re-create)")
+	}
+	// Team HC: we dissolved one then spawned one → HC=1.
+	tt, _ := db.GetTeam(team)
+	if tt.HC != 1 {
+		t.Errorf("team HC after respawn = %d, want 1", tt.HC)
+	}
+}
+
+func TestDissolveRejectsMissingSlot(t *testing.T) {
+	db := openTestDB(t)
+	_, cli := okCmuxForDissolve()
+	_, err := Dissolve(context.Background(), DissolveOpts{DB: db, Cmux: cli, Slot: "ghost"})
+	if !errors.Is(err, ErrSlotNotFound) {
+		t.Errorf("err = %v, want ErrSlotNotFound", err)
+	}
+}
+
+func TestDissolveRejectsAlreadyDissolved(t *testing.T) {
+	db := openTestDB(t)
+	_, cli := okCmuxForDissolve()
+	if err := db.PutTeam(store.Team{ID: "t1", State: store.TeamActive, WorkspaceRef: "workspace:1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutSlot(store.Slot{
+		ID: "tombstone", Team: "t1", Role: "ic-base",
+		Contract: "c1", State: store.SlotDissolved,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Dissolve(context.Background(), DissolveOpts{DB: db, Cmux: cli, Slot: "tombstone"})
+	if !errors.Is(err, ErrAlreadyDissolved) {
+		t.Errorf("err = %v, want ErrAlreadyDissolved", err)
+	}
+}
+
+func TestDissolveRejectsContractInFlight(t *testing.T) {
+	db := openTestDB(t)
+	_, cli := okCmuxForDissolve()
+	if err := db.PutTeam(store.Team{ID: "t1", State: store.TeamActive, WorkspaceRef: "workspace:1", HC: 1}); err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []string{store.ContractWorking, store.ContractValidating} {
+		t.Run(state, func(t *testing.T) {
+			cid := "c-" + state
+			sid := "slot-" + state
+			if err := db.PutContract(store.Contract{ID: cid, Team: "t1", State: state, Objective: "x"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.PutSlot(store.Slot{
+				ID: sid, Team: "t1", Role: "ic-base",
+				Contract: cid, State: store.SlotActive, PaneRef: "pane:99",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Dissolve(context.Background(), DissolveOpts{DB: db, Cmux: cli, Slot: sid})
+			if !errors.Is(err, ErrContractInFlight) {
+				t.Errorf("state=%s: err = %v, want ErrContractInFlight", state, err)
+			}
+			// State must NOT have flipped on a rejected dissolve.
+			got, _ := db.GetSlot(sid)
+			if got.State != store.SlotActive {
+				t.Errorf("rejected dissolve mutated state: got %q, want active", got.State)
+			}
+		})
+	}
+}
+
+func TestDissolveAllowsBlockedContract(t *testing.T) {
+	dataRoot := t.TempDir()
+	vaultRoot := t.TempDir()
+	project := "demo"
+	team := "t1"
+	contract := "stuck"
+
+	ensureProjectDir(t, dataRoot, project)
+	writeRoleFile(t, vaultRoot, "ic-base", "# IC base")
+	seedTeamAndContract(t, dataRoot, vaultRoot, project, team, contract)
+
+	db, err := store.Open(projectDBPath(dataRoot, project))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	_, cli := okCmuxForDissolve()
+	if _, err := Spawn(context.Background(), Opts{
+		DB: db, Cmux: cli, Project: project, Team: team,
+		Slot: "stuck-slot", Role: "ic-base", Contract: contract, Agent: "claude",
+		VaultRoot: vaultRoot, DataRoot: dataRoot,
+	}); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	// Mark contract blocked — manager should still be able to dissolve.
+	if err := db.TransitionContract(contract, store.ContractReady, "manager", "deps met"); err != nil {
+		t.Fatalf("transition ready: %v", err)
+	}
+	if err := db.TransitionContract(contract, store.ContractWorking, "ic", "start"); err != nil {
+		t.Fatalf("transition working: %v", err)
+	}
+	if err := db.TransitionContract(contract, store.ContractBlocked, "ic", "dep gap"); err != nil {
+		t.Fatalf("transition blocked: %v", err)
+	}
+	if _, err := Dissolve(context.Background(), DissolveOpts{DB: db, Cmux: cli, Slot: "stuck-slot"}); err != nil {
+		t.Errorf("dissolve over blocked contract: %v (want nil — blocked is dissolvable)", err)
+	}
+}
+
+func TestDissolveSurvivesPaneCloseFailure(t *testing.T) {
+	dataRoot := t.TempDir()
+	vaultRoot := t.TempDir()
+	project := "demo"
+	team := "t1"
+	contract := "c1"
+
+	ensureProjectDir(t, dataRoot, project)
+	writeRoleFile(t, vaultRoot, "ic-base", "# IC base")
+	seedTeamAndContract(t, dataRoot, vaultRoot, project, team, contract)
+
+	db, err := store.Open(projectDBPath(dataRoot, project))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	_, cli := cmuxForSpawnButFailingClose()
+	if _, err := Spawn(context.Background(), Opts{
+		DB: db, Cmux: cli, Project: project, Team: team,
+		Slot: "zombie", Role: "ic-base", Contract: contract, Agent: "claude",
+		VaultRoot: vaultRoot, DataRoot: dataRoot,
+	}); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+
+	r, err := Dissolve(context.Background(), DissolveOpts{DB: db, Cmux: cli, Slot: "zombie"})
+	if err != nil {
+		t.Fatalf("Dissolve with failing close-pane: %v (want nil — state is SoT, pane close is best-effort)", err)
+	}
+	if r.PaneCloseError == nil {
+		t.Error("PaneCloseError = nil, want the cmux unreachable error captured")
+	}
+	if r.Slot.State != store.SlotDissolved {
+		t.Errorf("slot state = %q despite pane-close failure; state must still flip", r.Slot.State)
+	}
+	if r.Team.HC != 0 {
+		t.Errorf("team HC = %d despite pane-close failure; HC must still decrement", r.Team.HC)
+	}
+	// Audit row must carry the pane_close_error detail.
+	rows, _ := db.RecentAudit(20)
+	saw := false
+	for _, e := range rows {
+		if e.Action == "ic-dissolved" && e.Subject == "zombie" {
+			saw = true
+			if msg, ok := e.Detail["pane_close_error"].(string); !ok || msg == "" {
+				t.Errorf("audit detail missing pane_close_error: %+v", e.Detail)
+			}
+		}
+	}
+	if !saw {
+		t.Error("ic-dissolved audit row missing")
+	}
+}
+
+func TestDissolveRejectsBadSlug(t *testing.T) {
+	db := openTestDB(t)
+	_, cli := okCmuxForDissolve()
+	_, err := Dissolve(context.Background(), DissolveOpts{DB: db, Cmux: cli, Slot: "../evil"})
+	if err == nil {
+		t.Error("expected validation error for bad slug")
+	}
+}
+
+func TestDissolveDecrementsHCMultipleSlots(t *testing.T) {
+	// Spawn two ICs, dissolve one, verify HC = 1 (not 0 or 2).
+	dataRoot := t.TempDir()
+	vaultRoot := t.TempDir()
+	project := "demo"
+	team := "t1"
+	contract := "c1"
+
+	ensureProjectDir(t, dataRoot, project)
+	writeRoleFile(t, vaultRoot, "ic-base", "# IC base")
+	seedTeamAndContract(t, dataRoot, vaultRoot, project, team, contract)
+
+	db, err := store.Open(projectDBPath(dataRoot, project))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	_, cli := okCmuxForDissolve()
+	for _, slotID := range []string{"a", "b"} {
+		if _, err := Spawn(context.Background(), Opts{
+			DB: db, Cmux: cli, Project: project, Team: team,
+			Slot: slotID, Role: "ic-base", Contract: contract, Agent: "claude",
+			VaultRoot: vaultRoot, DataRoot: dataRoot,
+		}); err != nil {
+			t.Fatalf("Spawn %s: %v", slotID, err)
+		}
+	}
+	pre, _ := db.GetTeam(team)
+	if pre.HC != 2 {
+		t.Fatalf("pre-dissolve HC = %d, want 2", pre.HC)
+	}
+	r, err := Dissolve(context.Background(), DissolveOpts{DB: db, Cmux: cli, Slot: "a"})
+	if err != nil {
+		t.Fatalf("Dissolve a: %v", err)
+	}
+	if r.Team.HC != 1 {
+		t.Errorf("after dissolving one of two, HC = %d, want 1", r.Team.HC)
+	}
+	// Surviving slot still active.
+	bSlot, _ := db.GetSlot("b")
+	if bSlot.State != store.SlotActive {
+		t.Errorf("surviving slot b state = %q, want active", bSlot.State)
+	}
+	// And b's inbox still present.
+	if !db.HasICInbox("b") {
+		t.Error("surviving slot b's inbox unexpectedly dropped")
+	}
+}
+
 func TestSpawnSendsBootstrapIntoPane(t *testing.T) {
 	dataRoot := t.TempDir()
 	vaultRoot := t.TempDir()

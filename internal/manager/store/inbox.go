@@ -261,6 +261,29 @@ func (d *DB) AckICInbox(slot, id string) error {
 	})
 }
 
+// DropICInbox removes the nested inbox sub-bucket for a slot id, including
+// any queued-but-unacked messages. Idempotent: a missing sub-bucket is a
+// no-op (so a dissolve never fails just because the IC was already torn
+// down). Called by icspawn.Dissolve to keep the inbox-ics parent bucket
+// from accumulating dead state across an arcmux project's lifetime, and to
+// make a respawn under the same slot id semantically fresh rather than
+// inheriting the prior IC's undelivered queue.
+func (d *DB) DropICInbox(slot string) error {
+	if slot == "" {
+		return fmt.Errorf("DropICInbox: slot required")
+	}
+	return d.b.Update(func(tx *bolt.Tx) error {
+		parent := tx.Bucket([]byte(BucketInboxICs))
+		if parent == nil {
+			return nil
+		}
+		if parent.Bucket([]byte(slot)) == nil {
+			return nil
+		}
+		return parent.DeleteBucket([]byte(slot))
+	})
+}
+
 // icInboxBucket resolves the per-slot nested inbox bucket within the
 // inbox-ics parent. Returns ErrICInboxMissing if either the parent or the
 // sub-bucket is absent.

@@ -1,6 +1,6 @@
 ---
 role: manager
-version: 0.6.0
+version: 0.7.0
 extends: null
 ---
 
@@ -157,6 +157,34 @@ inbox before doing anything else. Inspect your team's roster with
 `arcmux-call ic list --team $ARCMUX_TEAM` (or `--state active` to skip
 tombstones).
 
+When a slot's work is done (contract `completed` / `cancelled` / `failed`)
+or you need the HC back, retire it:
+
+```
+arcmux-call ic dissolve --slot <slot-id>
+```
+
+This marks the slot `dissolved`, recomputes your team's HC from the
+post-dissolve active count, drops the per-IC inbox sub-bucket (queued
+messages are purged — a respawn under the same id is a fresh queue),
+best-effort-closes the cmux pane, and writes an `ic-dissolved` audit row
+with `prev_state`, `hc_after`, and any `pane_close_error`. The substrate
+rejects:
+
+- `working` or `validating` contracts — orphaning in-flight work is a
+  state lie; transition the contract first (`--to cancelled` / `failed`
+  / `completed`).
+- Already-dissolved tombstones — loud (not idempotent); a double-dissolve
+  is almost always a caller bug.
+
+`blocked` / `ready` / `pending` / terminal-state contracts are all OK to
+dissolve over. If `cmux close-pane` fails (daemon unreachable, pane
+already closed), the dissolve still succeeds — the slot record is the
+source of truth and the audit row carries `pane_close_error` for the
+operator. After dissolve, you can spawn a fresh slot under the same id —
+the tombstone is overwritable (mirrors team-spawn over an archived
+tombstone).
+
 ## Per-IC ad-hoc messaging
 
 Every spawned slot has its own inbox, addressed by slot id. Use it when
@@ -242,12 +270,9 @@ promotion on her next Review.
 
 ## What is NOT built yet
 
-(As of role-file version 0.6.0, the wider arcmux runtime is still being
+(As of role-file version 0.7.0, the wider arcmux runtime is still being
 built. Don't assume tooling that doesn't exist.)
 
-- No `arcmux-call ic dissolve` — a slot's `state` can be flipped to
-  `dissolved` at the bbolt layer, but the cmux pane is not auto-closed
-  and the team's HC is not auto-decremented. Next slice.
 - No automatic notification — the per-team and per-IC inbox primitives
   let you queue orders, but the recipient still polls. Wake-on-write
   via cmux-notify is a later slice.
@@ -255,6 +280,13 @@ built. Don't assume tooling that doesn't exist.)
   convention; the substrate does not yet reject impersonation. Plan 7+.
 - No automatic ticker — your activation is user-driven (Elon dispatches
   by writing to your inbox, or the user types directly in your pane).
+- No automatic team archive when your last IC dissolves — your team's
+  workspace stays open and the team record stays `active`. Flag this in
+  your journal when your mission is genuinely complete; Elon decides
+  team archive.
+- No pane heartbeat / crash recovery — if an IC pane silently dies, the
+  slot record stays `active` until you dissolve it manually. Detect via
+  `cmux list-panes --workspace $WS` vs. `ic list --team --state active`.
 
 When the user gives you work that depends on machinery that does not
 exist, **flag it explicitly** in your journal and either work around it

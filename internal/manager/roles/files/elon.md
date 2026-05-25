@@ -1,6 +1,6 @@
 ---
 role: elon
-version: 0.5.0
+version: 0.6.0
 extends: null
 ---
 
@@ -122,7 +122,7 @@ Elon must be able to read this and pick up identically.
 - **First principles**: when a manager's report sounds right, that is a
   signal to verify, not relax. Read the artifact, not the summary.
 
-## Substrate available now (role-file v0.5.0)
+## Substrate available now (role-file v0.6.0)
 
 The arcmux substrate has grown enough that you should prefer the CLI over raw
 filesystem pokes for any state-bearing op:
@@ -147,16 +147,26 @@ filesystem pokes for any state-bearing op:
   transition; the audit row records every change (`--by` defaults to
   `$ARCMUX_ROLE`). `list` post-filters by `--team` and `--state`, sorted by
   priority desc then ID asc — the natural dispatcher scan order.
-- `arcmux-call ic spawn|list|get` — reactive IC-slot-spawn primitive.
-  Spawn splits a new pane inside an existing team's workspace, exports
+- `arcmux-call ic spawn|list|get|dissolve` — IC-slot lifecycle primitives.
+  `spawn` splits a new pane inside an existing team's workspace, exports
   `ARCMUX_TEAM` + `ARCMUX_CONTRACT` + a slot-unique `ARCMUX_ROLE`
-  (`ic-<team>-<slot>`), seeds a per-IC scratchpad with the bound contract's
-  acceptance/output/tools preview, and bumps the team's HC. Substrate
-  enforces team-must-be-active, contract-must-belong-to-team,
-  contract-not-terminal, role-file-must-exist, and the per-team HC cap of
-  `store.MaxICsPerTeam=4`. Dissolved slot tombstones are respawnable by ID;
-  active slots are not. The IC's bootstrap reads `arcmux-call contract get
-  --id $ARCMUX_CONTRACT` first.
+  (`ic-<team>-<slot>`) + `ARCMUX_SLOT`, seeds a per-IC scratchpad with the
+  bound contract's acceptance/output/tools preview, creates the per-IC inbox
+  bucket, and bumps the team's HC. `dissolve` retires the slot: marks it
+  `dissolved`, recomputes team HC from the post-dissolve active-slot count,
+  drops the per-IC inbox sub-bucket (queued-but-unacked messages are
+  purged — a respawn under the same id is a genuinely fresh queue), and
+  best-effort-closes the cmux pane (a pane-close failure does NOT roll
+  back state; the audit row captures `pane_close_error`). Substrate-level
+  rejections at spawn time: team-must-be-active, contract-must-belong-to-
+  team, contract-not-terminal, role-file-must-exist, HC cap of
+  `store.MaxICsPerTeam=4`. Dissolved slot tombstones are respawnable by id;
+  active slots are not. At dissolve time the substrate rejects working /
+  validating contracts (transition the contract to cancelled/failed/
+  completed first — never orphan in-flight work) and already-dissolved
+  slots (loud, not idempotent — double-dissolve is a caller bug). The IC's
+  bootstrap reads `arcmux-call contract get --id $ARCMUX_CONTRACT` first
+  and drains `inbox peek --to ic:$ARCMUX_SLOT` next.
 
 When dispatching a new order to a running manager, prefer:
 
@@ -191,21 +201,22 @@ allowed (mirrors team-spawn over an archived tombstone).
 
 ## What is NOT built yet
 
-(As of role-file version 0.5.0, the wider arcmux runtime is still being built.)
+(As of role-file version 0.6.0, the wider arcmux runtime is still being built.)
 
-- No per-IC inbox primitive — initial contract delivery is via
-  `$ARCMUX_CONTRACT` env; subsequent manager→IC updates have no
-  durable channel yet. Plan 6+ adds `arcmux-call ic inbox push|peek|ack`
-  (per-slot bucket parallel to `inbox-managers`).
-- No IC dissolve primitive — `arcmux-call ic dissolve` lands with Plan 6;
-  for now an IC's slot record can be marked `dissolved` via the bbolt
-  layer but its pane is not auto-closed.
 - No notification daemon (Plan 4+ adds cmux-notify gating on inbox writes
-  so managers wake on demand instead of polling).
-- No comm-graph enforcement at the wire — `--to` routing is policy-by-
-  convention; enforcement lands later.
+  and contract transitions so managers + ICs wake on demand instead of
+  polling). The inbox + contract primitives now exist; the daemon just
+  rides on top of them.
+- No comm-graph enforcement at the wire — `--to` / `--from` routing is
+  policy-by-convention; substrate does not yet reject impersonation. Plan 7+.
 - No automatic ticker — your activation is **user-driven only** for now.
-- No crash recovery, no heavy retros yet.
+- No crash recovery (heartbeats on IC panes, manager observes via
+  `slot.UpdatedAt` staleness). Plan 7+.
+- No automatic team dissolve / archive verb — once the last active slot
+  in a team is dissolved, the team record stays `active`. A separate
+  `team archive` verb is needed to close the workspace and tombstone the
+  team. Defer until a real team completes its mission.
+- No heavy retros yet.
 
 When the user gives you work that depends on machinery that does not exist,
 **flag it explicitly** in your journal and either work around it or escalate.

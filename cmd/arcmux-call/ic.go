@@ -21,7 +21,7 @@ import (
 // cmuxcli.New() here.
 func cmdIC(args []string, stdout io.Writer) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: arcmux-call ic spawn|list|get [flags]")
+		return fmt.Errorf("usage: arcmux-call ic spawn|list|get|dissolve [flags]")
 	}
 	switch args[0] {
 	case "spawn":
@@ -30,8 +30,10 @@ func cmdIC(args []string, stdout io.Writer) error {
 		return cmdICList(args[1:], stdout)
 	case "get":
 		return cmdICGet(args[1:], stdout)
+	case "dissolve":
+		return cmdICDissolve(args[1:], stdout, cmuxcli.New())
 	default:
-		return fmt.Errorf("unknown ic subcommand %q (want spawn|list|get)", args[0])
+		return fmt.Errorf("unknown ic subcommand %q (want spawn|list|get|dissolve)", args[0])
 	}
 }
 
@@ -190,4 +192,55 @@ func cmdICGet(args []string, stdout io.Writer) error {
 		return fmt.Errorf("ic get: %w", err)
 	}
 	return json.NewEncoder(stdout).Encode(map[string]any{"slot": got})
+}
+
+// cmdICDissolve handles `arcmux-call ic dissolve --slot <id>`. The cmux
+// client is injectable for the same reason cmdICSpawn's is: unit tests
+// fake-runner-back the close-pane call, production threads cmuxcli.New().
+func cmdICDissolve(args []string, stdout io.Writer, cli *cmuxcli.Client) error {
+	fs := flag.NewFlagSet("ic dissolve", flag.ContinueOnError)
+	slot := fs.String("slot", "", "slot id to dissolve (required, validated as slug)")
+	by := fs.String("by", defaultActor(), "actor recording the dissolve (default $ARCMUX_ROLE or 'arcmux-call')")
+	project := fs.String("project", os.Getenv("ARCMUX_PROJECT"), "project slug (default $ARCMUX_PROJECT)")
+	dataRoot := fs.String("data-root", defaultDataRoot(), "ephemeral data root (default $ARCMUX_DATA or $HOME/data)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *slot == "" {
+		return fmt.Errorf("ic dissolve: --slot required")
+	}
+	if *project == "" {
+		return fmt.Errorf("ic dissolve: --project or $ARCMUX_PROJECT required")
+	}
+	if _, err := paths.Validate(*project); err != nil {
+		return err
+	}
+	if _, err := paths.Validate(*slot); err != nil {
+		return fmt.Errorf("ic dissolve: --slot: %w", err)
+	}
+
+	db, _, err := openProjectDB(*dataRoot, *project)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	r, err := icspawn.Dissolve(context.Background(), icspawn.DissolveOpts{
+		DB: db, Cmux: cli, Slot: *slot, By: *by,
+	})
+	if err != nil {
+		return fmt.Errorf("ic dissolve: %w", err)
+	}
+	ack := map[string]any{
+		"ok":            true,
+		"slot":          r.Slot,
+		"team_hc":       r.Team.HC,
+		"inbox_dropped": true,
+	}
+	if r.PaneCloseError != nil {
+		// Soft-warn in the JSON envelope so a script can detect a zombie
+		// pane without parsing logs. The dissolve itself succeeded.
+		ack["pane_close_warning"] = r.PaneCloseError.Error()
+	}
+	return json.NewEncoder(stdout).Encode(ack)
 }

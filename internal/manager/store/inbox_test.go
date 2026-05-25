@@ -302,3 +302,74 @@ func TestICInboxRequiresMsgID(t *testing.T) {
 		t.Error("PushICInbox without ID: want error, got nil")
 	}
 }
+
+// TestDropICInbox pins three properties that the icspawn.Dissolve flow
+// depends on:
+//
+//  1. Queued-but-unacked messages are purged with the bucket — a respawn
+//     under the same slot id sees a genuinely empty queue, not the prior
+//     IC's leftover state. This is the "don't silently inherit another
+//     IC's inbox" foot-gun guard.
+//  2. Drop is idempotent — calling DropICInbox on a slot that was never
+//     spawned (or already dissolved) is a no-op, not an error. Dissolve
+//     never fails just because the inbox was already torn down.
+//  3. After drop, a subsequent EnsureICInbox-then-push works exactly like
+//     a fresh spawn (push to a never-existed slot is the loud-error path;
+//     here we're checking the re-create-then-push round-trip).
+func TestDropICInbox(t *testing.T) {
+	db := openTestDB(t)
+
+	// (2) Drop before Ensure — silent no-op.
+	if err := db.DropICInbox("ghost"); err != nil {
+		t.Errorf("DropICInbox before Ensure: %v (want nil — idempotent)", err)
+	}
+
+	// (1) Queue some messages, then drop — peek after drop returns the
+	// "missing bucket" error, not stale messages.
+	if err := db.EnsureICInbox("slot-x"); err != nil {
+		t.Fatalf("EnsureICInbox: %v", err)
+	}
+	for _, id := range []string{"q1", "q2", "q3"} {
+		if err := db.PushICInbox("slot-x", InboxMsg{ID: id, Verb: "consult", Body: "x"}); err != nil {
+			t.Fatalf("push %s: %v", id, err)
+		}
+	}
+	pre, _ := db.PeekICInbox("slot-x", 10)
+	if len(pre) != 3 {
+		t.Fatalf("pre-drop peek = %d msgs, want 3", len(pre))
+	}
+
+	if err := db.DropICInbox("slot-x"); err != nil {
+		t.Fatalf("DropICInbox: %v", err)
+	}
+	if db.HasICInbox("slot-x") {
+		t.Errorf("HasICInbox after drop = true, want false")
+	}
+	if _, err := db.PeekICInbox("slot-x", 10); !errors.Is(err, ErrICInboxMissing) {
+		t.Errorf("post-drop peek err = %v, want ErrICInboxMissing", err)
+	}
+
+	// Drop again — still silent (idempotent on missing bucket).
+	if err := db.DropICInbox("slot-x"); err != nil {
+		t.Errorf("second DropICInbox: %v (want nil)", err)
+	}
+
+	// (3) Re-Ensure under the same slot id yields a fresh, empty queue.
+	if err := db.EnsureICInbox("slot-x"); err != nil {
+		t.Fatalf("re-Ensure: %v", err)
+	}
+	again, _ := db.PeekICInbox("slot-x", 10)
+	if len(again) != 0 {
+		t.Errorf("post-respawn peek = %+v, want []; prior IC's messages leaked", again)
+	}
+	if err := db.PushICInbox("slot-x", InboxMsg{ID: "fresh", Verb: "redirect"}); err != nil {
+		t.Errorf("push after respawn: %v", err)
+	}
+}
+
+func TestDropICInboxRejectsEmpty(t *testing.T) {
+	db := openTestDB(t)
+	if err := db.DropICInbox(""); err == nil {
+		t.Error("DropICInbox(empty): want error, got nil")
+	}
+}

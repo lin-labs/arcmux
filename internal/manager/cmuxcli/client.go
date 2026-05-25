@@ -169,6 +169,16 @@ func (c *Client) CloseSurface(ctx context.Context, target string) error {
 	return nil
 }
 
+// ClosePane closes a pane by ref. Mirrors NewPane on the verb axis; used by
+// icspawn.Dissolve to retire an IC's pane when its slot lifecycle ends.
+func (c *Client) ClosePane(ctx context.Context, target string) error {
+	_, err := c.r.Run(ctx, "close-pane", "--pane", target)
+	if err != nil {
+		return fmt.Errorf("cmux close-pane: %w", err)
+	}
+	return nil
+}
+
 // CloseWorkspace closes a workspace.
 func (c *Client) CloseWorkspace(ctx context.Context, target string) error {
 	_, err := c.r.Run(ctx, "close-workspace", "--workspace", target)

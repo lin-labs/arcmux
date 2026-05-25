@@ -42,6 +42,7 @@ func newICCmux() *cmuxcli.Client {
 		"new-workspace": "OK workspace:cli-7\n",
 		"list-panes":    `{"workspace_ref":"workspace:cli-7","panes":[{"ref":"pane:cli-mgr","index":0,"focused":true,"surface_refs":["surface:s1"]}]}`,
 		"new-pane":      "OK pane:cli-9\n",
+		"close-pane":    "OK\n",
 	}})
 }
 
@@ -379,5 +380,184 @@ func TestCmdICDispatcher(t *testing.T) {
 	}
 	if err := cmdIC([]string{"frobnicate"}, &out); err == nil {
 		t.Error("expected error for unknown subcommand")
+	}
+}
+
+func TestCmdICDissolveHappy(t *testing.T) {
+	dataRoot := t.TempDir()
+	vault := t.TempDir()
+	writeICRoleFile(t, vault, "ic-base")
+	preseedTeamAndContract(t, dataRoot, vault, "p", "alpha", "c1")
+	preseedSlot(t, dataRoot, vault, "p", "alpha", "linus-1", "c1")
+
+	// Sanity: pre-dissolve HC=1, slot active, inbox bucket present.
+	pre, _, err := openProjectDB(dataRoot, "p")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	preTeam, _ := pre.GetTeam("alpha")
+	if preTeam.HC != 1 {
+		t.Fatalf("pre-dissolve HC = %d, want 1", preTeam.HC)
+	}
+	if !pre.HasICInbox("linus-1") {
+		t.Fatalf("pre-dissolve inbox bucket missing")
+	}
+	pre.Close()
+
+	var out bytes.Buffer
+	if err := cmdICDissolve(
+		[]string{"--project", "p", "--data-root", dataRoot, "--slot", "linus-1", "--by", "manager:alpha"},
+		&out,
+		newICCmux(),
+	); err != nil {
+		t.Fatalf("cmdICDissolve: %v", err)
+	}
+	var ack struct {
+		OK           bool       `json:"ok"`
+		Slot         store.Slot `json:"slot"`
+		TeamHC       int        `json:"team_hc"`
+		InboxDropped bool       `json:"inbox_dropped"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &ack); err != nil {
+		t.Fatalf("decode ack: %v\nraw: %s", err, out.String())
+	}
+	if !ack.OK || ack.Slot.State != store.SlotDissolved {
+		t.Errorf("ack = %+v", ack)
+	}
+	if ack.TeamHC != 0 {
+		t.Errorf("post-dissolve team HC echo = %d, want 0", ack.TeamHC)
+	}
+	if !ack.InboxDropped {
+		t.Errorf("ack.inbox_dropped = false, want true")
+	}
+
+	// Verify persistence.
+	post, _, _ := openProjectDB(dataRoot, "p")
+	defer post.Close()
+	gotSlot, _ := post.GetSlot("linus-1")
+	if gotSlot.State != store.SlotDissolved {
+		t.Errorf("persisted slot state = %q, want dissolved", gotSlot.State)
+	}
+	if post.HasICInbox("linus-1") {
+		t.Errorf("post-dissolve inbox bucket still present; want dropped")
+	}
+	gotTeam, _ := post.GetTeam("alpha")
+	if gotTeam.HC != 0 {
+		t.Errorf("persisted team HC = %d, want 0", gotTeam.HC)
+	}
+}
+
+func TestCmdICDissolveRequiresFlags(t *testing.T) {
+	cli := newICCmux()
+	var out bytes.Buffer
+	if err := cmdICDissolve([]string{"--project", "p", "--data-root", "/d"}, &out, cli); err == nil {
+		t.Error("expected error for missing --slot")
+	}
+	if err := cmdICDissolve([]string{"--slot", "x", "--data-root", "/d"}, &out, cli); err == nil {
+		t.Error("expected error for missing --project")
+	}
+}
+
+func TestCmdICDissolveRejectsBadSlug(t *testing.T) {
+	dataRoot := t.TempDir()
+	db, _, err := openProjectDB(dataRoot, "p")
+	if err != nil {
+		t.Fatalf("openProjectDB: %v", err)
+	}
+	db.Close()
+
+	var out bytes.Buffer
+	err = cmdICDissolve(
+		[]string{"--project", "p", "--data-root", dataRoot, "--slot", "../escape"},
+		&out,
+		newICCmux(),
+	)
+	if err == nil || !strings.Contains(err.Error(), "invalid project slug") {
+		t.Errorf("expected slug validation error, got %v", err)
+	}
+}
+
+func TestCmdICDissolveRejectsMissingSlot(t *testing.T) {
+	dataRoot := t.TempDir()
+	db, _, err := openProjectDB(dataRoot, "p")
+	if err != nil {
+		t.Fatalf("openProjectDB: %v", err)
+	}
+	db.Close()
+
+	var out bytes.Buffer
+	err = cmdICDissolve(
+		[]string{"--project", "p", "--data-root", dataRoot, "--slot", "ghost"},
+		&out,
+		newICCmux(),
+	)
+	if err == nil || !strings.Contains(err.Error(), "slot not found") {
+		t.Errorf("expected slot-not-found error, got %v", err)
+	}
+}
+
+// TestICDissolveE2EBinary builds arcmux-call and exercises spawn→dissolve→
+// list end-to-end against a real bolt file. The spawn step uses icspawn
+// in-process (cmux daemon isn't available); the dissolve step goes
+// through the binary's dispatcher. We can't actually run the dissolve
+// binary path because it would call cmux too — but we exercise the
+// readback shape (list shows the dissolved tombstone, get returns it
+// with state=dissolved).
+func TestICDissolveStateReadbackBinary(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e — requires building arcmux-call binary")
+	}
+	bin := filepath.Join(t.TempDir(), "arcmux-call")
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Stderr = os.Stderr
+	if err := build.Run(); err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	dataRoot := t.TempDir()
+	vault := t.TempDir()
+	writeICRoleFile(t, vault, "ic-base")
+	preseedTeamAndContract(t, dataRoot, vault, "e2e", "team-x", "c-x")
+	preseedSlot(t, dataRoot, vault, "e2e", "team-x", "linus-1", "c-x")
+
+	// Flip slot to dissolved directly so the readback shape is exercised
+	// without needing a live cmux daemon.
+	db, _, err := openProjectDB(dataRoot, "e2e")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	got, _ := db.GetSlot("linus-1")
+	got.State = store.SlotDissolved
+	if err := db.PutSlot(got); err != nil {
+		t.Fatalf("put dissolved: %v", err)
+	}
+	db.Close()
+
+	// `ic list` should still surface the tombstone by default.
+	list := exec.Command(bin, "ic", "list",
+		"--project", "e2e", "--data-root", dataRoot, "--team", "team-x")
+	list.Stderr = os.Stderr
+	out, err := list.Output()
+	if err != nil {
+		t.Fatalf("ic list: %v", err)
+	}
+	var listOut struct {
+		Slots []store.Slot `json:"slots"`
+	}
+	_ = json.Unmarshal(out, &listOut)
+	if len(listOut.Slots) != 1 || listOut.Slots[0].State != store.SlotDissolved {
+		t.Errorf("ic list: %+v", listOut)
+	}
+	// `ic list --state active` should hide it.
+	listActive := exec.Command(bin, "ic", "list",
+		"--project", "e2e", "--data-root", dataRoot, "--team", "team-x", "--state", "active")
+	listActive.Stderr = os.Stderr
+	out, err = listActive.Output()
+	if err != nil {
+		t.Fatalf("ic list --state active: %v", err)
+	}
+	_ = json.Unmarshal(out, &listOut)
+	if len(listOut.Slots) != 0 {
+		t.Errorf("ic list active-only: got %d slots, want 0", len(listOut.Slots))
 	}
 }
