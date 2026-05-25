@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
@@ -53,6 +54,12 @@ func TestStartCreatesWorkspaceAndPane(t *testing.T) {
 	if p.Workspace.Ref != "workspace:1" {
 		t.Errorf("Workspace.Ref = %q, want workspace:1", p.Workspace.Ref)
 	}
+	if p.BootstrapPath == "" {
+		t.Error("BootstrapPath empty")
+	}
+	if _, err := os.Stat(p.BootstrapPath); err != nil {
+		t.Errorf("bootstrap script missing: %v", err)
+	}
 
 	var sawWS, sawList bool
 	var wsCall string
@@ -72,9 +79,9 @@ func TestStartCreatesWorkspaceAndPane(t *testing.T) {
 	if !sawList {
 		t.Error("expected list-panes call")
 	}
-	// Workspace creation should pass the agent command and vault cwd.
-	if !strings.Contains(wsCall, "claude") {
-		t.Errorf("new-workspace missing --command claude: %q", wsCall)
+	// Workspace creation should pass the bootstrap script as --command, not the agent directly.
+	if !strings.Contains(wsCall, "bootstrap-elon.sh") {
+		t.Errorf("new-workspace missing bootstrap script: %q", wsCall)
 	}
 	if !strings.Contains(wsCall, vault) {
 		t.Errorf("new-workspace missing vault cwd %q: %q", vault, wsCall)

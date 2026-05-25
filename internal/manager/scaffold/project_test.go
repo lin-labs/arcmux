@@ -59,6 +59,33 @@ func TestScaffoldIdempotent(t *testing.T) {
 	}
 }
 
+func TestScaffoldUpdateRolesOverwrites(t *testing.T) {
+	dataRoot := t.TempDir()
+	vault := t.TempDir()
+	p := paths.ForProject(dataRoot, vault, "demo")
+
+	rolesDir := paths.GlobalRolesDir(vault)
+	if err := os.MkdirAll(rolesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	custom := filepath.Join(rolesDir, "elon.md")
+	if err := os.WriteFile(custom, []byte("OLD_VERSION"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Project(p, vault, "mission", WithUpdateRoles()); err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+
+	body, _ := os.ReadFile(custom)
+	if string(body) == "OLD_VERSION" {
+		t.Error("elon.md should have been overwritten by --update-roles")
+	}
+	if !strings.Contains(string(body), "role: elon") {
+		t.Errorf("elon.md missing fresh content: %s", body)
+	}
+}
+
 func TestScaffoldDoesNotOverwriteExistingRoles(t *testing.T) {
 	dataRoot := t.TempDir()
 	vault := t.TempDir()

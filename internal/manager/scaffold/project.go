@@ -53,10 +53,29 @@ const playbookTemplate = "---\n" +
 	"(uses defaults: Elon 15 min, Manager 10 min)\n"
 
 // Project scaffolds the durable + ephemeral layout. Existing files are not
-// overwritten; the function is idempotent and safe to call repeatedly.
+// overwritten by default; the function is idempotent and safe to call
+// repeatedly. Pass ProjectWithUpdateRoles to refresh role-file seeds.
 //
 // vault is the absolute path to the user's $OBS_AGENTS root.
-func Project(p paths.Project, vault, mission string) error {
+func Project(p paths.Project, vault, mission string, opts ...Opt) error {
+	cfg := config{}
+	for _, o := range opts {
+		o(&cfg)
+	}
+	return runProject(p, vault, mission, cfg)
+}
+
+type config struct{ updateRoles bool }
+
+// Opt configures Project.
+type Opt func(*config)
+
+// WithUpdateRoles forces the scaffolder to overwrite role-file seeds in the
+// global library with the embedded versions, even when the files already
+// exist. Use when the binary ships a newer role definition than the vault.
+func WithUpdateRoles() Opt { return func(c *config) { c.updateRoles = true } }
+
+func runProject(p paths.Project, vault, mission string, cfg config) error {
 	if p.Project == "" {
 		return fmt.Errorf("paths.Project not populated")
 	}
@@ -94,8 +113,15 @@ func Project(p paths.Project, vault, mission string) error {
 		if !ok {
 			continue
 		}
-		if err := writeIfMissing(filepath.Join(rolesDir, name+".md"), body); err != nil {
-			return err
+		dst := filepath.Join(rolesDir, name+".md")
+		if cfg.updateRoles {
+			if err := os.WriteFile(dst, []byte(body), 0o644); err != nil {
+				return err
+			}
+		} else {
+			if err := writeIfMissing(dst, body); err != nil {
+				return err
+			}
 		}
 	}
 
