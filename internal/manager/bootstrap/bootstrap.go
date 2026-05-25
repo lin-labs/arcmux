@@ -91,7 +91,11 @@ func agentInvocation(o Options) (string, error) {
 		// --append-system-prompt-file primes the role identity without
 		// stomping Claude's default system prompt (which we want intact for
 		// tool-use, hooks, skills, etc).
-		return fmt.Sprintf("exec claude --append-system-prompt-file %s\n",
+		// --dangerously-skip-permissions: arcmux-managed agents are trusted
+		// (they operate inside the user's sandbox and ARCMUX_* env scope).
+		// Skipping trust dialogs is mandatory for unattended dispatch and
+		// matches the user's existing tmux-dispatch convention.
+		return fmt.Sprintf("exec claude --dangerously-skip-permissions --append-system-prompt-file %s\n",
 			shellQuote(o.RoleFile)), nil
 	case "codex":
 		// codex doesn't expose an --append-system-prompt-file flag today;

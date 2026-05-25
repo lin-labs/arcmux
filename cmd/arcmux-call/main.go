@@ -27,9 +27,20 @@ func die(err error) {
 
 func main() {
 	if len(os.Args) < 2 {
-		die(fmt.Errorf("usage: arcmux-call create|send|capture|status [args]"))
+		die(fmt.Errorf("usage: arcmux-call create|send|capture|status|audit [args]"))
 	}
 	cmd := os.Args[1]
+
+	// State-substrate subcommands open state.bolt directly; no daemon required.
+	switch cmd {
+	case "audit":
+		if err := cmdAudit(os.Args[2:], os.Stdout); err != nil {
+			die(err)
+		}
+		return
+	}
+
+	// Daemon-mediated subcommands.
 	conn, err := grpc.NewClient(
 		"unix://"+socketPath(),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),

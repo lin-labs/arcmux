@@ -48,7 +48,7 @@ func TestRenderClaude(t *testing.T) {
 		"export ARCMUX_AGENT='claude'",
 		"export ARCMUX_VAULT='/vault'",
 		"export ARCMUX_DATA='/data'",
-		"exec claude --append-system-prompt-file",
+		"exec claude --dangerously-skip-permissions --append-system-prompt-file",
 		roleFile,
 	} {
 		if !strings.Contains(bs, want) {
