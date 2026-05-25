@@ -17,13 +17,15 @@ import (
 
 // Options describe one bootstrap script to materialize.
 type Options struct {
-	Agent      string // "claude" | "codex"
-	Project    string // slug
-	Role       string // "elon" | "manager" | "ic-<role>"
-	EphemRoot  string // ~/data/arcmux/<project>/
-	VaultRoot  string // $OBS_AGENTS
-	DataRoot   string // ~/data/
-	RoleFile   string // absolute path to the role markdown file
+	Agent     string // "claude" | "codex"
+	Project   string // slug
+	Role      string // "elon" | "manager" | "ic-<role>"
+	EphemRoot string // ~/data/arcmux/<project>/
+	VaultRoot string // $OBS_AGENTS
+	DataRoot  string // ~/data/
+	RoleFile  string // absolute path to the role markdown file
+	Team      string // team slug, for manager/IC bootstraps (optional)
+	ScriptName string // override script filename; defaults to bootstrap-<role>.sh
 }
 
 // Render writes the bootstrap script and returns its absolute path.
@@ -44,7 +46,11 @@ func Render(opts Options) (string, error) {
 	if err := os.MkdirAll(opts.EphemRoot, 0o755); err != nil {
 		return "", err
 	}
-	path := filepath.Join(opts.EphemRoot, fmt.Sprintf("bootstrap-%s.sh", opts.Role))
+	name := opts.ScriptName
+	if name == "" {
+		name = fmt.Sprintf("bootstrap-%s.sh", opts.Role)
+	}
+	path := filepath.Join(opts.EphemRoot, name)
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
 		return "", err
 	}
@@ -68,6 +74,9 @@ func buildScript(o Options) (string, error) {
 	b.WriteString(fmt.Sprintf("export ARCMUX_DATA=%s\n", shellQuote(o.DataRoot)))
 	b.WriteString(fmt.Sprintf("export ARCMUX_EPHEMERAL=%s\n", shellQuote(o.EphemRoot)))
 	b.WriteString(fmt.Sprintf("export ARCMUX_ROLE_FILE=%s\n", shellQuote(o.RoleFile)))
+	if o.Team != "" {
+		b.WriteString(fmt.Sprintf("export ARCMUX_TEAM=%s\n", shellQuote(o.Team)))
+	}
 	b.WriteString("\n")
 	b.WriteString(agentCmd)
 	b.WriteString("\n")
