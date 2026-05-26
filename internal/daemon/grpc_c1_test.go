@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +18,92 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+// newCreateSessionTestDaemon builds a daemon with the real
+// claude_exec profile so createSessionWithIdempotency exercises the
+// production path. Sessions are added to d.sessions but no exec process
+// is spawned (CreateSession for exec only spawns on SendPrompt). Bbolt
+// state.bolt is opened so audit rows can be written.
+func newCreateSessionTestDaemon(t *testing.T) (*Daemon, func()) {
+	t.Helper()
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "data", "arcmux", "_daemon")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	db, err := store.Open(filepath.Join(stateDir, "state.bolt"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+
+	cfg := &config.Config{
+		Daemon: config.DaemonConfig{
+			Socket: filepath.Join(dir, "arcmux.sock"),
+			LogDir: filepath.Join(dir, "logs"),
+		},
+		Hooks: config.HooksConfig{
+			HookOutputDir: filepath.Join(dir, "hooks"),
+		},
+		Agents: config.DefaultAgentProfiles(),
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	d := &Daemon{
+		cfg:      cfg,
+		hooks:    hooks.NewInstaller(cfg.Hooks.HookOutputDir),
+		watcher:  hooks.NewWatcher(cfg.Hooks.HookOutputDir, logger),
+		profiles: cfg.Agents,
+		logger:   logger,
+		sessions: make(map[string]*session.Session),
+		monitors: make(map[string]context.CancelFunc),
+		eventBus: NewEventBus(),
+	}
+	d.SetState(db)
+	d.ctx = context.Background()
+	return d, func() { _ = db.Close() }
+}
+
+// sendPromptSpy intercepts daemon.SendPrompt calls so tests can observe
+// the confirmDelivery argument. Because SendPrompt's actual implementation
+// hits the exec/tmux transport, we can't call it directly in a unit test;
+// the spy replaces the daemon's profile map with a profile shape whose
+// transport branch is short-circuited via this side channel.
+//
+// In practice we observe via the same observable-failure trick used by
+// makeSendObservable: a missing profile makes SendPrompt return Internal
+// with confirmDelivery in the error message — but the message doesn't
+// echo the bool, so we go through a thin shim instead.
+type sendPromptSpy struct {
+	mu             sync.Mutex
+	confirmHistory []bool
+}
+
+func (s *sendPromptSpy) record(confirmDelivery bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.confirmHistory = append(s.confirmHistory, confirmDelivery)
+}
+
+func (s *sendPromptSpy) lastConfirm() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.confirmHistory) == 0 {
+		return false
+	}
+	return s.confirmHistory[len(s.confirmHistory)-1]
+}
+
+// installSendPromptSpy wires a profile-less daemon and records every
+// SendPrompt confirmDelivery argument by replacing the daemon's
+// sendPromptHook. The hook is consulted by SendPrompt at the very top
+// before any transport dispatch, so the spy fires deterministically.
+func installSendPromptSpy(d *Daemon) *sendPromptSpy {
+	spy := &sendPromptSpy{}
+	d.sendPromptHook = func(_ context.Context, _ string, _ string, confirm bool, _ bool) error {
+		spy.record(confirm)
+		return nil
+	}
+	return spy
+}
 
 // newC1TestServer builds a minimum-viable Daemon + GRPCServer for the
 // C1 RPCs. It does NOT call Start() — that would spin up tmux/grpc/
@@ -506,5 +593,216 @@ func TestC1_StateUnavailable(t *testing.T) {
 		if status.Code(err) != codes.Unavailable {
 			t.Errorf("%s without state: code=%v want Unavailable (err=%v)", c.name, status.Code(err), err)
 		}
+	}
+}
+
+// TestSend_FreshSpawnTreatedAsReady pins the fresh-spawn override added
+// for the elonco "register_agent → Send within ms → queued=true forever"
+// bug. A session created within freshSpawnWindow whose state is still
+// StateStarting (the SessionStart hook hasn't fired yet) must take the
+// direct-delivery path even before the state machine catches up to idle.
+//
+// With no profile registered, the direct path errors Internal — that's
+// the observable signal that fresh-spawn override fired, NOT the queue
+// path (which would have returned queued=true with err=nil).
+func TestSend_FreshSpawnTreatedAsReady(t *testing.T) {
+	srv, d, db := newC1TestServer(t)
+	// injectSession constructs the session with StartedAt=time.Now()
+	// (via session.NewSession), so it's freshly-spawned by definition.
+	injectSession(t, d, "just-spawned", "elonco", session.StateStarting)
+	makeSendObservable(d)
+
+	resp, err := srv.Send(context.Background(), &arcmuxv1.SendRequest{
+		SessionName: "just-spawned",
+		Body:        "kickoff",
+		From:        "elonco",
+	})
+	if err == nil && resp != nil && resp.Queued {
+		t.Fatalf("fresh-spawn override didn't fire: got queued=true (resp=%+v); want direct attempt",
+			resp)
+	}
+	if err != nil && status.Code(err) != codes.Internal {
+		t.Fatalf("Send err code = %v, want Internal (direct path); err=%v", status.Code(err), err)
+	}
+	left, _ := db.PeekSessionInbox("just-spawned", 10)
+	if len(left) != 0 {
+		t.Errorf("queue depth after fresh-spawn override = %d, want 0", len(left))
+	}
+}
+
+// TestSend_FreshSpawnExpired is the negative bound on the override: a
+// session whose StartedAt is older than freshSpawnWindow must NOT be
+// treated as ready by virtue of being a recent spawn. With Working state
+// + old StartedAt, the response is the normal queue path.
+func TestSend_FreshSpawnExpired(t *testing.T) {
+	srv, d, _ := newC1TestServer(t)
+	sess := injectSession(t, d, "stale", "elonco", session.StateStarting)
+	// Backdate the spawn so the override window is past.
+	sess.StartedAt = time.Now().Add(-2 * freshSpawnWindow)
+
+	resp, err := srv.Send(context.Background(), &arcmuxv1.SendRequest{
+		SessionName: "stale",
+		Body:        "kickoff",
+		From:        "elonco",
+	})
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if !resp.Queued {
+		t.Errorf("expired fresh spawn: queued=%v, want true (override should not fire)", resp.Queued)
+	}
+}
+
+// TestSend_FreshSpawnDoesNotPreemptWorking guards the "fresh spawn but
+// already busy" edge: when a session is freshly-created AND in
+// StateWorking, the override must NOT fire — Working means real downstream
+// activity that the inbox queue is meant to protect. We assert the queue
+// path was taken.
+func TestSend_FreshSpawnDoesNotPreemptWorking(t *testing.T) {
+	srv, d, _ := newC1TestServer(t)
+	injectSession(t, d, "busy-fresh", "elonco", session.StateWorking)
+
+	resp, err := srv.Send(context.Background(), &arcmuxv1.SendRequest{
+		SessionName: "busy-fresh",
+		Body:        "kickoff",
+		From:        "elonco",
+	})
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if !resp.Queued {
+		t.Errorf("fresh+working: queued=%v, want true (override must not preempt working sessions)",
+			resp.Queued)
+	}
+}
+
+// TestSend_ConfirmDeliveryThreadsThroughToSendPrompt pins Bug 4. The
+// daemon's SendPrompt has a `confirmDelivery` parameter that gates the
+// typesafe assessment; the C1 Send RPC used to hardcode this to true.
+// We exercise both values and assert the value the caller passed reaches
+// daemon.SendPrompt unchanged.
+//
+// We can't observe the bool from the gRPC response shape (SendResponse
+// doesn't echo it), so we install a SendPrompt observer by stubbing the
+// daemon's profile map to a transport-less profile that records the
+// confirm arg into a side channel. See sendPromptSpyProfile below.
+func TestSend_ConfirmDeliveryThreadsThroughToSendPrompt(t *testing.T) {
+	srv, d, _ := newC1TestServer(t)
+	// Inject a fresh idle session so sessionReady=true and the direct
+	// path is taken (sessionReady is the only branch that consults
+	// req.ConfirmDelivery before falling into SendPrompt).
+	injectSession(t, d, "echoer", "elonco", session.StateIdle)
+	spy := installSendPromptSpy(d)
+
+	// Case A: confirm_delivery=false (the new default for fire-and-forget).
+	_, _ = srv.Send(context.Background(), &arcmuxv1.SendRequest{
+		SessionName:     "echoer",
+		Body:            "hi",
+		ConfirmDelivery: false,
+	})
+	if got := spy.lastConfirm(); got != false {
+		t.Errorf("confirm_delivery=false: observed %v, want false", got)
+	}
+
+	// Case B: explicit confirm_delivery=true.
+	_, _ = srv.Send(context.Background(), &arcmuxv1.SendRequest{
+		SessionName:     "echoer",
+		Body:            "hi2",
+		ConfirmDelivery: true,
+	})
+	if got := spy.lastConfirm(); got != true {
+		t.Errorf("confirm_delivery=true: observed %v, want true", got)
+	}
+}
+
+// TestCreateSession_IdempotentOnNameOwner pins Bug 2. Two CreateSession
+// calls with the same (Name, OwnerID) must return the same session_id
+// and the second call's response.created must be false. Without
+// idempotency, the daemon would spawn a duplicate tmux window — the
+// observed elonco "ic spawn called twice → two identical windows"
+// failure mode.
+//
+// We use the exec transport so the test avoids tmux dependency; the
+// idempotency check lives upstream of the transport branch so this is
+// representative.
+func TestCreateSession_IdempotentOnNameOwner(t *testing.T) {
+	d, cleanup := newCreateSessionTestDaemon(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	req := CreateSessionRequest{
+		Agent:   "claude_exec",
+		CWD:     t.TempDir(),
+		Name:    "ic:region-b:obsidian:0",
+		OwnerID: "elonco:region-b",
+	}
+
+	s1, created1, err := d.createSessionWithIdempotency(ctx, req)
+	if err != nil {
+		t.Fatalf("CreateSession 1: %v", err)
+	}
+	if !created1 {
+		t.Errorf("first call: created=false, want true")
+	}
+
+	s2, created2, err := d.createSessionWithIdempotency(ctx, req)
+	if err != nil {
+		t.Fatalf("CreateSession 2: %v", err)
+	}
+	if created2 {
+		t.Errorf("second call: created=true, want false (idempotent)")
+	}
+	if s1.Snapshot().ID != s2.Snapshot().ID {
+		t.Errorf("session_id differed across idempotent calls: %q vs %q",
+			s1.Snapshot().ID, s2.Snapshot().ID)
+	}
+
+	// A third call with the SAME name but a DIFFERENT owner must spawn
+	// a fresh session — owner_id scopes the dedupe key.
+	reqOther := req
+	reqOther.OwnerID = "elonco:region-c"
+	s3, created3, err := d.createSessionWithIdempotency(ctx, reqOther)
+	if err != nil {
+		t.Fatalf("CreateSession 3 (other owner): %v", err)
+	}
+	if !created3 {
+		t.Errorf("third call (other owner): created=false, want true")
+	}
+	if s3.Snapshot().ID == s1.Snapshot().ID {
+		t.Errorf("other-owner call returned same session_id; want fresh spawn")
+	}
+}
+
+// TestCreateSession_LegacyNoOwnerSkipsIdempotency keeps legacy callers
+// (voxtop / arcmux-cli without --owner) on their historical
+// "every-call-is-new" semantics. Without owner_id set, name collisions
+// should NOT dedupe — that would silently break tools that happen to
+// reuse the same generated name.
+func TestCreateSession_LegacyNoOwnerSkipsIdempotency(t *testing.T) {
+	d, cleanup := newCreateSessionTestDaemon(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	req := CreateSessionRequest{
+		Agent: "claude_exec",
+		CWD:   t.TempDir(),
+		Name:  "shared-name",
+		// no OwnerID
+	}
+	s1, c1, err := d.createSessionWithIdempotency(ctx, req)
+	if err != nil {
+		t.Fatalf("CreateSession 1: %v", err)
+	}
+	s2, c2, err := d.createSessionWithIdempotency(ctx, req)
+	if err != nil {
+		t.Fatalf("CreateSession 2: %v", err)
+	}
+	if !c1 || !c2 {
+		t.Errorf("legacy callers: both calls should report created=true (no owner_id → no dedupe); got c1=%v c2=%v",
+			c1, c2)
+	}
+	if s1.Snapshot().ID == s2.Snapshot().ID {
+		t.Errorf("legacy callers: returned same session_id (%q); want distinct sessions",
+			s1.Snapshot().ID)
 	}
 }

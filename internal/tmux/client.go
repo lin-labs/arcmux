@@ -71,6 +71,38 @@ func (c *Client) NewSessionWithEnv(ctx context.Context, name, window, cwd string
 	return err
 }
 
+// NewSessionWithEnvPaneID creates a new tmux session and returns the
+// `%pane_id` of the initial pane. Use this when callers need an
+// unambiguous routing target — pane_id is stable for the pane's lifetime
+// and immune to the "two windows with the same name in the same session"
+// collision that `<session>:<window-name>` shapes hit.
+//
+// On failure to create the session, returns an empty string + error so
+// callers can fall back to NewWindowPaneID against an existing session.
+func (c *Client) NewSessionWithEnvPaneID(ctx context.Context, name, window, cwd string, env map[string]string) (string, error) {
+	if err := c.NewSessionWithEnv(ctx, name, window, cwd, env); err != nil {
+		return "", err
+	}
+	// Resolve the pane_id of the freshly-created window. We use
+	// display-message against `<session>:<window-name>` immediately after
+	// new-session, while the new window is still the only one (or the
+	// active one) with that name. tmux returns the active pane's
+	// pane_id when targeting a window without disambiguation.
+	target := name
+	if window != "" {
+		target = fmt.Sprintf("%s:%s", name, window)
+	}
+	out, err := c.run(ctx, "display-message", "-t", target, "-p", "#{pane_id}")
+	if err != nil {
+		return "", fmt.Errorf("resolve pane_id after new-session: %w", err)
+	}
+	pid := strings.TrimSpace(out)
+	if pid == "" || !strings.HasPrefix(pid, "%") {
+		return "", fmt.Errorf("resolve pane_id after new-session: unexpected output %q", pid)
+	}
+	return pid, nil
+}
+
 // NewWindow creates a new window in an existing session and returns the
 // `%pane_id` of the created pane. Preserved for backends (notably
 // internal/mux/tmuxbackend) that pair NewWindow with ListPanes and expect
@@ -129,6 +161,34 @@ func (c *Client) NewWindowCanonical(ctx context.Context, session, name, cwd stri
 	default:
 		return "", fmt.Errorf("tmux new-window: unexpected output %q", line)
 	}
+}
+
+// NewWindowPaneID creates a new window in an existing session and returns
+// the `%pane_id` of the created pane. Exports the supplied env vars via
+// repeated `-e KEY=VAL` flags.
+//
+// Use this — not NewWindowCanonical — when the daemon needs a routing
+// target that survives duplicate window names. pane_id is unique across
+// the tmux server for the pane's lifetime, so SendKeys / display-message
+// / pipe-pane never get ambiguous about which pane they hit.
+func (c *Client) NewWindowPaneID(ctx context.Context, session, name, cwd string, env map[string]string) (string, error) {
+	args := []string{"new-window", "-t", session, "-P", "-F", "#{pane_id}"}
+	if name != "" {
+		args = append(args, "-n", name)
+	}
+	if cwd != "" {
+		args = append(args, "-c", cwd)
+	}
+	args = append(args, envFlags(env)...)
+	out, err := c.run(ctx, args...)
+	if err != nil {
+		return "", err
+	}
+	pid := strings.TrimSpace(out)
+	if pid == "" || !strings.HasPrefix(pid, "%") {
+		return "", fmt.Errorf("tmux new-window: unexpected pane_id %q", pid)
+	}
+	return pid, nil
 }
 
 // SendKeys sends text to a target pane.

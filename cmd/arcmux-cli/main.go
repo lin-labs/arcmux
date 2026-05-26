@@ -90,13 +90,23 @@ func main() {
 			fs[flag] = val
 		}
 		r, err := c.CreateSession(ctx, &arcmuxv1.CreateSessionRequest{
-			Agent: fs["--agent"], Cwd: fs["--cwd"], SessionName: fs["--name"],
-			Env: envMap,
+			Agent:       fs["--agent"],
+			Cwd:         fs["--cwd"],
+			SessionName: fs["--name"],
+			Prompt:      fs["--prompt"],
+			OwnerId:     fs["--owner"],
+			Env:         envMap,
 		})
 		if err != nil {
 			die(err)
 		}
-		enc.Encode(map[string]any{"session_id": r.SessionId, "state": r.State, "pid": r.Pid})
+		enc.Encode(map[string]any{
+			"session_id": r.SessionId,
+			"state":      r.State,
+			"pid":        r.Pid,
+			"created":    r.Created,
+			"owner_id":   r.OwnerId,
+		})
 	case "send":
 		if len(os.Args) < 3 {
 			die(fmt.Errorf("send <session_id> (text on stdin) — run `arcmux-cli list` to see session ids"))

@@ -52,6 +52,12 @@ type Daemon struct {
 
 	pulse *PulseSupervisor
 
+	// sendPromptHook, when non-nil, replaces the production SendPrompt
+	// transport dispatch. Test-only hook so unit tests can observe the
+	// arguments the C1 Send RPC passes through to daemon.SendPrompt
+	// (notably confirmDelivery). Production code never sets this.
+	sendPromptHook func(ctx context.Context, sessionID, text string, confirmDelivery, waitIdle bool) error
+
 	// state is the daemon-level bbolt store backing the C1 substrate RPCs
 	// (Send/PeekInbox/AckInbox/QueryAudit). Opened at Start, lazily on
 	// first need if Start hasn't been called (test path). One file:
@@ -348,10 +354,28 @@ func (d *Daemon) FindSessionByName(name string) *session.Session {
 }
 
 // CreateSession starts a new agent session.
+//
+// Idempotency: when (req.Name, req.OwnerID) matches an existing
+// non-terminal session, the existing session is returned unchanged and
+// the returned `created` is false. This lets orchestrators (elonco etc.)
+// retry CreateSession after a transient hiccup without producing duplicate
+// tmux windows / spawned agents. The match key requires BOTH name and
+// owner_id to be set so legacy callers (empty owner_id) don't accidentally
+// dedupe across unrelated callers that happen to pick the same name.
 func (d *Daemon) CreateSession(ctx context.Context, req CreateSessionRequest) (*session.Session, error) {
+	sess, _, err := d.createSessionWithIdempotency(ctx, req)
+	return sess, err
+}
+
+// createSessionWithIdempotency is the underlying CreateSession entry point
+// that also reports whether the returned session was freshly spawned
+// (created=true) or matched an existing non-terminal session
+// (created=false). The plain CreateSession wraps this to preserve the
+// existing call-site signature.
+func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSessionRequest) (*session.Session, bool, error) {
 	prof, ok := d.profiles[req.Agent]
 	if !ok {
-		return nil, fmt.Errorf("unknown agent profile: %s", req.Agent)
+		return nil, false, fmt.Errorf("unknown agent profile: %s", req.Agent)
 	}
 
 	// Default CWD to ~/Projects so agent sessions land in a sensible place
@@ -367,6 +391,30 @@ func (d *Daemon) CreateSession(ctx context.Context, req CreateSessionRequest) (*
 	if name == "" {
 		name = fmt.Sprintf("%s-%s", req.Agent, id[2:10])
 	}
+
+	// Idempotency check: if a non-terminal session already exists with the
+	// same (Name, OwnerID), return it unchanged. Requires BOTH to be set —
+	// legacy callers leave OwnerID empty and historically expected each
+	// CreateSession to produce a fresh session even when the name happened
+	// to collide. Match scoping by owner_id keeps that contract intact.
+	if name != "" && req.OwnerID != "" {
+		if existing := d.findNonTerminalByNameOwner(name, req.OwnerID); existing != nil {
+			d.auditSessionEvent("session.create.idempotent_hit", existing, map[string]any{
+				"agent": req.Agent,
+				"cwd":   req.CWD,
+				"name":  name,
+			})
+			snap := existing.Snapshot()
+			d.logger.Info("session.create.idempotent_hit",
+				"session_id", snap.ID,
+				"name", snap.Name,
+				"owner_id", snap.OwnerID,
+				"state", string(snap.State),
+			)
+			return existing, false, nil
+		}
+	}
+
 	sess := session.NewSession(id, name, req.Agent, req.CWD)
 	sess.SetTransport(prof.Transport)
 	sess.SetEnv(req.Env)
@@ -407,7 +455,7 @@ func (d *Daemon) CreateSession(ctx context.Context, req CreateSessionRequest) (*
 				}
 			}()
 		}
-		return sess, nil
+		return sess, true, nil
 	}
 
 	// Determine tmux target
@@ -426,7 +474,7 @@ func (d *Daemon) CreateSession(ctx context.Context, req CreateSessionRequest) (*
 	target, err := d.setupTmuxPane(ctx, tmuxSession, window, req.CWD, req.Env)
 	if err != nil {
 		sess.SetState(session.StateFailed)
-		return nil, fmt.Errorf("setup tmux pane: %w", err)
+		return nil, false, fmt.Errorf("setup tmux pane: %w", err)
 	}
 	sess.TmuxTarget = target
 
@@ -455,7 +503,28 @@ func (d *Daemon) CreateSession(ctx context.Context, req CreateSessionRequest) (*
 	// Start agent and handshake in background
 	go d.startAgentLifecycle(id, sess, prof, req.Prompt)
 
-	return sess, nil
+	return sess, true, nil
+}
+
+// findNonTerminalByNameOwner returns an existing session that matches the
+// given (name, ownerID) tuple and is NOT in a terminal state. Terminal
+// states are StateExited and StateFailed — those sessions are dead handles
+// and a fresh CreateSession SHOULD spawn a new session to replace them.
+func (d *Daemon) findNonTerminalByNameOwner(name, ownerID string) *session.Session {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	for _, s := range d.sessions {
+		snap := s.Snapshot()
+		if snap.Name != name || snap.OwnerID != ownerID {
+			continue
+		}
+		switch snap.State {
+		case session.StateExited, session.StateFailed:
+			continue
+		}
+		return s
+	}
+	return nil
 }
 
 func (d *Daemon) startAgentLifecycle(id string, sess *session.Session, prof profile.Profile, prompt string) {
@@ -525,6 +594,12 @@ func (d *Daemon) startMonitor(id string, sess *session.Session, prof profile.Pro
 
 // SendPrompt sends a prompt to a running session.
 func (d *Daemon) SendPrompt(ctx context.Context, sessionID, text string, confirmDelivery, waitIdle bool) error {
+	// Test hook: when a sendPromptHook is installed (unit tests only),
+	// route the call there so the test can observe the arguments and
+	// short-circuit the transport dispatch.
+	if d.sendPromptHook != nil {
+		return d.sendPromptHook(ctx, sessionID, text, confirmDelivery, waitIdle)
+	}
 	sess, ok := d.GetSession(sessionID)
 	if !ok {
 		return fmt.Errorf("session not found: %s", sessionID)
@@ -801,15 +876,26 @@ func (d *Daemon) relayHealthEvents() {
 func (d *Daemon) setupTmuxPane(ctx context.Context, tmuxSession, window, cwd string, env map[string]string) (string, error) {
 	// Try creating a new session first. tmux exports the supplied env vars
 	// into the spawned shell via repeated `-e KEY=VAL` flags.
-	err := d.tmux.NewSessionWithEnv(ctx, tmuxSession, window, cwd, env)
+	//
+	// Crucially, we return the freshly-created pane's `%pane_id`, NOT the
+	// canonical `<session>:<window-name>` form. Window names are mutable
+	// and non-unique in tmux: two windows can share a name within one
+	// session, and tmux `send-keys -t <session>:<name>` is ambiguous when
+	// that happens — it routes to whichever pane tmux's index-resolution
+	// picks. pane_id is unique server-wide and stable for the pane's
+	// lifetime, so SendKeys / pipe-pane / capture-pane are unambiguous.
+	//
+	// This closes the elonco bug where rapid CreateSession calls produced
+	// 13 correctly-named windows but every prompt got pasted into a
+	// pre-existing pane because the routing target was a window name that
+	// resolved to the wrong window.
+	pid, err := d.tmux.NewSessionWithEnvPaneID(ctx, tmuxSession, window, cwd, env)
 	if err == nil {
-		return fmt.Sprintf("%s:%s", tmuxSession, window), nil
+		return pid, nil
 	}
 
-	// Session exists, create a new window. NewWindowCanonical returns the
-	// canonical `<session>:<window-name>` form so downstream code never
-	// has to reconcile between %pane_id, :idx, and :name shapes.
-	target, err := d.tmux.NewWindowCanonical(ctx, tmuxSession, window, cwd, env)
+	// Session exists, create a new window inside it.
+	target, err := d.tmux.NewWindowPaneID(ctx, tmuxSession, window, cwd, env)
 	if err != nil {
 		return "", fmt.Errorf("create window: %w", err)
 	}

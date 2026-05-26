@@ -103,6 +103,103 @@ func TestIntegration_NewSessionWithEnv(t *testing.T) {
 	}
 }
 
+// TestIntegration_PaneIDRoutingSurvivesDuplicateNames is the regression
+// for the elonco "all prompts paste into the same pane" bug. The setup
+// recreates the failure mode directly: a tmux session containing two
+// windows that share a name. Targeting by `<session>:<window-name>` is
+// ambiguous in that configuration and tmux send-keys routes to whichever
+// window its index-resolver picks (typically the most-recently-active
+// one). Targeting by `%pane_id` is unambiguous.
+//
+// We assert that each pane created via NewSessionWithEnvPaneID /
+// NewWindowPaneID receives EXACTLY its own SendKeys payload, even though
+// the windows collide on name.
+func TestIntegration_PaneIDRoutingSurvivesDuplicateNames(t *testing.T) {
+	if !tmuxAvailable() {
+		t.Skip("tmux not available")
+	}
+	ctx := context.Background()
+	socket := fmt.Sprintf("arcmux-paneid-%d", time.Now().UnixNano())
+	c := NewClient(socket)
+	if err := c.EnsureServer(ctx); err != nil {
+		t.Fatalf("EnsureServer: %v", err)
+	}
+	sessionName := fmt.Sprintf("arcmux-paneid-session-%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		_ = c.KillSession(context.Background(), sessionName)
+	})
+
+	// First window via NewSessionWithEnvPaneID → returns %pane_id of pane 1.
+	pid1, err := c.NewSessionWithEnvPaneID(ctx, sessionName, "dup", "", nil)
+	if err != nil {
+		t.Fatalf("NewSessionWithEnvPaneID: %v", err)
+	}
+	if !strings.HasPrefix(pid1, "%") {
+		t.Fatalf("pid1 = %q, want %% prefix", pid1)
+	}
+
+	// Two more windows, all sharing the same name "dup".
+	pid2, err := c.NewWindowPaneID(ctx, sessionName, "dup", "", nil)
+	if err != nil {
+		t.Fatalf("NewWindowPaneID 2: %v", err)
+	}
+	pid3, err := c.NewWindowPaneID(ctx, sessionName, "dup", "", nil)
+	if err != nil {
+		t.Fatalf("NewWindowPaneID 3: %v", err)
+	}
+
+	// All three pane_ids must be distinct.
+	if pid1 == pid2 || pid2 == pid3 || pid1 == pid3 {
+		t.Fatalf("pane ids collide: %q %q %q", pid1, pid2, pid3)
+	}
+
+	// Send a unique payload into each pane_id. With pane_id targeting,
+	// each payload must land in exactly its own pane — even though all
+	// three windows share the name "dup".
+	payloads := map[string]string{
+		pid1: "PANE_ONE_MARKER",
+		pid2: "PANE_TWO_MARKER",
+		pid3: "PANE_THREE_MARKER",
+	}
+	for pid, p := range payloads {
+		if err := c.SendKeys(ctx, pid, "echo "+p, "Enter"); err != nil {
+			t.Fatalf("SendKeys %s: %v", pid, err)
+		}
+	}
+
+	// Wait for output to settle, then capture each pane and assert it
+	// contains its OWN marker and NONE of the other markers.
+	deadline := time.Now().Add(3 * time.Second)
+	for pid, want := range payloads {
+		var out string
+		for time.Now().Before(deadline) {
+			got, err := c.CapturePaneHistory(ctx, pid)
+			if err != nil {
+				t.Fatalf("CapturePaneHistory %s: %v", pid, err)
+			}
+			if strings.Contains(got, want) {
+				out = got
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if out == "" {
+			final, _ := c.CapturePaneHistory(ctx, pid)
+			t.Fatalf("pane %s never showed %q; final capture:\n%s", pid, want, final)
+		}
+		// And it must NOT contain the other panes' markers.
+		for otherPid, otherMark := range payloads {
+			if otherPid == pid {
+				continue
+			}
+			if strings.Contains(out, otherMark) {
+				t.Errorf("pane %s contains foreign marker %q (cross-routing leak):\n%s",
+					pid, otherMark, out)
+			}
+		}
+	}
+}
+
 // TestIntegration_NewWindowCanonical_TargetShape proves the canonical
 // target form is `<session>:<window-name>` regardless of how tmux returns
 // it internally. Regression for SessionSummary.TmuxTarget shape drift.

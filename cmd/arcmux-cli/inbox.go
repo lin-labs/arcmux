@@ -83,6 +83,11 @@ func cmdInboxPush(args []string, stdin io.Reader, stdout io.Writer) error {
 	// readiness check mistargets (e.g. immediately after CreateSession
 	// the agent is alive but the state machine still says StateStarting).
 	force := fs.Bool("force", false, "skip readiness check; deliver directly even if state != idle")
+	// --confirm-delivery threads the typesafe-gate flag through to
+	// daemon.SendPrompt. Default false (fire-and-forget keystroke
+	// delivery) avoids the gate's over-rejection on fresh-spawn panes;
+	// callers that want strict delivery confirmation can opt in.
+	confirmDelivery := fs.Bool("confirm-delivery", false, "wait for the typesafe gate to confirm delivery before returning")
 	var sf sessionFlag
 	sf.attach(fs)
 	sock := fs.String("socket", socketPath(), "daemon socket path")
@@ -124,10 +129,11 @@ func cmdInboxPush(args []string, stdin io.Reader, stdout io.Writer) error {
 	defer cancel()
 
 	resp, err := c.Send(ctx, &arcmuxv1.SendRequest{
-		SessionName: sessionName,
-		Body:        bodyStr,
-		From:        *from,
-		ForceDirect: *force,
+		SessionName:     sessionName,
+		Body:            bodyStr,
+		From:            *from,
+		ForceDirect:     *force,
+		ConfirmDelivery: *confirmDelivery,
 	})
 	if err != nil {
 		return fmt.Errorf("inbox push: %w", err)

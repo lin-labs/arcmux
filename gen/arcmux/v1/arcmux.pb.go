@@ -137,12 +137,19 @@ func (x *CreateSessionRequest) GetOwnerId() string {
 }
 
 type CreateSessionResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
-	TmuxTarget    string                 `protobuf:"bytes,2,opt,name=tmux_target,json=tmuxTarget,proto3" json:"tmux_target,omitempty"` // e.g. "agents:myapp.%42"
-	Pid           int64                  `protobuf:"varint,3,opt,name=pid,proto3" json:"pid,omitempty"`
-	State         string                 `protobuf:"bytes,4,opt,name=state,proto3" json:"state,omitempty"`
-	OwnerId       string                 `protobuf:"bytes,5,opt,name=owner_id,json=ownerId,proto3" json:"owner_id,omitempty"` // echoed back; empty if request didn't set it
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	SessionId  string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	TmuxTarget string                 `protobuf:"bytes,2,opt,name=tmux_target,json=tmuxTarget,proto3" json:"tmux_target,omitempty"` // e.g. "agents:myapp.%42"
+	Pid        int64                  `protobuf:"varint,3,opt,name=pid,proto3" json:"pid,omitempty"`
+	State      string                 `protobuf:"bytes,4,opt,name=state,proto3" json:"state,omitempty"`
+	OwnerId    string                 `protobuf:"bytes,5,opt,name=owner_id,json=ownerId,proto3" json:"owner_id,omitempty"` // echoed back; empty if request didn't set it
+	// created reports whether the daemon spawned a new session for this
+	// request (true) or returned an existing non-terminal session that
+	// matched (display_name, owner_id) (false). Idempotency contract: a
+	// duplicate CreateSession call returns the same session_id with
+	// created=false instead of producing a second tmux window. Lets
+	// orchestrators (elonco etc.) retry CreateSession safely.
+	Created       bool `protobuf:"varint,6,opt,name=created,proto3" json:"created,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -210,6 +217,13 @@ func (x *CreateSessionResponse) GetOwnerId() string {
 		return x.OwnerId
 	}
 	return ""
+}
+
+func (x *CreateSessionResponse) GetCreated() bool {
+	if x != nil {
+		return x.Created
+	}
+	return false
 }
 
 type SendPromptRequest struct {
@@ -1239,9 +1253,18 @@ type SendRequest struct {
 	// when the agent is alive but hasn't completed handshake yet). On
 	// failure, the body is queued like the normal not-ready path. Empty
 	// default preserves the original "queue when not idle" semantic.
-	ForceDirect   bool `protobuf:"varint,4,opt,name=force_direct,json=forceDirect,proto3" json:"force_direct,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	ForceDirect bool `protobuf:"varint,4,opt,name=force_direct,json=forceDirect,proto3" json:"force_direct,omitempty"`
+	// confirm_delivery threads through to daemon.SendPrompt. The C1 Send
+	// RPC historically hardcoded this to true, forcing every direct
+	// delivery through the typesafe assessment gate. That gate is
+	// overzealous for fresh spawns and other transient pane states — set
+	// confirm_delivery=false to use fire-and-forget keystroke delivery
+	// and skip the gate. Default false (changed from the previous
+	// hardcoded true) makes Send behave like a substrate primitive,
+	// matching what elonco-style callers want.
+	ConfirmDelivery bool `protobuf:"varint,5,opt,name=confirm_delivery,json=confirmDelivery,proto3" json:"confirm_delivery,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *SendRequest) Reset() {
@@ -1298,6 +1321,13 @@ func (x *SendRequest) GetFrom() string {
 func (x *SendRequest) GetForceDirect() bool {
 	if x != nil {
 		return x.ForceDirect
+	}
+	return false
+}
+
+func (x *SendRequest) GetConfirmDelivery() bool {
+	if x != nil {
+		return x.ConfirmDelivery
 	}
 	return false
 }
@@ -1957,7 +1987,7 @@ const file_arcmux_v1_arcmux_proto_rawDesc = "" +
 	"\bowner_id\x18\t \x01(\tR\aownerId\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x9a\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xb4\x01\n" +
 	"\x15CreateSessionResponse\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x1f\n" +
@@ -1965,7 +1995,8 @@ const file_arcmux_v1_arcmux_proto_rawDesc = "" +
 	"tmuxTarget\x12\x10\n" +
 	"\x03pid\x18\x03 \x01(\x03R\x03pid\x12\x14\n" +
 	"\x05state\x18\x04 \x01(\tR\x05state\x12\x19\n" +
-	"\bowner_id\x18\x05 \x01(\tR\aownerId\"\x8e\x01\n" +
+	"\bowner_id\x18\x05 \x01(\tR\aownerId\x12\x18\n" +
+	"\acreated\x18\x06 \x01(\bR\acreated\"\x8e\x01\n" +
 	"\x11SendPromptRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x12\n" +
@@ -2057,12 +2088,13 @@ const file_arcmux_v1_arcmux_proto_rawDesc = "" +
 	"\x04data\x18\x06 \x03(\v2\x1a.arcmux.v1.Event.DataEntryR\x04data\x1a7\n" +
 	"\tDataEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"{\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa6\x01\n" +
 	"\vSendRequest\x12!\n" +
 	"\fsession_name\x18\x01 \x01(\tR\vsessionName\x12\x12\n" +
 	"\x04body\x18\x02 \x01(\tR\x04body\x12\x12\n" +
 	"\x04from\x18\x03 \x01(\tR\x04from\x12!\n" +
-	"\fforce_direct\x18\x04 \x01(\bR\vforceDirect\"[\n" +
+	"\fforce_direct\x18\x04 \x01(\bR\vforceDirect\x12)\n" +
+	"\x10confirm_delivery\x18\x05 \x01(\bR\x0fconfirmDelivery\"[\n" +
 	"\fSendResponse\x12\x15\n" +
 	"\x06msg_id\x18\x01 \x01(\tR\x05msgId\x12\x1c\n" +
 	"\tdelivered\x18\x02 \x01(\bR\tdelivered\x12\x16\n" +

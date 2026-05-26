@@ -81,11 +81,15 @@ func (s *GRPCServer) Send(ctx context.Context, req *arcmuxv1.SendRequest) (*arcm
 	}
 
 	if req.ForceDirect || sessionReady(sess) {
-		// Deliver immediately. Same path SendPrompt uses, just with
-		// confirm_delivery=true (caller already asked for "send") and
-		// wait_idle=false (we already proved ready, or caller forced).
+		// Deliver immediately. Same path SendPrompt uses, with the
+		// caller-supplied confirm_delivery and wait_idle=false (we
+		// already proved ready, or the caller forced direct). The C1
+		// Send RPC previously hardcoded confirmDelivery=true which
+		// forced every delivery through the typesafe assessment gate;
+		// surfacing it lets fire-and-forget callers bypass that gate
+		// when they know it would over-reject (e.g. fresh-spawn panes).
 		snap := sess.Snapshot()
-		if err := s.daemon.SendPrompt(ctx, snap.ID, req.Body, true, false); err != nil {
+		if err := s.daemon.SendPrompt(ctx, snap.ID, req.Body, req.ConfirmDelivery, false); err != nil {
 			// force_direct: on failure, fall through to the queue path
 			// so caller still has a recoverable msg_id handle.
 			if !req.ForceDirect {
@@ -334,12 +338,53 @@ func (s *GRPCServer) QueryAudit(ctx context.Context, req *arcmuxv1.QueryAuditReq
 // deliver into synchronously. Kept conservative: only StateIdle counts.
 // Working / handshaking / stuck / etc. force the queue path. This is the
 // predicate Ready() and Send() both consult so behavior stays consistent.
+//
+// Plus an explicit fresh-spawn override: a session that was created
+// within the last freshSpawnWindow is treated as ready for any non-failed
+// state. Rationale — claude with `--remote-control` doesn't fire its
+// SessionStart hook until the user types, so the daemon-side state stays
+// in StateStarting/StateHandshaking far longer than the agent is actually
+// "not ready". For the first few seconds after spawn we trust the OS
+// process being alive as good enough; the typesafe gate inside SendPrompt
+// will still catch a truly broken pane and reject delivery downstream.
 func sessionReady(sess *session.Session) bool {
 	if sess == nil {
 		return false
 	}
 	snap := sess.Snapshot()
-	return snap.State == session.StateIdle
+	if snap.State == session.StateIdle {
+		return true
+	}
+	if isFreshSpawn(snap) {
+		return true
+	}
+	return false
+}
+
+// freshSpawnWindow is how long after CreateSession we keep treating a
+// session as "ready enough" even when the state machine hasn't caught up
+// to a real readiness signal. 10s comfortably covers a typical
+// claude/codex handshake (1–4s) plus the gap before
+// `--remote-control` SessionStart fires.
+const freshSpawnWindow = 10 * time.Second
+
+// isFreshSpawn reports whether the session was created recently enough
+// that a missing readiness signal is more likely "the hook hasn't fired
+// yet" than "the agent is genuinely stuck or working". Scoped to the
+// spawn-transient states (Starting, Handshaking) so we never preempt a
+// session that's already accepted prior work — a Working/Stuck session
+// has real activity downstream that the inbox queue is meant to protect.
+func isFreshSpawn(snap session.Snapshot) bool {
+	switch snap.State {
+	case session.StateStarting, session.StateHandshaking:
+		// fall through
+	default:
+		return false
+	}
+	if snap.StartedAt.IsZero() {
+		return false
+	}
+	return time.Since(snap.StartedAt) <= freshSpawnWindow
 }
 
 // sendReadinessWindow is the max time Send polls for StateIdle before

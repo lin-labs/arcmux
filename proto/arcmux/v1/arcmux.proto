@@ -53,6 +53,13 @@ message CreateSessionResponse {
   int64 pid = 3;
   string state = 4;
   string owner_id = 5;        // echoed back; empty if request didn't set it
+  // created reports whether the daemon spawned a new session for this
+  // request (true) or returned an existing non-terminal session that
+  // matched (display_name, owner_id) (false). Idempotency contract: a
+  // duplicate CreateSession call returns the same session_id with
+  // created=false instead of producing a second tmux window. Lets
+  // orchestrators (elonco etc.) retry CreateSession safely.
+  bool created = 6;
 }
 
 // --- SendPrompt ---
@@ -191,6 +198,15 @@ message SendRequest {
   // failure, the body is queued like the normal not-ready path. Empty
   // default preserves the original "queue when not idle" semantic.
   bool force_direct = 4;
+  // confirm_delivery threads through to daemon.SendPrompt. The C1 Send
+  // RPC historically hardcoded this to true, forcing every direct
+  // delivery through the typesafe assessment gate. That gate is
+  // overzealous for fresh spawns and other transient pane states — set
+  // confirm_delivery=false to use fire-and-forget keystroke delivery
+  // and skip the gate. Default false (changed from the previous
+  // hardcoded true) makes Send behave like a substrate primitive,
+  // matching what elonco-style callers want.
+  bool confirm_delivery = 5;
 }
 
 message SendResponse {

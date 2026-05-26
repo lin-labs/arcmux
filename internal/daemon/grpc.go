@@ -25,7 +25,7 @@ func NewGRPCServer(d *Daemon) *GRPCServer {
 }
 
 func (s *GRPCServer) CreateSession(ctx context.Context, req *arcmuxv1.CreateSessionRequest) (*arcmuxv1.CreateSessionResponse, error) {
-	sess, err := s.daemon.CreateSession(ctx, CreateSessionRequest{
+	sess, created, err := s.daemon.createSessionWithIdempotency(ctx, CreateSessionRequest{
 		Agent:       req.Agent,
 		CWD:         req.Cwd,
 		Prompt:      req.Prompt,
@@ -47,6 +47,7 @@ func (s *GRPCServer) CreateSession(ctx context.Context, req *arcmuxv1.CreateSess
 		Pid:        int64(snap.PID),
 		State:      string(snap.State),
 		OwnerId:    snap.OwnerID,
+		Created:    created,
 	}, nil
 }
 
