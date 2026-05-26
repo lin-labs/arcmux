@@ -95,3 +95,63 @@ func TestControllerFailsAfterTimeout(t *testing.T) {
 		t.Fatalf("submit count = %d", runtime.submitCount)
 	}
 }
+
+func TestIsIngested_SoftPassPath(t *testing.T) {
+	t.Parallel()
+	c := NewController(HeuristicJudge{}, ControllerConfig{MinConfidence: 0.7})
+
+	cases := []struct {
+		name string
+		a    Assessment
+		want bool
+	}{
+		{
+			"strict pass — high confidence",
+			Assessment{State: StateIngested, Confidence: 0.85, WorkStartedProbability: 0.30},
+			true,
+		},
+		{
+			"strong work_started — bypass everything",
+			Assessment{State: StateUnclear, Confidence: 0.10, WorkStartedProbability: 0.92},
+			true,
+		},
+		{
+			"soft pass — elonco's case (confidence 0.59, work_started 0.71)",
+			Assessment{State: StateIngested, Confidence: 0.59, WorkStartedProbability: 0.71},
+			true,
+		},
+		{
+			"soft pass — minimum thresholds (0.4 / 0.5)",
+			Assessment{State: StateIngested, Confidence: 0.40, WorkStartedProbability: 0.50},
+			true,
+		},
+		{
+			"hard fail — below soft-pass confidence",
+			Assessment{State: StateIngested, Confidence: 0.39, WorkStartedProbability: 0.70},
+			false,
+		},
+		{
+			"hard fail — below soft-pass work_started",
+			Assessment{State: StateIngested, Confidence: 0.60, WorkStartedProbability: 0.49},
+			false,
+		},
+		{
+			"hard fail — wrong state",
+			Assessment{State: StatePendingSubmit, Confidence: 0.85, WorkStartedProbability: 0.70},
+			false,
+		},
+		{
+			"earlier reported error 1 — confidence 0.10, work_started 0.45",
+			Assessment{State: StateIngested, Confidence: 0.10, WorkStartedProbability: 0.45},
+			false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := c.isIngested(tc.a)
+			if got != tc.want {
+				t.Errorf("isIngested(%+v) = %v, want %v", tc.a, got, tc.want)
+			}
+		})
+	}
+}

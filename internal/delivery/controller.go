@@ -3,6 +3,7 @@ package delivery
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 )
 
@@ -138,10 +139,46 @@ func (c *Controller) EnsureIngested(ctx context.Context, evidence Evidence, runt
 }
 
 func (c *Controller) isIngested(assessment Assessment) bool {
+	// Strong signal — the agent visibly started working. Accept regardless
+	// of confidence in the state classifier.
 	if assessment.WorkStartedProbability >= 0.88 {
 		return true
 	}
-	return assessment.State == StateIngested && assessment.Confidence >= c.cfg.MinConfidence
+
+	// Strict path — typesafe is confident the prompt was ingested.
+	if assessment.State == StateIngested && assessment.Confidence >= c.cfg.MinConfidence {
+		return true
+	}
+
+	// **Soft-pass path** (elonco request, May 2026). Hard-fail at 0.59
+	// confidence rejected honest deliveries that just hadn't rendered a
+	// strong work_started signal yet. When typesafe says "ingested" with
+	// moderate confidence AND work_started is moderately positive, accept
+	// the delivery and emit a WARNING — gives visibility without blocking.
+	//
+	// Thresholds picked at the elonco team's request:
+	//   state == ingested
+	//   confidence    >= 0.4
+	//   work_started  >= 0.5
+	//
+	// If borderline cases turn out to be wrong, the warning log lets us
+	// trace them after the fact.
+	if assessment.State == StateIngested &&
+		assessment.Confidence >= 0.4 &&
+		assessment.WorkStartedProbability >= 0.5 {
+		slog.Warn("delivery.gate.soft_pass",
+			"state", string(assessment.State),
+			"confidence", assessment.Confidence,
+			"source", assessment.Source,
+			"work_started", assessment.WorkStartedProbability,
+			"enter_helpful", assessment.EnterHelpfulProbability,
+			"min_confidence", c.cfg.MinConfidence,
+			"note", "below MinConfidence but state=ingested + work_started>=0.5 — proceeding",
+		)
+		return true
+	}
+
+	return false
 }
 
 func (c *Controller) shouldSubmit(assessment Assessment, progressed bool, submitAttempts int) bool {
