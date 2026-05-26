@@ -61,6 +61,11 @@ func run(args []string) error {
 	keep := fs.Bool("keep", false, "keep per-scenario sandbox dirs even on pass")
 	stopOnFail := fs.Bool("stop", false, "stop after first failure")
 	verbose := fs.Bool("v", false, "verbose progress to stdout")
+	mode := fs.String("mode", "elonco",
+		"dispatcher: 'elonco' (full-stack: arcmux daemon + elonco service + arcmux-spawned agent) or 'direct' (plain claude -p)")
+	arcmuxBin := fs.String("arcmux", "", "path to arcmux daemon binary (default: <repo>/bin/arcmux; required for --mode=elonco)")
+	elonkoPython := fs.String("elonco-python", "",
+		"python interpreter to run elonco with (default: /Users/blin/Projects/elonco/.venv/bin/python, else python3)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -118,6 +123,49 @@ func run(args []string) error {
 		resolvedClaude = p
 	}
 
+	resolvedMode := strings.TrimSpace(*mode)
+	if resolvedMode == "" {
+		resolvedMode = "elonco"
+	}
+	if resolvedMode != "direct" && resolvedMode != "elonco" {
+		return fmt.Errorf("--mode must be 'direct' or 'elonco' (got %q)", resolvedMode)
+	}
+
+	resolvedArcmux := *arcmuxBin
+	resolvedElonko := *elonkoPython
+	if resolvedMode == "elonco" {
+		if resolvedArcmux == "" {
+			candidate := filepath.Join(repoRoot, "bin", "arcmux")
+			if _, statErr := os.Stat(candidate); statErr != nil {
+				if p, lookErr := exec.LookPath("arcmux"); lookErr == nil {
+					candidate = p
+				} else {
+					return fmt.Errorf("arcmux binary not found at %s and not on PATH (--arcmux <path> to override, or `make build`)", candidate)
+				}
+			}
+			resolvedArcmux = candidate
+		}
+		if resolvedElonko == "" {
+			candidates := []string{
+				"/Users/blin/Projects/elonco/.venv/bin/python",
+				"/Users/blin/Projects/elonco/.venv/bin/python3",
+			}
+			for _, c := range candidates {
+				if _, statErr := os.Stat(c); statErr == nil {
+					resolvedElonko = c
+					break
+				}
+			}
+			if resolvedElonko == "" {
+				if p, lookErr := exec.LookPath("python3"); lookErr == nil {
+					resolvedElonko = p
+				} else {
+					return fmt.Errorf("python3 not found on PATH (--elonco-python <path> to override)")
+				}
+			}
+		}
+	}
+
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
@@ -131,6 +179,9 @@ func run(args []string) error {
 		KeepArtifs:      *keep,
 		ClaudeBin:       resolvedClaude,
 		RepoRoot:        repoRoot,
+		Mode:            resolvedMode,
+		ArcmuxBin:       resolvedArcmux,
+		ElonkoPython:    resolvedElonko,
 	}
 	return r.Run(ctx, os.Stdout)
 }

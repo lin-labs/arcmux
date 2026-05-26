@@ -48,6 +48,16 @@ type Runner struct {
 	RepoRoot        string
 	BaseEnv         []string
 	NowFn           func() time.Time
+	// Mode selects the dispatch path: "direct" (plain claude -p, v0) or
+	// "elonco" (full-stack: arcmux daemon + elonco service + arcmux-spawned
+	// claude session). Defaults to "elonco" at the CLI layer.
+	Mode string
+	// ArcmuxBin is the path to the arcmux daemon binary (required for
+	// "elonco" mode; ignored in "direct" mode).
+	ArcmuxBin string
+	// ElonkoPython is the python interpreter to run `python -m elonco serve`
+	// with. Required for "elonco" mode.
+	ElonkoPython string
 }
 
 // StepReport mirrors validate.sh / e2e shape: per-scenario row in the report.
@@ -149,6 +159,9 @@ func (r *Runner) runOne(ctx context.Context, s Scenario, stdout io.Writer) StepR
 		fmt.Fprintf(stdout, "  [fail] %-26s %ds  (env setup)\n", s.Name(), report.DurationS)
 		return report
 	}
+	env.Mode = r.Mode
+	env.ArcmuxBin = r.ArcmuxBin
+	env.ElonkoPython = r.ElonkoPython
 	report.Artifacts = ArtifactPaths{
 		TempRoot: env.TempRoot,
 		WorkRepo: env.WorkRepo,

@@ -56,18 +56,25 @@ validate-substrate: build
 # Back-compat alias for the old name. Prefer `validate-substrate` going forward.
 validate-substrate-e2e: validate-substrate
 
-# Big-feature gate: agent-behavioral end-to-end harness. Spawns real
-# `claude -p` invocations against scenario prompts and validates the
-# produced artifacts in a sandboxed workrepo. **Burns real Anthropic
-# tokens.** Run intentionally — before a charter-level merge, after a
-# substrate refactor that could break agent dispatch, before a release tag.
+# Big-feature gate: agent-behavioral end-to-end harness. Drives scenarios
+# through the full stack — arcmux daemon + elonco service + arcmux-spawned
+# claude agent — and validates the produced artifacts in a sandboxed
+# workrepo. **Burns real Anthropic tokens.** Run intentionally — before a
+# charter-level merge, after a substrate refactor that could break agent
+# dispatch, before a release tag.
 #
-#   make validate-e2e                          # all scenarios
-#   make validate-e2e SCENARIO=hello-server    # one scenario by name
+#   make validate-e2e                                   # all scenarios via elonco
+#   make validate-e2e SCENARIO=hello-server             # one scenario by name
+#   make validate-e2e MODE=direct                       # bypass elonco: plain claude -p
 #
-# See cmd/arcmux-e2e/ and testdata/e2e-scenarios/.
+# See cmd/arcmux-e2e/ and testdata/e2e-scenarios/. The `elonco` mode
+# requires the sibling elonco repo at /Users/blin/Projects/elonco/ to
+# be installed (its `.venv/bin/python` is auto-detected); fall back to
+# `MODE=direct` if you just want to exercise plain claude dispatch.
 validate-e2e: build
-	@./bin/$(BINARY)-e2e $(if $(SCENARIO),--scenario $(SCENARIO))
+	@./bin/$(BINARY)-e2e \
+	  $(if $(SCENARIO),--scenario $(SCENARIO)) \
+	  $(if $(MODE),--mode $(MODE))
 
 # Back-compat aliases — keep one cycle while callers migrate.
 validate-eval: validate-e2e

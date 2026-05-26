@@ -47,6 +47,13 @@ type Env struct {
 	ScenarioDir  string // testdata/e2e-scenarios/<scenario>/ (read-only)
 	ClaudeBin    string // resolved path to the claude CLI
 	BaseEnv      []string
+	// Mode selects dispatch path ("direct" or "elonco"). Scenarios may
+	// branch on this when they need to use a different bootstrap.
+	Mode string
+	// ArcmuxBin is the path to the arcmux daemon (set in "elonco" mode).
+	ArcmuxBin string
+	// ElonkoPython is the interpreter used to invoke `python -m elonco`.
+	ElonkoPython string
 
 	trace *os.File
 }
