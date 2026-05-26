@@ -27,7 +27,7 @@ func die(err error) {
 
 func main() {
 	if len(os.Args) < 2 {
-		die(fmt.Errorf("usage: arcmux-cli create|send|capture|status|audit|inbox|ready [args]"))
+		die(fmt.Errorf("usage: arcmux-cli create|list|send|capture|status|kill|audit|inbox|ready [args]"))
 	}
 	cmd := os.Args[1]
 
@@ -110,6 +110,44 @@ func main() {
 			die(err)
 		}
 		enc.Encode(map[string]any{"state": r.State, "health": r.Health, "agent": r.Agent})
+	case "list":
+		// Optional --owner <id> filter; default lists all sessions.
+		var ownerFilter string
+		for i := 2; i+1 < len(os.Args); i += 2 {
+			if os.Args[i] == "--owner" {
+				ownerFilter = os.Args[i+1]
+			}
+		}
+		r, err := c.ListSessions(ctx, &arcmuxv1.ListSessionsRequest{})
+		if err != nil {
+			die(err)
+		}
+		out := make([]map[string]any, 0, len(r.Sessions))
+		for _, s := range r.Sessions {
+			if ownerFilter != "" && s.OwnerId != ownerFilter {
+				continue
+			}
+			out = append(out, map[string]any{
+				"session_id":  s.SessionId,
+				"name":        s.SessionName,
+				"agent":       s.Agent,
+				"state":       s.State,
+				"owner_id":    s.OwnerId,
+				"tmux_target": s.TmuxTarget,
+				"cwd":         s.Cwd,
+				"started_at":  s.StartedAt,
+			})
+		}
+		enc.Encode(map[string]any{"sessions": out, "count": len(out)})
+	case "kill":
+		if len(os.Args) < 3 {
+			die(fmt.Errorf("kill <session_id>"))
+		}
+		r, err := c.Kill(ctx, &arcmuxv1.KillRequest{SessionId: os.Args[2]})
+		if err != nil {
+			die(err)
+		}
+		enc.Encode(map[string]any{"killed": r.Killed, "final_state": r.FinalState})
 	default:
 		die(fmt.Errorf("unknown subcommand %q", cmd))
 	}
