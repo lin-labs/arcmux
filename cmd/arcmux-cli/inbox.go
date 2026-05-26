@@ -1,26 +1,29 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"time"
 
-	"github.com/lin-labs/arcmux/internal/manager/paths"
-	"github.com/lin-labs/arcmux/internal/manager/store"
+	arcmuxv1 "github.com/lin-labs/arcmux/gen/arcmux/v1"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 // cmdInbox dispatches `arcmux-cli inbox <sub>`.
 //
-// After C3 the only inbox surface arcmux owns is the per-session inbox
-// (BucketSessionInbox). The CLI addresses queues uniformly by session
-// name through `--session <name>` (alias `--to <name>` kept for older
-// callers). The pre-C3 multi-kind addressing (`elon` / `manager:<slug>` /
-// `ic:<slot-id>`) is gone — arcmux no longer knows what role a pane plays.
+// Post-F11 the CLI no longer opens state.bolt directly. The daemon owns
+// the bbolt write lock for its uptime, so the inbox subcommands now
+// route through gRPC: push -> Send, peek -> PeekInbox, ack -> AckInbox.
+//
+// The C1 gRPC Send is queueable: if the named session is ready (idle /
+// safely interruptible), it delivers synchronously and returns
+// delivered=true; otherwise it queues onto the per-session inbox and
+// returns queued=true. This subsumes the old "always-queue" inbox push.
 func cmdInbox(args []string, stdin io.Reader, stdout io.Writer) error {
 	if len(args) < 1 {
 		return fmt.Errorf("usage: arcmux-cli inbox push|peek|ack [flags]")
@@ -37,10 +40,7 @@ func cmdInbox(args []string, stdin io.Reader, stdout io.Writer) error {
 	}
 }
 
-// sessionFlag wires a pair of synonymous flags (--session, --to) so the
-// CLI accepts whichever form the caller has memorized. Returns the
-// resolved name (whichever is non-empty; --session wins on tie) or an
-// error if neither is supplied.
+// sessionFlag wires --session / --to as synonyms. --session wins on tie.
 type sessionFlag struct {
 	session string
 	to      string
@@ -59,33 +59,38 @@ func (sf *sessionFlag) resolve() (string, error) {
 	if name == "" {
 		return "", fmt.Errorf("--session (or --to) required")
 	}
-	if _, err := paths.Validate(name); err != nil {
-		return "", fmt.Errorf("--session %q: %w", name, err)
-	}
 	return name, nil
+}
+
+// dialDaemon opens a Unix-socket gRPC client to the daemon.
+func dialDaemon(sock string) (*grpc.ClientConn, arcmuxv1.AgentRuntimeClient, error) {
+	conn, err := grpc.NewClient(
+		"unix://"+sock,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("dial %s: %w", sock, err)
+	}
+	return conn, arcmuxv1.NewAgentRuntimeClient(conn), nil
 }
 
 func cmdInboxPush(args []string, stdin io.Reader, stdout io.Writer) error {
 	fs := flag.NewFlagSet("inbox push", flag.ContinueOnError)
-	verb := fs.String("verb", "", "message verb (required)")
-	from := fs.String("from", "", "sender identifier (required)")
-	priority := fs.Int("priority", 0, "priority (higher = more urgent)")
-	id := fs.String("id", "", "explicit message id (auto-generated when empty)")
-	refsRaw := fs.String("refs", "", "refs JSON object (optional)")
+	from := fs.String("from", "", "sender identifier (optional but recommended)")
+	body := fs.String("body", "", "message body (if empty, reads from stdin)")
 	var sf sessionFlag
 	sf.attach(fs)
-	project := fs.String("project", os.Getenv("ARCMUX_PROJECT"), "project slug (default $ARCMUX_PROJECT)")
-	dataRoot := fs.String("data-root", defaultDataRoot(), "ephemeral data root (default $ARCMUX_DATA or $HOME/data)")
+	sock := fs.String("socket", socketPath(), "daemon socket path")
+	// Accept-and-ignore legacy flags so old callers don't break in lockstep.
+	// The daemon now owns project scope (per-daemon data_root), and the
+	// gRPC Send contract doesn't expose verb/priority/refs/explicit-id.
+	_ = fs.String("verb", "", "(deprecated; ignored, daemon doesn't surface verb in Send)")
+	_ = fs.Int("priority", 0, "(deprecated; ignored)")
+	_ = fs.String("id", "", "(deprecated; daemon generates msg_id)")
+	_ = fs.String("refs", "", "(deprecated; ignored)")
+	_ = fs.String("project", "", "(deprecated; ignored)")
+	_ = fs.String("data-root", "", "(deprecated; ignored)")
 	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if *verb == "" || *from == "" {
-		return fmt.Errorf("inbox push: --verb and --from required")
-	}
-	if *project == "" {
-		return fmt.Errorf("inbox push: --project or $ARCMUX_PROJECT required")
-	}
-	if _, err := paths.Validate(*project); err != nil {
 		return err
 	}
 	sessionName, err := sf.resolve()
@@ -93,57 +98,40 @@ func cmdInboxPush(args []string, stdin io.Reader, stdout io.Writer) error {
 		return fmt.Errorf("inbox push: %w", err)
 	}
 
-	var refs map[string]any
-	if *refsRaw != "" {
-		if err := json.Unmarshal([]byte(*refsRaw), &refs); err != nil {
-			return fmt.Errorf("inbox push: --refs must be JSON object: %w", err)
-		}
-	}
-
-	body, err := io.ReadAll(stdin)
-	if err != nil {
-		return fmt.Errorf("inbox push: read body from stdin: %w", err)
-	}
-
-	msgID := *id
-	if msgID == "" {
-		msgID, err = store.NewInboxID()
+	bodyStr := *body
+	if bodyStr == "" {
+		b, err := io.ReadAll(stdin)
 		if err != nil {
-			return fmt.Errorf("inbox push: generate id: %w", err)
+			return fmt.Errorf("inbox push: read body from stdin: %w", err)
 		}
+		bodyStr = string(b)
+	}
+	if strings.TrimSpace(bodyStr) == "" {
+		return fmt.Errorf("inbox push: body required (--body or stdin)")
 	}
 
-	db, _, err := openProjectDB(*dataRoot, *project)
+	conn, c, err := dialDaemon(*sock)
 	if err != nil {
-		return err
+		return fmt.Errorf("inbox push: %w", err)
 	}
-	defer db.Close()
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
-	// Ensure-then-push: the CLI is the user-facing surface, so a push to a
-	// name we've never seen lazily creates the bucket. This matches the C1
-	// gRPC Send semantics (push implies ensure when the session isn't
-	// ready yet).
-	if err := db.EnsureSessionInbox(sessionName); err != nil {
-		return fmt.Errorf("inbox push: ensure %q: %w", sessionName, err)
-	}
-
-	m := store.InboxMsg{
-		ID:         msgID,
-		Verb:       *verb,
-		From:       *from,
-		Priority:   *priority,
-		Body:       string(body),
-		Refs:       refs,
-		ReceivedAt: time.Now(),
-	}
-	if err := db.PushSessionInbox(sessionName, m); err != nil {
+	resp, err := c.Send(ctx, &arcmuxv1.SendRequest{
+		SessionName: sessionName,
+		Body:        bodyStr,
+		From:        *from,
+	})
+	if err != nil {
 		return fmt.Errorf("inbox push: %w", err)
 	}
 	return json.NewEncoder(stdout).Encode(map[string]any{
-		"ok":          true,
-		"id":          m.ID,
-		"session":     sessionName,
-		"received_at": m.ReceivedAt.Format(time.RFC3339Nano),
+		"ok":        true,
+		"id":        resp.MsgId,
+		"session":   sessionName,
+		"delivered": resp.Delivered,
+		"queued":    resp.Queued,
 	})
 }
 
@@ -152,15 +140,10 @@ func cmdInboxPeek(args []string, stdout io.Writer) error {
 	n := fs.Int("n", 20, "max messages (oldest-first)")
 	var sf sessionFlag
 	sf.attach(fs)
-	project := fs.String("project", os.Getenv("ARCMUX_PROJECT"), "project slug (default $ARCMUX_PROJECT)")
-	dataRoot := fs.String("data-root", defaultDataRoot(), "ephemeral data root (default $ARCMUX_DATA or $HOME/data)")
+	sock := fs.String("socket", socketPath(), "daemon socket path")
+	_ = fs.String("project", "", "(deprecated; ignored)")
+	_ = fs.String("data-root", "", "(deprecated; ignored)")
 	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if *project == "" {
-		return fmt.Errorf("inbox peek: --project or $ARCMUX_PROJECT required")
-	}
-	if _, err := paths.Validate(*project); err != nil {
 		return err
 	}
 	sessionName, err := sf.resolve()
@@ -168,25 +151,29 @@ func cmdInboxPeek(args []string, stdout io.Writer) error {
 		return fmt.Errorf("inbox peek: %w", err)
 	}
 
-	db, _, err := openProjectDB(*dataRoot, *project)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	msgs, err := db.PeekSessionInbox(sessionName, *n)
-	// A session that's never been pushed to has no inbox yet. From the
-	// CLI's perspective that is identical to an empty queue: return
-	// {"messages":[]} so polling scripts don't have to special-case the
-	// very first poll before a push lands.
-	if errors.Is(err, store.ErrSessionInboxMissing) {
-		msgs, err = nil, nil
-	}
+	conn, c, err := dialDaemon(*sock)
 	if err != nil {
 		return fmt.Errorf("inbox peek: %w", err)
 	}
-	if msgs == nil {
-		msgs = []store.InboxMsg{}
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	resp, err := c.PeekInbox(ctx, &arcmuxv1.PeekInboxRequest{
+		SessionName: sessionName,
+		N:           int32(*n),
+	})
+	if err != nil {
+		return fmt.Errorf("inbox peek: %w", err)
+	}
+	msgs := make([]map[string]any, 0, len(resp.Messages))
+	for _, m := range resp.Messages {
+		msgs = append(msgs, map[string]any{
+			"id":          m.Id,
+			"body":        m.Body,
+			"from":        m.From,
+			"received_at": m.ReceivedAt,
+		})
 	}
 	return json.NewEncoder(stdout).Encode(map[string]any{
 		"messages": msgs,
@@ -199,39 +186,38 @@ func cmdInboxAck(args []string, stdout io.Writer) error {
 	id := fs.String("id", "", "message id to ack (required)")
 	var sf sessionFlag
 	sf.attach(fs)
-	project := fs.String("project", os.Getenv("ARCMUX_PROJECT"), "project slug (default $ARCMUX_PROJECT)")
-	dataRoot := fs.String("data-root", defaultDataRoot(), "ephemeral data root (default $ARCMUX_DATA or $HOME/data)")
+	sock := fs.String("socket", socketPath(), "daemon socket path")
+	_ = fs.String("project", "", "(deprecated; ignored)")
+	_ = fs.String("data-root", "", "(deprecated; ignored)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *id == "" {
 		return fmt.Errorf("inbox ack: --id required")
 	}
-	if *project == "" {
-		return fmt.Errorf("inbox ack: --project or $ARCMUX_PROJECT required")
-	}
-	if _, err := paths.Validate(*project); err != nil {
-		return err
-	}
 	sessionName, err := sf.resolve()
 	if err != nil {
 		return fmt.Errorf("inbox ack: %w", err)
 	}
 
-	db, _, err := openProjectDB(*dataRoot, *project)
+	conn, c, err := dialDaemon(*sock)
 	if err != nil {
-		return err
+		return fmt.Errorf("inbox ack: %w", err)
 	}
-	defer db.Close()
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
-	if err := db.AckSessionInbox(sessionName, *id); err != nil {
-		if errors.Is(err, store.ErrSessionInboxMissing) {
-			return fmt.Errorf("inbox ack: session %q has no inbox", sessionName)
-		}
+	resp, err := c.AckInbox(ctx, &arcmuxv1.AckInboxRequest{
+		SessionName: sessionName,
+		MsgId:       *id,
+	})
+	if err != nil {
 		return fmt.Errorf("inbox ack: %w", err)
 	}
 	return json.NewEncoder(stdout).Encode(map[string]any{
-		"ok":      true,
+		"ok":      resp.Acked,
+		"acked":   resp.Acked,
 		"id":      *id,
 		"session": sessionName,
 	})

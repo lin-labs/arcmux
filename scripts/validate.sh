@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-# Self-validating dev-cycle pass for arcmux. Runs static checks, unit tests,
-# build, and a tiny e2e smoke against the built binaries; writes a structured
-# JSON report to $ARCMUX_EPHEMERAL/validate-reports/YYYY-MM-DD-HH.json.
+# Self-validating dev-cycle pass for arcmux. Runs structural checks (gofmt,
+# vet, go test, build) plus substrate-behavioral e2e scenarios that spawn
+# isolated daemons and assert observable substrate effects; writes a
+# structured JSON report to $ARCMUX_EPHEMERAL/validate-reports/YYYY-MM-DD-HH.json.
+#
+# Six steps total (~12s wall): gofmt, go vet, go test, make build,
+# e2e:bootstrap, e2e:pulse-wake, e2e:grpc-rt.
 #
 # Exit 0 only if every step succeeded. Exit 1 if any step failed.
 #
@@ -68,19 +72,13 @@ run_step "go vet"       go vet ./...
 # 2) unit + integration tests
 run_step "go test"      go test ./...
 
-# 3) build
-run_step "build arcmux"        go build -o bin/arcmux ./cmd/arcmux
-run_step "build arcmux-cli"   go build -o bin/arcmux-cli ./cmd/arcmux-cli
+# 3) build (all 4 binaries via make)
+run_step "make build"   make build
 
-# 4) e2e smoke against built binary
-run_step "smoke: arcmux --help"          bash -c './bin/arcmux --help >/dev/null 2>&1 || ./bin/arcmux help >/dev/null 2>&1 || true'
-run_step "smoke: arcmux-cli dispatch"   bash -c './bin/arcmux-cli 2>&1 | grep -qE "audit|inbox"'
-run_step "smoke: inbox dispatcher"       bash -c './bin/arcmux-cli inbox 2>&1 | grep -qE "push|peek|ack"'
-run_step "smoke: audit dispatcher"       bash -c './bin/arcmux-cli audit 2>&1 | grep -qE "append|recent"'
-# pulse smoke: invocation against a never-launched project must fail loud
-# with a recognizable error (no state.bolt) — proves the subcommand wires
-# Open() correctly and the flag parsing is intact.
-run_step "smoke: pulse rejects unstarted" bash -c 'out=$(./bin/arcmux pulse --project nostart --vault-root /tmp/__novault__ --data-root /tmp/__nodata__ --once 2>&1 || true); echo "$out" | grep -qE "not started|state.bolt|VaultRoot|no such file|invalid project"'
+# 4) substrate-behavioral e2e scenarios against built binaries
+run_step "e2e: bootstrap"      ./bin/arcmux-e2e --scenario bootstrap
+run_step "e2e: pulse-wake"     ./bin/arcmux-e2e --scenario pulse-wake
+run_step "e2e: grpc-rt"        ./bin/arcmux-e2e --scenario grpc-rt
 
 # Compose JSON report
 OVERALL="pass"

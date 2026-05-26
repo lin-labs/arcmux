@@ -1,134 +1,89 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"time"
 
-	"github.com/lin-labs/arcmux/internal/manager/paths"
-	"github.com/lin-labs/arcmux/internal/manager/store"
+	arcmuxv1 "github.com/lin-labs/arcmux/gen/arcmux/v1"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 // cmdAudit dispatches `arcmux-cli audit <sub>`.
+//
+// Post-F11 the CLI no longer opens state.bolt directly. The daemon owns
+// the bbolt write lock for its uptime, so any sibling reader would block
+// on flock. Audit reads now route through the daemon's QueryAudit RPC.
+//
+// The `audit append` subcommand is intentionally gone: audit entries are
+// daemon-side side effects of state changes (CreateSession, Send, ...).
+// External callers should not be able to inject arbitrary audit rows.
 func cmdAudit(args []string, stdout io.Writer) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: arcmux-cli audit append|recent [flags]")
+		return fmt.Errorf("usage: arcmux-cli audit recent [flags]")
 	}
 	switch args[0] {
-	case "append":
-		return cmdAuditAppend(args[1:], stdout)
 	case "recent":
 		return cmdAuditRecent(args[1:], stdout)
 	default:
-		return fmt.Errorf("unknown audit subcommand %q (want append|recent)", args[0])
+		return fmt.Errorf("unknown audit subcommand %q (want recent)", args[0])
 	}
-}
-
-func cmdAuditAppend(args []string, stdout io.Writer) error {
-	fs := flag.NewFlagSet("audit append", flag.ContinueOnError)
-	action := fs.String("action", "", "audit action verb (required)")
-	actor := fs.String("actor", "", "actor identifier (required)")
-	subject := fs.String("subject", "", "subject identifier (required)")
-	ruleID := fs.String("rule-id", "", "playbook rule id (optional)")
-	detailRaw := fs.String("detail", "", "detail JSON object (optional)")
-	project := fs.String("project", os.Getenv("ARCMUX_PROJECT"), "project slug (default $ARCMUX_PROJECT)")
-	dataRoot := fs.String("data-root", defaultDataRoot(), "ephemeral data root (default $ARCMUX_DATA or $HOME/data)")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if *action == "" || *actor == "" || *subject == "" {
-		return fmt.Errorf("audit append: --action, --actor, --subject required")
-	}
-	if *project == "" {
-		return fmt.Errorf("audit append: --project or $ARCMUX_PROJECT required")
-	}
-	if _, err := paths.Validate(*project); err != nil {
-		return err
-	}
-
-	var detail map[string]any
-	if *detailRaw != "" {
-		if err := json.Unmarshal([]byte(*detailRaw), &detail); err != nil {
-			return fmt.Errorf("audit append: --detail must be JSON object: %w", err)
-		}
-	}
-
-	db, _, err := openProjectDB(*dataRoot, *project)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	e := store.AuditEntry{
-		Timestamp: time.Now(),
-		Action:    *action,
-		Actor:     *actor,
-		Subject:   *subject,
-		RuleID:    *ruleID,
-		Detail:    detail,
-	}
-	if err := db.AppendAudit(e); err != nil {
-		return fmt.Errorf("audit append: %w", err)
-	}
-	return json.NewEncoder(stdout).Encode(map[string]any{
-		"ok": true,
-		"ts": e.Timestamp.Format(time.RFC3339Nano),
-	})
 }
 
 func cmdAuditRecent(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("audit recent", flag.ContinueOnError)
 	n := fs.Int("n", 20, "max entries (newest-first)")
-	project := fs.String("project", os.Getenv("ARCMUX_PROJECT"), "project slug (default $ARCMUX_PROJECT)")
-	dataRoot := fs.String("data-root", defaultDataRoot(), "ephemeral data root (default $ARCMUX_DATA or $HOME/data)")
+	since := fs.String("since", "", "RFC3339 lower bound (optional)")
+	ownerID := fs.String("owner-id", "", "filter by owner_id (optional)")
+	sessionID := fs.String("session-id", "", "filter by session_id (optional)")
+	sock := fs.String("socket", socketPath(), "daemon socket path")
+	// Kept for back-compat with older callers; ignored by the gRPC path.
+	// These used to address the bbolt directly; the daemon now owns the
+	// scope. We accept-and-discard rather than error so existing scripts
+	// don't break in lockstep.
+	_ = fs.String("project", "", "(deprecated; ignored, daemon owns scope)")
+	_ = fs.String("data-root", "", "(deprecated; ignored, daemon owns scope)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *project == "" {
-		return fmt.Errorf("audit recent: --project or $ARCMUX_PROJECT required")
-	}
-	if _, err := paths.Validate(*project); err != nil {
-		return err
-	}
 
-	db, _, err := openProjectDB(*dataRoot, *project)
+	conn, err := grpc.NewClient(
+		"unix://"+*sock,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
 	if err != nil {
-		return err
+		return fmt.Errorf("audit recent: dial %s: %w", *sock, err)
 	}
-	defer db.Close()
+	defer conn.Close()
+	c := arcmuxv1.NewAgentRuntimeClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
-	entries, err := db.RecentAudit(*n)
+	resp, err := c.QueryAudit(ctx, &arcmuxv1.QueryAuditRequest{
+		OwnerId:   *ownerID,
+		SessionId: *sessionID,
+		Since:     *since,
+		Limit:     int32(*n),
+	})
 	if err != nil {
 		return fmt.Errorf("audit recent: %w", err)
 	}
-	if entries == nil {
-		entries = []store.AuditEntry{}
+
+	entries := make([]map[string]any, 0, len(resp.Entries))
+	for _, e := range resp.Entries {
+		entries = append(entries, map[string]any{
+			"timestamp":  e.Timestamp,
+			"action":     e.Action,
+			"actor":      e.Actor,
+			"subject":    e.Subject,
+			"owner_id":   e.OwnerId,
+			"session_id": e.SessionId,
+			"detail":     e.Detail,
+		})
 	}
 	return json.NewEncoder(stdout).Encode(map[string]any{"entries": entries})
-}
-
-// openProjectDB ensures the ephemeral dir exists, opens state.bolt, and
-// returns the handle plus resolved paths. Caller closes the DB.
-func openProjectDB(dataRoot, project string) (*store.DB, paths.Project, error) {
-	p := paths.ForProject(dataRoot, "", project)
-	if err := os.MkdirAll(p.EphemeralRoot, 0o700); err != nil {
-		return nil, p, fmt.Errorf("ensure %s: %w", p.EphemeralRoot, err)
-	}
-	db, err := store.Open(p.StateBolt)
-	if err != nil {
-		return nil, p, err
-	}
-	return db, p, nil
-}
-
-func defaultDataRoot() string {
-	if v := os.Getenv("ARCMUX_DATA"); v != "" {
-		return v
-	}
-	h, _ := os.UserHomeDir()
-	return filepath.Join(h, "data")
 }

@@ -31,23 +31,25 @@ proto:
 test:
 	go test ./...
 
-# Per-commit gate: structural (gofmt + vet + test + build + dispatcher
-# smokes via scripts/validate.sh) AND substrate-behavioral (cmd/arcmux-e2e/
-# scenarios that spawn isolated daemons and assert observable substrate
-# effects). Free, fast (~17s).
+# Per-commit gate: structural (gofmt + vet + go test + make build) AND
+# substrate-behavioral (cmd/arcmux-e2e/ scenarios spawning isolated daemons
+# and asserting observable substrate effects), all in one ~12s pass via
+# scripts/validate.sh. Free, fast.
 #
 # Convention: any Elon-turn cycle should end with `make validate` before commit.
-validate: validate-structural validate-substrate-e2e
+validate: validate-structural
 
-# Structural-only path (gofmt + vet + test + build + 5 dispatcher smokes).
-# Use this for the fast loop while iterating; the canonical per-commit gate
-# is `make validate` which also runs the substrate behavioral scenarios.
+# The actual six-step pass lives in scripts/validate.sh: gofmt, go vet,
+# go test, make build, e2e:bootstrap, e2e:pulse-wake. The script writes a
+# structured JSON report under $ARCMUX_EPHEMERAL/validate-reports/ (or
+# ./.validate-reports otherwise).
 validate-structural:
 	@./scripts/validate.sh
 
-# Substrate-behavioral scenarios: SETUP→ACT→ASSERT→TEARDOWN against isolated
-# daemons / throwaway projects, asserting that the substrate observably DID
-# the right thing. See cmd/arcmux-e2e/. Requires `make build` first.
+# Ad-hoc substrate-behavioral runner — runs every cmd/arcmux-e2e scenario
+# (no --scenario filter). The canonical per-commit gate (`make validate`)
+# already runs the two key scenarios (bootstrap, pulse-wake); use this when
+# you want to exercise all registered scenarios end-to-end.
 validate-substrate-e2e: build
 	@./bin/$(BINARY)-e2e
 

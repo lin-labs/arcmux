@@ -63,6 +63,7 @@ func run(args []string) error {
 	all := []e2e.Scenario{
 		scenarios.Bootstrap{},
 		scenarios.PulseWake{},
+		scenarios.GRPCRoundtrip{},
 	}
 
 	if *listOnly {
