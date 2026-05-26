@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Self-validating dev-cycle pass for arcmux. Runs structural checks (gofmt,
-# vet, go test, build) plus substrate-behavioral e2e scenarios that spawn
-# isolated daemons and assert observable substrate effects; writes a
+# vet, go test, build) plus substrate-behavioral scenariotest cases that
+# spawn isolated daemons and assert observable substrate effects; writes a
 # structured JSON report to $ARCMUX_EPHEMERAL/validate-reports/YYYY-MM-DD-HH.json.
 #
-# Six steps total (~12s wall): gofmt, go vet, go test, make build,
-# e2e:bootstrap, e2e:pulse-wake, e2e:grpc-rt.
+# Seven steps total (~12s wall): gofmt, go vet, go test, make build,
+# test:bootstrap, test:pulse-wake, test:grpc-rt.
 #
 # Exit 0 only if every step succeeded. Exit 1 if any step failed.
 #
@@ -75,10 +75,10 @@ run_step "go test"      go test ./...
 # 3) build (all 4 binaries via make)
 run_step "make build"   make build
 
-# 4) substrate-behavioral e2e scenarios against built binaries
-run_step "e2e: bootstrap"      ./bin/arcmux-e2e --scenario bootstrap
-run_step "e2e: pulse-wake"     ./bin/arcmux-e2e --scenario pulse-wake
-run_step "e2e: grpc-rt"        ./bin/arcmux-e2e --scenario grpc-rt
+# 4) substrate-scenariotest cases against built binaries
+run_step "test: bootstrap"     ./bin/arcmux-test --scenario bootstrap
+run_step "test: pulse-wake"    ./bin/arcmux-test --scenario pulse-wake
+run_step "test: grpc-rt"       ./bin/arcmux-test --scenario grpc-rt
 
 # Compose JSON report
 OVERALL="pass"

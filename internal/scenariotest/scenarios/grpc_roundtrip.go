@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lin-labs/arcmux/internal/e2e"
+	"github.com/lin-labs/arcmux/internal/scenariotest"
 )
 
 // GRPCRoundtrip proves that the post-F11 arcmux-cli subcommands route
@@ -50,7 +50,7 @@ type GRPCRoundtrip struct{}
 
 func (GRPCRoundtrip) Name() string { return "grpc-rt" }
 
-func (GRPCRoundtrip) Run(ctx context.Context, env *e2e.Env, log io.Writer) error {
+func (GRPCRoundtrip) Run(ctx context.Context, env *scenariotest.Env, log io.Writer) error {
 	if err := env.StartDaemon(ctx, 10*time.Second); err != nil {
 		return fmt.Errorf("start daemon: %w", err)
 	}

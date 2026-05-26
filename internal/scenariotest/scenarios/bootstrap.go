@@ -1,6 +1,7 @@
-// Package scenarios implements the concrete e2e scenarios the harness
-// dispatches. Each scenario follows SETUP → ACT → ASSERT → TEARDOWN; the
-// Env owns teardown, so scenarios just return an error on failure.
+// Package scenarios implements the concrete substrate scenariotest
+// cases the harness dispatches. Each scenario follows SETUP → ACT →
+// ASSERT → TEARDOWN; the Env owns teardown, so scenarios just return
+// an error on failure.
 package scenarios
 
 import (
@@ -11,11 +12,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lin-labs/arcmux/internal/e2e"
 	"github.com/lin-labs/arcmux/internal/manager/bootstrap"
 	"github.com/lin-labs/arcmux/internal/manager/paths"
 	"github.com/lin-labs/arcmux/internal/manager/scaffold"
 	"github.com/lin-labs/arcmux/internal/manager/store"
+	"github.com/lin-labs/arcmux/internal/scenariotest"
 )
 
 // Bootstrap proves the substrate-only invariants of project
@@ -33,8 +34,8 @@ type Bootstrap struct{}
 
 func (Bootstrap) Name() string { return "bootstrap" }
 
-func (Bootstrap) Run(ctx context.Context, env *e2e.Env, log io.Writer) error {
-	mission := "e2e bootstrap mission — verify substrate scaffolding"
+func (Bootstrap) Run(ctx context.Context, env *scenariotest.Env, log io.Writer) error {
+	mission := "scenariotest bootstrap mission — verify substrate scaffolding"
 
 	// ACT 1: scaffold ephemeral dirs only.
 	pp := paths.ForProject(env.DataRoot, env.VaultRoot, env.ProjectSlug)
@@ -88,7 +89,7 @@ func (Bootstrap) Run(ctx context.Context, env *e2e.Env, log io.Writer) error {
 	// ACT 4: persist project meta — pulses + future heartbeats locate
 	// the registered pane through this singleton. Use a placeholder pane
 	// ref since we aren't going through cmux in this scenario.
-	fakePane := e2e.FormatPaneRef(0)
+	fakePane := scenariotest.FormatPaneRef(0)
 	if err := db.PutProjectMeta(store.ProjectMeta{
 		PaneRef:      fakePane,
 		SurfaceRef:   "surface:99000",

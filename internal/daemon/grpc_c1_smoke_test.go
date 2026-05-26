@@ -13,7 +13,7 @@ import (
 //
 //  1. inject a session with owner_id="testco" (proxy for CreateSession;
 //     real CreateSession needs tmux/agent — covered by integration_test
-//     and the arcmux-e2e harness).
+//     and the arcmux-test scenariotest harness).
 //  2. Send to it. Session is in StateWorking (not ready) → message is
 //     queued and we get back a msg_id with queued=true.
 //  3. PeekInbox returns the queued message.

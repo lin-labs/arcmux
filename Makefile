@@ -1,4 +1,4 @@
-.PHONY: build install proto test validate validate-structural validate-e2e validate-eval validate-all clean start stop restart status logs tail release deploy
+.PHONY: build install proto test validate validate-structural validate-substrate validate-substrate-e2e validate-e2e validate-eval validate-all clean start stop restart status logs tail release deploy
 
 BINARY := arcmux
 INSTALL_DIR := $(HOME)/.local/bin
@@ -14,8 +14,8 @@ LABS_REPO ?= ~/Projects/arcmux
 build:
 	go build -o bin/$(BINARY) ./cmd/arcmux
 	go build -o bin/$(BINARY)-cli ./cmd/arcmux-cli
+	go build -o bin/$(BINARY)-test ./cmd/arcmux-test
 	go build -o bin/$(BINARY)-e2e ./cmd/arcmux-e2e
-	go build -o bin/$(BINARY)-eval ./cmd/arcmux-eval
 
 install: build
 	mkdir -p $(INSTALL_DIR)
@@ -32,39 +32,42 @@ test:
 	go test ./...
 
 # Per-commit gate: structural (gofmt + vet + go test + make build) AND
-# substrate-behavioral (cmd/arcmux-e2e/ scenarios spawning isolated daemons
-# and asserting observable substrate effects), all in one ~12s pass via
-# scripts/validate.sh. Free, fast.
+# substrate-behavioral (cmd/arcmux-test/ scenariotest cases spawning
+# isolated daemons and asserting observable substrate effects), all in
+# one ~12s pass via scripts/validate.sh. Free, fast.
 #
 # Convention: any Elon-turn cycle should end with `make validate` before commit.
 validate: validate-structural
 
-# The actual six-step pass lives in scripts/validate.sh: gofmt, go vet,
-# go test, make build, e2e:bootstrap, e2e:pulse-wake. The script writes a
-# structured JSON report under $ARCMUX_EPHEMERAL/validate-reports/ (or
-# ./.validate-reports otherwise).
+# The actual multi-step pass lives in scripts/validate.sh: gofmt, go vet,
+# go test, make build, test:bootstrap, test:pulse-wake, test:grpc-rt. The
+# script writes a structured JSON report under
+# $ARCMUX_EPHEMERAL/validate-reports/ (or ./.validate-reports otherwise).
 validate-structural:
 	@./scripts/validate.sh
 
-# Ad-hoc substrate-behavioral runner — runs every cmd/arcmux-e2e scenario
-# (no --scenario filter). The canonical per-commit gate (`make validate`)
-# already runs the two key scenarios (bootstrap, pulse-wake); use this when
-# you want to exercise all registered scenarios end-to-end.
-validate-substrate-e2e: build
-	@./bin/$(BINARY)-e2e
+# Ad-hoc substrate-scenariotest runner — runs every cmd/arcmux-test
+# scenario (no --scenario filter). The canonical per-commit gate
+# (`make validate`) already runs all three substrate scenarios via the
+# script; use this when you want to invoke the binary directly.
+validate-substrate: build
+	@./bin/$(BINARY)-test
 
-# Big-feature gate: agent-behavioral eval harness. Spawns real `claude -p`
-# invocations against scenario prompts and validates the produced artifacts
-# in a sandboxed workrepo. **Burns real Anthropic tokens.** Run intentionally
-# — before a charter-level merge, after a substrate refactor that could
-# break agent dispatch, before a release tag.
+# Back-compat alias for the old name. Prefer `validate-substrate` going forward.
+validate-substrate-e2e: validate-substrate
+
+# Big-feature gate: agent-behavioral end-to-end harness. Spawns real
+# `claude -p` invocations against scenario prompts and validates the
+# produced artifacts in a sandboxed workrepo. **Burns real Anthropic
+# tokens.** Run intentionally — before a charter-level merge, after a
+# substrate refactor that could break agent dispatch, before a release tag.
 #
 #   make validate-e2e                          # all scenarios
 #   make validate-e2e SCENARIO=hello-server    # one scenario by name
 #
-# See cmd/arcmux-eval/ and testdata/eval-scenarios/.
+# See cmd/arcmux-e2e/ and testdata/e2e-scenarios/.
 validate-e2e: build
-	@./bin/$(BINARY)-eval $(if $(SCENARIO),--scenario $(SCENARIO))
+	@./bin/$(BINARY)-e2e $(if $(SCENARIO),--scenario $(SCENARIO))
 
 # Back-compat aliases — keep one cycle while callers migrate.
 validate-eval: validate-e2e

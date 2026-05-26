@@ -1,24 +1,28 @@
-// arcmux-e2e is the behavioral end-to-end test harness for arcmux.
+// arcmux-e2e is the agent-behavioral end-to-end harness.
 //
-// Where scripts/validate.sh proves the binaries COMPILE and the wire
-// edges respond, this binary proves the substrate actually DOES the
-// right thing when a human-style sequence of commands is issued.
+// Where cmd/arcmux-test proves the SUBSTRATE behaves (cmux + bbolt +
+// audit rows show up where they should), arcmux-e2e proves the AGENT
+// STACK behaves: given a mission and a fresh sandbox workrepo, can
+// claude produce an artifact that passes a per-scenario assertion
+// script?
 //
-// Each scenario runs in a fully isolated temp dir (unique data_root,
-// vault_root, daemon socket, tmux socket, cmux workspace prefix) so a
-// failure in one cannot cascade. Teardown is guaranteed even on
-// assertion failure. A JSON report is written under
-// $ARCMUX_EPHEMERAL/validate-reports/ mirroring validate.sh's shape.
+// v0 scope: direct-dispatch only. One `claude -p MISSION` invocation per
+// scenario, no arcmux team chain. Chain-mode scenarios (Elon→Manager→IC
+// dispatched via the arcmux substrate) are tracked in §F15 forward-plan
+// and will land as additional Scenario implementations.
+//
+// Cost: every scenario spends real Claude tokens. Run intentionally.
 //
 // Usage:
 //
-//	bin/arcmux-e2e                                # all scenarios
-//	bin/arcmux-e2e --scenario bootstrap            # one scenario by name
-//	bin/arcmux-e2e --scenario bootstrap,pulse-wake # subset
-//	bin/arcmux-e2e --list                          # print scenario names
-//	bin/arcmux-e2e --keep                          # keep temp dirs after pass
-//	bin/arcmux-e2e --report-dir <path>             # override report dir
-//	bin/arcmux-e2e --bin <path> --call <path>      # override binary paths
+//	bin/arcmux-e2e                              # all scenarios
+//	bin/arcmux-e2e --scenario hello-server       # one scenario by name
+//	bin/arcmux-e2e --scenario a,b                # subset
+//	bin/arcmux-e2e --list                        # print scenario names
+//	bin/arcmux-e2e --keep                        # keep workrepo dirs after pass
+//	bin/arcmux-e2e --report-dir <path>           # override report dir
+//	bin/arcmux-e2e --claude <path>               # override claude binary
+//	bin/arcmux-e2e --timeout 10m                 # per-scenario wall cap
 //
 // Exit 0 only if every selected scenario passed.
 package main
@@ -28,6 +32,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -49,11 +54,11 @@ func run(args []string) error {
 	fs := flag.NewFlagSet("arcmux-e2e", flag.ContinueOnError)
 	scenarioFilter := fs.String("scenario", "", "comma-separated scenario names (default: all)")
 	reportDir := fs.String("report-dir", "", "override report directory")
-	bin := fs.String("bin", "", "path to arcmux binary (default: ./bin/arcmux)")
-	callBin := fs.String("call", "", "path to arcmux-cli binary (default: ./bin/arcmux-cli)")
-	timeout := fs.Duration("timeout", 90*time.Second, "per-scenario timeout")
+	claudeBin := fs.String("claude", "", "path to claude binary (default: search PATH)")
+	scenariosRoot := fs.String("scenarios-root", "", "path to testdata/e2e-scenarios/ (default: <repo>/testdata/e2e-scenarios)")
+	timeout := fs.Duration("timeout", 10*time.Minute, "per-scenario wall-time cap (includes agent + validate)")
 	listOnly := fs.Bool("list", false, "list available scenarios and exit")
-	keep := fs.Bool("keep", false, "keep per-scenario temp dirs even on pass")
+	keep := fs.Bool("keep", false, "keep per-scenario sandbox dirs even on pass")
 	stopOnFail := fs.Bool("stop", false, "stop after first failure")
 	verbose := fs.Bool("v", false, "verbose progress to stdout")
 	if err := fs.Parse(args); err != nil {
@@ -61,9 +66,7 @@ func run(args []string) error {
 	}
 
 	all := []e2e.Scenario{
-		scenarios.Bootstrap{},
-		scenarios.PulseWake{},
-		scenarios.GRPCRoundtrip{},
+		scenarios.HelloServer{},
 	}
 
 	if *listOnly {
@@ -99,37 +102,43 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("getwd: %w", err)
 	}
-	if *bin == "" {
-		*bin = filepath.Join(repoRoot, "bin", "arcmux")
-	}
-	if *callBin == "" {
-		*callBin = filepath.Join(repoRoot, "bin", "arcmux-cli")
+	if *scenariosRoot == "" {
+		*scenariosRoot = filepath.Join(repoRoot, "testdata", "e2e-scenarios")
 	}
 	if *reportDir == "" {
 		*reportDir = resolveReportDir(repoRoot)
+	}
+
+	resolvedClaude := *claudeBin
+	if resolvedClaude == "" {
+		p, lookErr := exec.LookPath("claude")
+		if lookErr != nil {
+			return fmt.Errorf("claude not found on PATH (--claude <path> to override): %w", lookErr)
+		}
+		resolvedClaude = p
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
 	r := &e2e.Runner{
-		Scenarios:  selected,
-		ReportDir:  *reportDir,
-		Verbose:    *verbose,
-		Timeout:    *timeout,
-		StopOnFail: *stopOnFail,
-		KeepArtifs: *keep,
-		ArcmuxBin:  *bin,
-		CallBin:    *callBin,
-		RepoRoot:   repoRoot,
+		Scenarios:       selected,
+		ScenariosRoot:   *scenariosRoot,
+		ReportDir:       *reportDir,
+		Verbose:         *verbose,
+		ScenarioTimeout: *timeout,
+		StopOnFail:      *stopOnFail,
+		KeepArtifs:      *keep,
+		ClaudeBin:       resolvedClaude,
+		RepoRoot:        repoRoot,
 	}
 	return r.Run(ctx, os.Stdout)
 }
 
-// resolveReportDir mirrors validate.sh's logic: prefer $ARCMUX_EPHEMERAL
-// when set, fall back to <repo>/.validate-reports otherwise. Reports
-// land in validate-reports/ so a single dir holds both structural and
-// e2e evidence.
+// resolveReportDir mirrors arcmux-test: prefer $ARCMUX_EPHEMERAL when set,
+// fall back to <repo>/.validate-reports otherwise. Reports land in a
+// single directory alongside structural + substrate reports for one-stop
+// audit.
 func resolveReportDir(repoRoot string) string {
 	if e := os.Getenv("ARCMUX_EPHEMERAL"); e != "" {
 		return filepath.Join(e, "validate-reports")

@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lin-labs/arcmux/internal/e2e"
 	"github.com/lin-labs/arcmux/internal/manager/paths"
 	"github.com/lin-labs/arcmux/internal/manager/scaffold"
 	"github.com/lin-labs/arcmux/internal/manager/store"
+	"github.com/lin-labs/arcmux/internal/scenariotest"
 )
 
 // PulseWake proves that `arcmux start` (the daemon) discovers a freshly
@@ -42,7 +42,7 @@ type PulseWake struct{}
 
 func (PulseWake) Name() string { return "pulse-wake" }
 
-func (PulseWake) Run(ctx context.Context, env *e2e.Env, log io.Writer) error {
+func (PulseWake) Run(ctx context.Context, env *scenariotest.Env, log io.Writer) error {
 	pp := paths.ForProject(env.DataRoot, env.VaultRoot, env.ProjectSlug)
 
 	if err := scaffold.Project(pp); err != nil {
@@ -56,7 +56,7 @@ func (PulseWake) Run(ctx context.Context, env *e2e.Env, log io.Writer) error {
 		}
 		defer db.Close()
 		if err := db.PutProjectMeta(store.ProjectMeta{
-			PaneRef:      e2e.FormatPaneRef(1),
+			PaneRef:      scenariotest.FormatPaneRef(1),
 			SurfaceRef:   "surface:99001",
 			WorkspaceRef: "workspace:99001",
 		}); err != nil {

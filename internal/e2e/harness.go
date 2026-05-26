@@ -1,88 +1,88 @@
-// Package e2e implements arcmux's behavioral end-to-end harness. It is the
-// counterpart to scripts/validate.sh: where validate.sh proves the binaries
-// COMPILE and the wire-edges respond, e2e proves the substrate actually
-// DOES the right thing when a human-style sequence of commands is issued.
-//
-// Each scenario follows the SETUP → ACT → ASSERT → TEARDOWN shape (see
-// scenario.go). Scenarios are independent — they run in fully isolated
-// per-run temp dirs (unique data_root, vault_root, daemon socket, tmux
-// socket name, cmux workspace prefix), so a failure in one cannot cascade
-// to another. Teardown always runs, even on failure, so leftover state
-// from a crashed scenario is best-effort cleaned.
-//
-// The harness writes a structured JSON report mirroring validate.sh's
-// shape (overall pass/fail + per-step status/duration/detail), under
-// $ARCMUX_EPHEMERAL/validate-reports/e2e-YYYY-MM-DD-HH-MM.json (or
-// ./.validate-reports/ when $ARCMUX_EPHEMERAL is unset). The report is
-// the durable evidence the harness was green before commit.
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
-// Scenario is the unit of e2e work. Name() identifies it in reports +
-// --scenario filtering. Run() is the whole SETUP→ACT→ASSERT→TEARDOWN
-// flow; it MUST tear down (even on panic / assertion failure) before
-// returning.
+// Scenario is the unit of eval work. Name() identifies it in reports and
+// --scenario filtering. Run() owns SETUP → DISPATCH → VALIDATE; it must
+// not depend on global state and must tolerate being cancelled via ctx.
 type Scenario interface {
 	Name() string
-	Run(ctx context.Context, env *Env, log io.Writer) error
+	Run(ctx context.Context, env *Env, log io.Writer) (*Outcome, error)
+}
+
+// Outcome is what a Scenario returns when it has completed (pass OR fail).
+// A nil Outcome with a non-nil error indicates the scenario crashed before
+// it could record a structured result (env setup failure, panic, etc.) —
+// the runner treats that as a fail with the error message as Detail.
+type Outcome struct {
+	Status         string         `json:"status"` // pass | fail
+	Detail         string         `json:"detail,omitempty"`
+	Mode           string         `json:"mode"`               // "direct" (v0) | "chain" (future)
+	AgentWallTime  time.Duration  `json:"agent_wall_time_ns"` // total time spent inside claude(s)
+	ValidateOutput string         `json:"validate_output,omitempty"`
+	Extras         map[string]any `json:"extras,omitempty"`
 }
 
 // Runner executes a set of scenarios and writes a JSON report.
 type Runner struct {
-	Scenarios   []Scenario
-	ReportDir   string        // directory to write the JSON report into
-	Verbose     bool          // mirror scenario logs to stdout in real time
-	Timeout     time.Duration // per-scenario timeout (0 = no override)
-	StopOnFail  bool          // stop after first failing scenario (default: false)
-	KeepArtifs  bool          // keep per-scenario temp dirs after pass (default: false)
-	NowFn       func() time.Time
-	ArcmuxBin   string   // path to arcmux binary (for daemon spawn). Required.
-	CallBin     string   // path to arcmux-cli binary. Required.
-	RepoRoot    string   // arcmux repo root (for log breadcrumbs). Optional.
-	BootEnvBase []string // OS env to inherit into spawned daemons; nil = os.Environ()
+	Scenarios       []Scenario
+	ScenariosRoot   string // testdata/e2e-scenarios/
+	ReportDir       string
+	Verbose         bool
+	ScenarioTimeout time.Duration // wall-clock cap per scenario; 0 = no override
+	StopOnFail      bool
+	KeepArtifs      bool
+	ClaudeBin       string
+	RepoRoot        string
+	BaseEnv         []string
+	NowFn           func() time.Time
 }
 
-// StepReport captures one scenario's outcome. Fields mirror validate.sh.
+// StepReport mirrors validate.sh / e2e shape: per-scenario row in the report.
 type StepReport struct {
-	Name       string        `json:"name"`
-	Status     string        `json:"status"` // pass | fail | skip
-	DurationS  int           `json:"duration_s"`
-	StartedAt  string        `json:"started_at"`
-	FinishedAt string        `json:"finished_at"`
-	Detail     string        `json:"detail,omitempty"`
-	Artifacts  ArtifactPaths `json:"artifacts,omitempty"`
+	Name           string        `json:"name"`
+	Status         string        `json:"status"`
+	Mode           string        `json:"mode,omitempty"`
+	DurationS      int           `json:"duration_s"`
+	AgentWallTimeS int           `json:"agent_wall_time_s,omitempty"`
+	StartedAt      string        `json:"started_at"`
+	FinishedAt     string        `json:"finished_at"`
+	Detail         string        `json:"detail,omitempty"`
+	Artifacts      ArtifactPaths `json:"artifacts,omitempty"`
 }
 
-// ArtifactPaths records where a scenario left durable artifacts so a
-// failed run is debuggable post-mortem.
+// ArtifactPaths records where the scenario left files for post-mortem.
 type ArtifactPaths struct {
-	TempRoot  string `json:"temp_root,omitempty"`
-	DaemonLog string `json:"daemon_log,omitempty"`
-	Trace     string `json:"trace,omitempty"`
+	TempRoot string `json:"temp_root,omitempty"`
+	WorkRepo string `json:"workrepo,omitempty"`
+	Trace    string `json:"trace,omitempty"`
 }
 
-// FinalReport is what gets written to disk.
+// FinalReport is what gets written under $ARCMUX_EPHEMERAL/validate-reports/.
 type FinalReport struct {
 	Stamp     string       `json:"stamp"`
 	Timezone  string       `json:"timezone"`
 	RepoRoot  string       `json:"repo_root"`
 	ReportDir string       `json:"report_dir"`
+	ClaudeBin string       `json:"claude_bin"`
 	Overall   string       `json:"overall"`
 	Steps     []StepReport `json:"steps"`
 }
 
-// Run executes the configured scenarios and writes a report. Returns an
-// error if any scenario failed (the report is still written).
+// Run executes the configured scenarios and writes a report. Returns a
+// non-nil error if any scenario failed (the report is still written).
 func (r *Runner) Run(ctx context.Context, stdout io.Writer) error {
 	now := r.NowFn
 	if now == nil {
@@ -96,7 +96,7 @@ func (r *Runner) Run(ctx context.Context, stdout io.Writer) error {
 
 	fmt.Fprintf(stdout, "arcmux e2e — %s PT\n", stamp)
 	fmt.Fprintf(stdout, "  report: %s\n", reportPath)
-	fmt.Fprintf(stdout, "  bin:    %s\n\n", r.ArcmuxBin)
+	fmt.Fprintf(stdout, "  claude: %s\n\n", r.ClaudeBin)
 
 	steps := make([]StepReport, 0, len(r.Scenarios))
 	overall := "pass"
@@ -117,6 +117,7 @@ func (r *Runner) Run(ctx context.Context, stdout io.Writer) error {
 		Timezone:  "America/Los_Angeles",
 		RepoRoot:  r.RepoRoot,
 		ReportDir: r.ReportDir,
+		ClaudeBin: r.ClaudeBin,
 		Overall:   overall,
 		Steps:     steps,
 	}
@@ -132,29 +133,32 @@ func (r *Runner) Run(ctx context.Context, stdout io.Writer) error {
 }
 
 func (r *Runner) runOne(ctx context.Context, s Scenario, stdout io.Writer) StepReport {
-	startedAt := time.Now()
+	started := time.Now()
 	report := StepReport{
 		Name:      s.Name(),
-		StartedAt: startedAt.Format(time.RFC3339),
+		StartedAt: started.Format(time.RFC3339),
 	}
 
-	env, err := NewEnv(s.Name(), r.ArcmuxBin, r.CallBin, r.BootEnvBase)
+	scenarioDir := filepath.Join(r.ScenariosRoot, s.Name())
+	env, err := NewEnv(s.Name(), scenarioDir, r.ClaudeBin, r.BaseEnv)
 	if err != nil {
 		report.Status = "fail"
 		report.Detail = "env setup failed: " + err.Error()
-		report.DurationS = int(time.Since(startedAt).Seconds())
+		report.DurationS = int(time.Since(started).Seconds())
 		report.FinishedAt = time.Now().Format(time.RFC3339)
 		fmt.Fprintf(stdout, "  [fail] %-26s %ds  (env setup)\n", s.Name(), report.DurationS)
 		return report
 	}
-	report.Artifacts.TempRoot = env.TempRoot
-	report.Artifacts.DaemonLog = env.DaemonLogPath
-	report.Artifacts.Trace = env.TracePath
+	report.Artifacts = ArtifactPaths{
+		TempRoot: env.TempRoot,
+		WorkRepo: env.WorkRepo,
+		Trace:    env.TracePath,
+	}
 
 	scenarioCtx := ctx
 	var cancel context.CancelFunc
-	if r.Timeout > 0 {
-		scenarioCtx, cancel = context.WithTimeout(ctx, r.Timeout)
+	if r.ScenarioTimeout > 0 {
+		scenarioCtx, cancel = context.WithTimeout(ctx, r.ScenarioTimeout)
 	}
 	defer func() {
 		if cancel != nil {
@@ -162,25 +166,151 @@ func (r *Runner) runOne(ctx context.Context, s Scenario, stdout io.Writer) StepR
 		}
 	}()
 
-	runErr := s.Run(scenarioCtx, env, env.TraceWriter())
-	// Always teardown, even on failure. Keep temp artifacts when:
+	outcome, runErr := s.Run(scenarioCtx, env, env.TraceWriter())
+
+	// Always teardown; keep artifacts when:
 	//   - the user passed --keep, OR
-	//   - the scenario failed (debugging needs the trace + daemon log).
-	keep := r.KeepArtifs || runErr != nil
+	//   - the scenario failed (debugging needs trace + workrepo)
+	keep := r.KeepArtifs || runErr != nil || (outcome != nil && outcome.Status != "pass")
 	env.Teardown(stdout, keep)
 
-	report.DurationS = int(time.Since(startedAt).Seconds())
+	report.DurationS = int(time.Since(started).Seconds())
 	report.FinishedAt = time.Now().Format(time.RFC3339)
 
-	if runErr != nil {
+	switch {
+	case runErr != nil:
 		report.Status = "fail"
 		report.Detail = truncate(runErr.Error(), 600)
 		fmt.Fprintf(stdout, "  [fail] %-26s %ds  trace=%s\n", s.Name(), report.DurationS, env.TracePath)
-	} else {
-		report.Status = "pass"
-		fmt.Fprintf(stdout, "  [pass] %-26s %ds\n", s.Name(), report.DurationS)
+	case outcome == nil:
+		report.Status = "fail"
+		report.Detail = "scenario returned nil outcome and nil error"
+		fmt.Fprintf(stdout, "  [fail] %-26s %ds  (nil outcome)\n", s.Name(), report.DurationS)
+	default:
+		report.Status = outcome.Status
+		report.Mode = outcome.Mode
+		report.AgentWallTimeS = int(outcome.AgentWallTime.Seconds())
+		if outcome.Detail != "" {
+			report.Detail = truncate(outcome.Detail, 600)
+		}
+		marker := "[pass]"
+		if outcome.Status != "pass" {
+			marker = "[fail]"
+		}
+		fmt.Fprintf(stdout, "  %s %-26s %ds  agent=%ds  mode=%s\n",
+			marker, s.Name(), report.DurationS, report.AgentWallTimeS, report.Mode)
 	}
 	return report
+}
+
+// DispatchDirect spawns one claude -p invocation against env.WorkRepo with
+// the given mission and a wall-time cap. Returns the agent's wall-time and
+// any error (non-zero exit, timeout, etc.). The agent's stdout/stderr is
+// captured into <env.LogsDir>/agent-direct.log and traced.
+//
+// The mission is passed as the user message via -p; no role file is appended
+// (direct dispatch is plain claude, no arcmux identity). The agent's cwd is
+// env.WorkRepo so any file-create tool calls land in the sandbox.
+//
+// Extra env entries (e.g. "FOO=BAR") are layered on top of SpawnedEnv.
+func DispatchDirect(ctx context.Context, env *Env, mission string, wallCap time.Duration, extraEnv ...string) (time.Duration, error) {
+	if wallCap <= 0 {
+		wallCap = 5 * time.Minute
+	}
+	agentCtx, cancel := context.WithTimeout(ctx, wallCap)
+	defer cancel()
+
+	logPath := filepath.Join(env.LogsDir, "agent-direct.log")
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		return 0, fmt.Errorf("create agent log: %w", err)
+	}
+	defer logFile.Close()
+
+	// --dangerously-skip-permissions is required for unattended dispatch;
+	// the same flag the manager-mode bootstrap uses for in-pane launches.
+	// Mission goes as a single -p arg; claude prints final assistant text +
+	// usage to stdout and exits.
+	args := []string{
+		"-p", mission,
+		"--dangerously-skip-permissions",
+	}
+	cmd := exec.CommandContext(agentCtx, env.ClaudeBin, args...)
+	cmd.Dir = env.WorkRepo
+	cmd.Env = env.SpawnedEnv(extraEnv...)
+	// New process group so a timeout SIGKILL takes the whole agent tree.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	// Tee stdout+stderr into both the log file and a small in-memory buffer
+	// for trace breadcrumbs.
+	var head bytes.Buffer
+	cmd.Stdout = io.MultiWriter(logFile, &headWriter{cap: 4096, b: &head})
+	cmd.Stderr = io.MultiWriter(logFile, &headWriter{cap: 4096, b: &head})
+
+	env.Tracef("$ (cwd=%s) claude -p <mission %d bytes> --dangerously-skip-permissions [cap=%s]",
+		env.WorkRepo, len(mission), wallCap)
+	started := time.Now()
+	err = cmd.Run()
+	elapsed := time.Since(started)
+	env.Tracef("  claude exit after %s err=%v", elapsed, err)
+	if head.Len() > 0 {
+		env.Tracef("  claude head/tail: %s", truncate(head.String(), 800))
+	}
+
+	if err != nil {
+		if agentCtx.Err() == context.DeadlineExceeded {
+			return elapsed, fmt.Errorf("agent wall-time cap %s exceeded (log: %s)", wallCap, logPath)
+		}
+		return elapsed, fmt.Errorf("claude exited with error: %w (log: %s)", err, logPath)
+	}
+	return elapsed, nil
+}
+
+// RunValidateScript runs the scenario's validate.sh against env.WorkRepo
+// and returns its combined output + pass/fail. Pass = exit 0.
+func RunValidateScript(ctx context.Context, env *Env, scriptName string) (string, error) {
+	scriptPath := env.ScenarioPath(scriptName)
+	if _, err := os.Stat(scriptPath); err != nil {
+		return "", fmt.Errorf("validate script %q: %w", scriptPath, err)
+	}
+	if err := os.Chmod(scriptPath, 0o755); err != nil {
+		// Non-fatal; bash <path> would still work, but try to chmod.
+		env.Tracef("chmod %s: %v", scriptPath, err)
+	}
+
+	cmd := exec.CommandContext(ctx, "bash", scriptPath, env.WorkRepo)
+	cmd.Env = env.SpawnedEnv()
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	env.Tracef("$ bash %s %s", scriptPath, env.WorkRepo)
+	err := cmd.Run()
+	out := buf.String()
+	env.Tracef("  validate exit err=%v output=%s", err, truncate(out, 800))
+	if err != nil {
+		return out, fmt.Errorf("validate.sh exit non-zero: %w", err)
+	}
+	return out, nil
+}
+
+// headWriter is a tiny io.Writer that captures only the first cap bytes.
+// Used for trace breadcrumbs from very chatty agent runs.
+type headWriter struct {
+	cap int
+	b   *bytes.Buffer
+}
+
+func (h *headWriter) Write(p []byte) (int, error) {
+	if h.b.Len() >= h.cap {
+		return len(p), nil
+	}
+	remaining := h.cap - h.b.Len()
+	if len(p) <= remaining {
+		h.b.Write(p)
+		return len(p), nil
+	}
+	h.b.Write(p[:remaining])
+	return len(p), nil
 }
 
 func writeReport(path string, rep FinalReport) error {
@@ -192,7 +322,6 @@ func writeReport(path string, rep FinalReport) error {
 }
 
 func timeStamp(t time.Time) string {
-	// match validate.sh's TZ=America/Los_Angeles +%Y-%m-%d-%H-%M
 	loc, err := time.LoadLocation("America/Los_Angeles")
 	if err == nil {
 		t = t.In(loc)

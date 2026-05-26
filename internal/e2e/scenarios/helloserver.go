@@ -1,4 +1,5 @@
-// Package scenarios holds concrete eval scenario implementations.
+// Package scenarios holds concrete agent-behavioral e2e scenario
+// implementations.
 package scenarios
 
 import (
@@ -7,7 +8,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/lin-labs/arcmux/internal/eval"
+	"github.com/lin-labs/arcmux/internal/e2e"
 )
 
 // HelloServer is the floor scenario: a direct-dispatch agent task that
@@ -25,7 +26,7 @@ type HelloServer struct {
 
 func (HelloServer) Name() string { return "hello-server" }
 
-func (h HelloServer) Run(ctx context.Context, env *eval.Env, log io.Writer) (*eval.Outcome, error) {
+func (h HelloServer) Run(ctx context.Context, env *e2e.Env, log io.Writer) (*e2e.Outcome, error) {
 	missionBytes, err := env.ReadScenarioFile("prompt.md")
 	if err != nil {
 		return nil, fmt.Errorf("read prompt.md: %w", err)
@@ -38,7 +39,7 @@ func (h HelloServer) Run(ctx context.Context, env *eval.Env, log io.Writer) (*ev
 		cap = 5 * time.Minute
 	}
 
-	agentWall, err := eval.DispatchDirect(ctx, env, mission, cap)
+	agentWall, err := e2e.DispatchDirect(ctx, env, mission, cap)
 	if err != nil {
 		// Agent failed (timeout, non-zero exit). Still try to validate —
 		// some scenarios may produce partially-correct artifacts even on
@@ -46,9 +47,9 @@ func (h HelloServer) Run(ctx context.Context, env *eval.Env, log io.Writer) (*ev
 		env.Tracef("agent dispatch returned error: %v (validating anyway)", err)
 	}
 
-	validateOut, vErr := eval.RunValidateScript(ctx, env, "validate.sh")
+	validateOut, vErr := e2e.RunValidateScript(ctx, env, "validate.sh")
 	if vErr != nil {
-		return &eval.Outcome{
+		return &e2e.Outcome{
 			Status:         "fail",
 			Mode:           "direct",
 			AgentWallTime:  agentWall,
@@ -57,7 +58,7 @@ func (h HelloServer) Run(ctx context.Context, env *eval.Env, log io.Writer) (*ev
 		}, nil
 	}
 
-	return &eval.Outcome{
+	return &e2e.Outcome{
 		Status:         "pass",
 		Mode:           "direct",
 		AgentWallTime:  agentWall,
