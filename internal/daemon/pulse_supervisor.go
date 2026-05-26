@@ -10,10 +10,10 @@ import (
 	"time"
 
 	"github.com/lin-labs/arcmux/internal/config"
-	"github.com/lin-labs/arcmux/internal/manager/cmuxcli"
 	"github.com/lin-labs/arcmux/internal/manager/paths"
 	"github.com/lin-labs/arcmux/internal/manager/pulse"
 	"github.com/lin-labs/arcmux/internal/manager/store"
+	"github.com/lin-labs/arcmux/internal/mux"
 )
 
 // PulseSupervisor runs ONE pulse.Pulser goroutine per discovered project,
@@ -36,7 +36,7 @@ import (
 // arcmux-cli through the daemon's gRPC instead of opening bolt directly.
 type PulseSupervisor struct {
 	cfg    config.ParsedPulse
-	cmux   pulseCmux
+	mux    mux.Backend
 	logger *slog.Logger
 	now    func() time.Time
 
@@ -51,7 +51,7 @@ type PulseSupervisor struct {
 
 	// newPulser constructs a Pulser for a freshly-opened DB. Tests
 	// inject a stub that just records the call.
-	newPulser func(slug string, db *store.DB, c pulseCmux, cad pulse.Cadence) pulser
+	newPulser func(slug string, db *store.DB, m mux.Backend, cad pulse.Cadence) pulser
 
 	mu       sync.Mutex
 	projects map[string]*pulseEntry // key: project slug
@@ -66,12 +66,6 @@ type pulser interface {
 	Run(ctx context.Context, interval time.Duration) error
 }
 
-// pulseCmux mirrors *cmuxcli.Client's surface the Pulser uses. Same
-// reasoning — keep the supervisor mockable.
-type pulseCmux interface {
-	Send(ctx context.Context, target, text string) error
-}
-
 // pulseEntry tracks one supervised project.
 type pulseEntry struct {
 	slug   string
@@ -82,8 +76,8 @@ type pulseEntry struct {
 }
 
 // NewPulseSupervisor builds a supervisor wired against the real bolt
-// filesystem layout and the real cmux CLI.
-func NewPulseSupervisor(pcfg config.ParsedPulse, cmux *cmuxcli.Client, logger *slog.Logger) *PulseSupervisor {
+// filesystem layout and the configured mux backend.
+func NewPulseSupervisor(pcfg config.ParsedPulse, backend mux.Backend, logger *slog.Logger) *PulseSupervisor {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -94,7 +88,7 @@ func NewPulseSupervisor(pcfg config.ParsedPulse, cmux *cmuxcli.Client, logger *s
 	}
 	return &PulseSupervisor{
 		cfg:    pcfg,
-		cmux:   cmux,
+		mux:    backend,
 		logger: logger,
 		now:    time.Now,
 		discoverProjects: func() ([]string, error) {
@@ -103,11 +97,8 @@ func NewPulseSupervisor(pcfg config.ParsedPulse, cmux *cmuxcli.Client, logger *s
 		boltPathFor: func(slug string) string {
 			return paths.ForProject(dataRoot, "" /*vault not needed*/, slug).StateBolt
 		},
-		newPulser: func(slug string, db *store.DB, c pulseCmux, cad pulse.Cadence) pulser {
-			// Reach down to the real cmuxcli.Client only when given one;
-			// the production wiring always does.
-			cc, _ := c.(*cmuxcli.Client)
-			pp := pulse.New(slug, db, cc)
+		newPulser: func(slug string, db *store.DB, m mux.Backend, cad pulse.Cadence) pulser {
+			pp := pulse.New(slug, db, m)
 			pp.Cadence = cad
 			pp.Log = logger.With("project", slug)
 			return pp
@@ -264,7 +255,7 @@ func (s *PulseSupervisor) startProject(parent context.Context, slug string) erro
 		Manager: s.cfg.Cadence.Manager,
 		IC:      s.cfg.Cadence.IC,
 	}
-	pp := s.newPulser(slug, db, s.cmux, cad)
+	pp := s.newPulser(slug, db, s.mux, cad)
 
 	ctx, cancel := context.WithCancel(parent)
 	entry := &pulseEntry{

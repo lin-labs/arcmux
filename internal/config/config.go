@@ -13,11 +13,28 @@ import (
 // Config is the top-level configuration for the arcmux daemon.
 type Config struct {
 	Daemon DaemonConfig               `toml:"daemon"`
+	Mux    MuxConfig                  `toml:"mux"`
 	Tmux   TmuxConfig                 `toml:"tmux"`
 	Health HealthConfig               `toml:"health"`
 	Hooks  HooksConfig                `toml:"hooks"`
 	Pulse  PulseConfig                `toml:"pulse"`
 	Agents map[string]profile.Profile `toml:"agents"`
+}
+
+// MuxConfig selects the terminal multiplexer backend. Valid values are
+// "cmux" (default) and "tmux". The choice is global per daemon.
+type MuxConfig struct {
+	Backend string `toml:"backend"`
+}
+
+// Validate returns an error if the backend value is unknown.
+func (m MuxConfig) Validate() error {
+	switch m.Backend {
+	case "cmux", "tmux":
+		return nil
+	default:
+		return fmt.Errorf("config: mux.backend %q is not one of cmux|tmux", m.Backend)
+	}
 }
 
 // PulseConfig drives the in-daemon pulse supervisor: one Pulser per
@@ -86,6 +103,9 @@ func Load(path string) (*Config, error) {
 			LogDir:   defaultLogDir(),
 			HTTPAddr: "127.0.0.1:7777",
 		},
+		Mux: MuxConfig{
+			Backend: "cmux",
+		},
 		Tmux: TmuxConfig{
 			SocketName:     "arcmux",
 			DefaultSession: "agents",
@@ -137,6 +157,13 @@ func Load(path string) (*Config, error) {
 
 	cfg.Agents = mergeAgentProfiles(defaultAgents, cfg.Agents)
 	cfg.Pulse = mergePulseConfig(pulseDefaults, cfg.Pulse)
+
+	if cfg.Mux.Backend == "" {
+		cfg.Mux.Backend = "cmux"
+	}
+	if err := cfg.Mux.Validate(); err != nil {
+		return nil, err
+	}
 
 	return cfg, nil
 }

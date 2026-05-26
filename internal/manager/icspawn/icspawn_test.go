@@ -13,6 +13,8 @@ import (
 	"github.com/lin-labs/arcmux/internal/manager/cmuxcli"
 	"github.com/lin-labs/arcmux/internal/manager/store"
 	"github.com/lin-labs/arcmux/internal/manager/teamspawn"
+	"github.com/lin-labs/arcmux/internal/mux"
+	cmuxbackend "github.com/lin-labs/arcmux/internal/mux/cmux"
 )
 
 // fakeRunner mirrors teamspawn_test's fake. Kept local to avoid a test-
@@ -34,22 +36,22 @@ func (f *fakeRunner) Run(_ context.Context, args ...string) (string, error) {
 }
 
 // okCmuxForTeam answers team-spawn calls (NewWorkspace + ListPanes).
-func okCmuxForTeam() (*fakeRunner, *cmuxcli.Client) {
+func okCmuxForTeam() (*fakeRunner, mux.Backend) {
 	f := &fakeRunner{outs: map[string]string{
 		"new-workspace": "OK workspace:42\n",
 		"list-panes":    `{"workspace_ref":"workspace:42","panes":[{"ref":"pane:11","index":0,"focused":true,"surface_refs":["surface:9"]}]}`,
 	}}
-	return f, cmuxcli.NewWithRunnerForTest(f)
+	return f, cmuxbackend.New(cmuxcli.NewWithRunnerForTest(f))
 }
 
 // okCmuxForIC answers IC-spawn calls (NewPane + Send). The pane ref is the
 // reserved "pane:55" so tests can assert it ended up on the slot record.
-func okCmuxForIC() (*fakeRunner, *cmuxcli.Client) {
+func okCmuxForIC() (*fakeRunner, mux.Backend) {
 	f := &fakeRunner{outs: map[string]string{
 		"new-pane": "OK pane:55\n",
 		"send":     "OK\n",
 	}}
-	return f, cmuxcli.NewWithRunnerForTest(f)
+	return f, cmuxbackend.New(cmuxcli.NewWithRunnerForTest(f))
 }
 
 func openTestDB(t *testing.T) *store.DB {
@@ -94,7 +96,7 @@ func seedTeamAndContract(t *testing.T, dataRoot, vaultRoot, project, teamSlug, c
 
 	_, cli := okCmuxForTeam()
 	if _, err := teamspawn.Spawn(context.Background(), teamspawn.Opts{
-		DB: db, Cmux: cli, Project: project, Slug: teamSlug,
+		DB: db, Mux: cli, Project: project, Slug: teamSlug,
 		Vision: "seeded for icspawn test", Agent: "claude",
 		VaultRoot: vaultRoot, DataRoot: dataRoot,
 	}); err != nil {
@@ -147,7 +149,7 @@ func TestSpawnHappyPath(t *testing.T) {
 	_, cli := okCmuxForIC()
 
 	r, err := Spawn(context.Background(), Opts{
-		DB: db, Cmux: cli, Project: project,
+		DB: db, Mux: cli, Project: project,
 		Team: team, Slot: "linus-1", Role: "ic-base",
 		Contract: contract, Agent: "claude",
 		VaultRoot: vaultRoot, DataRoot: dataRoot,
@@ -248,7 +250,7 @@ func TestSpawnRejectsBadAgent(t *testing.T) {
 	db := openTestDB(t)
 	_, cli := okCmuxForIC()
 	_, err := Spawn(context.Background(), Opts{
-		DB: db, Cmux: cli, Project: "p", Team: "t", Slot: "s",
+		DB: db, Mux: cli, Project: "p", Team: "t", Slot: "s",
 		Contract: "c", Agent: "bash", VaultRoot: "/v", DataRoot: "/d",
 	})
 	if err == nil {
@@ -263,11 +265,11 @@ func TestSpawnRejectsBadSlugs(t *testing.T) {
 		name string
 		opts Opts
 	}{
-		{"bad-project", Opts{DB: db, Cmux: cli, Project: "../evil", Team: "t", Slot: "s", Contract: "c", Agent: "claude", VaultRoot: "/v", DataRoot: "/d"}},
-		{"bad-team", Opts{DB: db, Cmux: cli, Project: "p", Team: "../evil", Slot: "s", Contract: "c", Agent: "claude", VaultRoot: "/v", DataRoot: "/d"}},
-		{"bad-slot", Opts{DB: db, Cmux: cli, Project: "p", Team: "t", Slot: "../evil", Contract: "c", Agent: "claude", VaultRoot: "/v", DataRoot: "/d"}},
-		{"bad-contract", Opts{DB: db, Cmux: cli, Project: "p", Team: "t", Slot: "s", Contract: "../evil", Agent: "claude", VaultRoot: "/v", DataRoot: "/d"}},
-		{"bad-role", Opts{DB: db, Cmux: cli, Project: "p", Team: "t", Slot: "s", Role: "../evil", Contract: "c", Agent: "claude", VaultRoot: "/v", DataRoot: "/d"}},
+		{"bad-project", Opts{DB: db, Mux: cli, Project: "../evil", Team: "t", Slot: "s", Contract: "c", Agent: "claude", VaultRoot: "/v", DataRoot: "/d"}},
+		{"bad-team", Opts{DB: db, Mux: cli, Project: "p", Team: "../evil", Slot: "s", Contract: "c", Agent: "claude", VaultRoot: "/v", DataRoot: "/d"}},
+		{"bad-slot", Opts{DB: db, Mux: cli, Project: "p", Team: "t", Slot: "../evil", Contract: "c", Agent: "claude", VaultRoot: "/v", DataRoot: "/d"}},
+		{"bad-contract", Opts{DB: db, Mux: cli, Project: "p", Team: "t", Slot: "s", Contract: "../evil", Agent: "claude", VaultRoot: "/v", DataRoot: "/d"}},
+		{"bad-role", Opts{DB: db, Mux: cli, Project: "p", Team: "t", Slot: "s", Role: "../evil", Contract: "c", Agent: "claude", VaultRoot: "/v", DataRoot: "/d"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := Spawn(context.Background(), tc.opts); err == nil {
@@ -281,12 +283,12 @@ func TestSpawnRequiresVaultAndDataRoot(t *testing.T) {
 	db := openTestDB(t)
 	_, cli := okCmuxForIC()
 	if _, err := Spawn(context.Background(), Opts{
-		DB: db, Cmux: cli, Project: "p", Team: "t", Slot: "s", Contract: "c", Agent: "claude", VaultRoot: "", DataRoot: "/d",
+		DB: db, Mux: cli, Project: "p", Team: "t", Slot: "s", Contract: "c", Agent: "claude", VaultRoot: "", DataRoot: "/d",
 	}); err == nil {
 		t.Error("expected error for empty VaultRoot")
 	}
 	if _, err := Spawn(context.Background(), Opts{
-		DB: db, Cmux: cli, Project: "p", Team: "t", Slot: "s", Contract: "c", Agent: "claude", VaultRoot: "/v", DataRoot: "",
+		DB: db, Mux: cli, Project: "p", Team: "t", Slot: "s", Contract: "c", Agent: "claude", VaultRoot: "/v", DataRoot: "",
 	}); err == nil {
 		t.Error("expected error for empty DataRoot")
 	}
@@ -302,7 +304,7 @@ func TestSpawnRejectsMissingTeam(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := Spawn(context.Background(), Opts{
-		DB: db, Cmux: cli, Project: "demo", Team: "ghost", Slot: "s",
+		DB: db, Mux: cli, Project: "demo", Team: "ghost", Slot: "s",
 		Contract: "c1", Agent: "claude", VaultRoot: vaultRoot, DataRoot: dataRoot,
 	})
 	if err == nil || !strings.Contains(err.Error(), "not found") {
@@ -323,7 +325,7 @@ func TestSpawnRejectsInactiveTeam(t *testing.T) {
 	}
 	_, cli := okCmuxForIC()
 	_, err := Spawn(context.Background(), Opts{
-		DB: db, Cmux: cli, Project: "demo", Team: "t1", Slot: "s",
+		DB: db, Mux: cli, Project: "demo", Team: "t1", Slot: "s",
 		Contract: "c1", Agent: "claude", VaultRoot: vaultRoot, DataRoot: dataRoot,
 	})
 	if err == nil || !strings.Contains(err.Error(), "archived") {
@@ -341,7 +343,7 @@ func TestSpawnRejectsMissingContract(t *testing.T) {
 	}
 	_, cli := okCmuxForIC()
 	_, err := Spawn(context.Background(), Opts{
-		DB: db, Cmux: cli, Project: "demo", Team: "t1", Slot: "s",
+		DB: db, Mux: cli, Project: "demo", Team: "t1", Slot: "s",
 		Contract: "missing", Agent: "claude", VaultRoot: vaultRoot, DataRoot: dataRoot,
 	})
 	if err == nil || !strings.Contains(err.Error(), "not found") {
@@ -362,7 +364,7 @@ func TestSpawnRejectsCrossTeamContract(t *testing.T) {
 	}
 	_, cli := okCmuxForIC()
 	_, err := Spawn(context.Background(), Opts{
-		DB: db, Cmux: cli, Project: "demo", Team: "team-a", Slot: "s",
+		DB: db, Mux: cli, Project: "demo", Team: "team-a", Slot: "s",
 		Contract: "c1", Agent: "claude", VaultRoot: vaultRoot, DataRoot: dataRoot,
 	})
 	if err == nil || !strings.Contains(err.Error(), "team-b") {
@@ -383,7 +385,7 @@ func TestSpawnRejectsTerminalContract(t *testing.T) {
 	}
 	_, cli := okCmuxForIC()
 	_, err := Spawn(context.Background(), Opts{
-		DB: db, Cmux: cli, Project: "demo", Team: "t1", Slot: "s",
+		DB: db, Mux: cli, Project: "demo", Team: "t1", Slot: "s",
 		Contract: "c1", Agent: "claude", VaultRoot: vaultRoot, DataRoot: dataRoot,
 	})
 	if err == nil || !strings.Contains(err.Error(), "terminal") {
@@ -407,7 +409,7 @@ func TestSpawnRejectsDuplicateSlot(t *testing.T) {
 	}
 	_, cli := okCmuxForIC()
 	_, err := Spawn(context.Background(), Opts{
-		DB: db, Cmux: cli, Project: "demo", Team: "t1", Slot: "dup",
+		DB: db, Mux: cli, Project: "demo", Team: "t1", Slot: "dup",
 		Contract: "c1", Agent: "claude", VaultRoot: vaultRoot, DataRoot: dataRoot,
 	})
 	if !errors.Is(err, ErrSlotExists) {
@@ -438,7 +440,7 @@ func TestSpawnAllowsRespawnOverDissolvedSlot(t *testing.T) {
 	}
 	_, cli := okCmuxForIC()
 	r, err := Spawn(context.Background(), Opts{
-		DB: db, Cmux: cli, Project: project, Team: team, Slot: "phoenix",
+		DB: db, Mux: cli, Project: project, Team: team, Slot: "phoenix",
 		Contract: contract, Agent: "claude", VaultRoot: vaultRoot, DataRoot: dataRoot,
 	})
 	if err != nil {
@@ -469,7 +471,7 @@ func TestSpawnHCCap(t *testing.T) {
 	}
 	_, cli := okCmuxForIC()
 	_, err := Spawn(context.Background(), Opts{
-		DB: db, Cmux: cli, Project: "demo", Team: "t1", Slot: "overflow",
+		DB: db, Mux: cli, Project: "demo", Team: "t1", Slot: "overflow",
 		Contract: "c1", Agent: "claude", VaultRoot: vaultRoot, DataRoot: dataRoot,
 	})
 	if !errors.Is(err, ErrHCCap) {
@@ -489,7 +491,7 @@ func TestSpawnMissingRoleFile(t *testing.T) {
 	}
 	_, cli := okCmuxForIC()
 	_, err := Spawn(context.Background(), Opts{
-		DB: db, Cmux: cli, Project: "demo", Team: "t1", Slot: "s",
+		DB: db, Mux: cli, Project: "demo", Team: "t1", Slot: "s",
 		Contract: "c1", Agent: "claude", VaultRoot: vaultRoot, DataRoot: dataRoot,
 	})
 	if err == nil || !strings.Contains(err.Error(), "role file") {
@@ -499,13 +501,13 @@ func TestSpawnMissingRoleFile(t *testing.T) {
 
 // okCmuxForDissolve combines IC-spawn outputs with a close-pane ack so a
 // single fake runner can drive spawn+dissolve in one test.
-func okCmuxForDissolve() (*fakeRunner, *cmuxcli.Client) {
+func okCmuxForDissolve() (*fakeRunner, mux.Backend) {
 	f := &fakeRunner{outs: map[string]string{
 		"new-pane":   "OK pane:55\n",
 		"send":       "OK\n",
 		"close-pane": "OK\n",
 	}}
-	return f, cmuxcli.NewWithRunnerForTest(f)
+	return f, cmuxbackend.New(cmuxcli.NewWithRunnerForTest(f))
 }
 
 // failingClosePaneCmux makes the close-pane call return an error so the
@@ -529,12 +531,12 @@ func (r *failingClosePaneRunner) Run(ctx context.Context, args ...string) (strin
 	return "", nil
 }
 
-func cmuxForSpawnButFailingClose() (*failingClosePaneRunner, *cmuxcli.Client) {
+func cmuxForSpawnButFailingClose() (*failingClosePaneRunner, mux.Backend) {
 	f := &failingClosePaneRunner{fakeRunner: &fakeRunner{outs: map[string]string{
 		"new-pane": "OK pane:55\n",
 		"send":     "OK\n",
 	}}}
-	return f, cmuxcli.NewWithRunnerForTest(f)
+	return f, cmuxbackend.New(cmuxcli.NewWithRunnerForTest(f))
 }
 
 func TestDissolveHappyPath(t *testing.T) {
@@ -556,7 +558,7 @@ func TestDissolveHappyPath(t *testing.T) {
 
 	f, cli := okCmuxForDissolve()
 	if _, err := Spawn(context.Background(), Opts{
-		DB: db, Cmux: cli, Project: project, Team: team,
+		DB: db, Mux: cli, Project: project, Team: team,
 		Slot: "linus-1", Role: "ic-base", Contract: contract, Agent: "claude",
 		VaultRoot: vaultRoot, DataRoot: dataRoot,
 	}); err != nil {
@@ -574,7 +576,7 @@ func TestDissolveHappyPath(t *testing.T) {
 	}
 
 	r, err := Dissolve(context.Background(), DissolveOpts{
-		DB: db, Cmux: cli, Slot: "linus-1", By: "manager:" + team,
+		DB: db, Mux: cli, Slot: "linus-1", By: "manager:" + team,
 	})
 	if err != nil {
 		t.Fatalf("Dissolve: %v", err)
@@ -666,20 +668,20 @@ func TestDissolveAllowsRespawnUnderSameID(t *testing.T) {
 
 	_, cli := okCmuxForDissolve()
 	if _, err := Spawn(context.Background(), Opts{
-		DB: db, Cmux: cli, Project: project, Team: team,
+		DB: db, Mux: cli, Project: project, Team: team,
 		Slot: "phoenix", Role: "ic-base", Contract: contract, Agent: "claude",
 		VaultRoot: vaultRoot, DataRoot: dataRoot,
 	}); err != nil {
 		t.Fatalf("first Spawn: %v", err)
 	}
-	if _, err := Dissolve(context.Background(), DissolveOpts{DB: db, Cmux: cli, Slot: "phoenix"}); err != nil {
+	if _, err := Dissolve(context.Background(), DissolveOpts{DB: db, Mux: cli, Slot: "phoenix"}); err != nil {
 		t.Fatalf("Dissolve: %v", err)
 	}
 	// Respawn under the same id — the dissolved tombstone is overwritable
 	// (already tested in TestSpawnAllowsRespawnOverDissolvedSlot) AND the
 	// fresh spawn re-creates the inbox bucket.
 	r2, err := Spawn(context.Background(), Opts{
-		DB: db, Cmux: cli, Project: project, Team: team,
+		DB: db, Mux: cli, Project: project, Team: team,
 		Slot: "phoenix", Role: "ic-base", Contract: contract, Agent: "claude",
 		VaultRoot: vaultRoot, DataRoot: dataRoot,
 	})
@@ -702,7 +704,7 @@ func TestDissolveAllowsRespawnUnderSameID(t *testing.T) {
 func TestDissolveRejectsMissingSlot(t *testing.T) {
 	db := openTestDB(t)
 	_, cli := okCmuxForDissolve()
-	_, err := Dissolve(context.Background(), DissolveOpts{DB: db, Cmux: cli, Slot: "ghost"})
+	_, err := Dissolve(context.Background(), DissolveOpts{DB: db, Mux: cli, Slot: "ghost"})
 	if !errors.Is(err, ErrSlotNotFound) {
 		t.Errorf("err = %v, want ErrSlotNotFound", err)
 	}
@@ -720,7 +722,7 @@ func TestDissolveRejectsAlreadyDissolved(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	_, err := Dissolve(context.Background(), DissolveOpts{DB: db, Cmux: cli, Slot: "tombstone"})
+	_, err := Dissolve(context.Background(), DissolveOpts{DB: db, Mux: cli, Slot: "tombstone"})
 	if !errors.Is(err, ErrAlreadyDissolved) {
 		t.Errorf("err = %v, want ErrAlreadyDissolved", err)
 	}
@@ -745,7 +747,7 @@ func TestDissolveRejectsContractInFlight(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			_, err := Dissolve(context.Background(), DissolveOpts{DB: db, Cmux: cli, Slot: sid})
+			_, err := Dissolve(context.Background(), DissolveOpts{DB: db, Mux: cli, Slot: sid})
 			if !errors.Is(err, ErrContractInFlight) {
 				t.Errorf("state=%s: err = %v, want ErrContractInFlight", state, err)
 			}
@@ -777,7 +779,7 @@ func TestDissolveAllowsBlockedContract(t *testing.T) {
 
 	_, cli := okCmuxForDissolve()
 	if _, err := Spawn(context.Background(), Opts{
-		DB: db, Cmux: cli, Project: project, Team: team,
+		DB: db, Mux: cli, Project: project, Team: team,
 		Slot: "stuck-slot", Role: "ic-base", Contract: contract, Agent: "claude",
 		VaultRoot: vaultRoot, DataRoot: dataRoot,
 	}); err != nil {
@@ -793,7 +795,7 @@ func TestDissolveAllowsBlockedContract(t *testing.T) {
 	if err := db.TransitionContract(contract, store.ContractBlocked, "ic", "dep gap"); err != nil {
 		t.Fatalf("transition blocked: %v", err)
 	}
-	if _, err := Dissolve(context.Background(), DissolveOpts{DB: db, Cmux: cli, Slot: "stuck-slot"}); err != nil {
+	if _, err := Dissolve(context.Background(), DissolveOpts{DB: db, Mux: cli, Slot: "stuck-slot"}); err != nil {
 		t.Errorf("dissolve over blocked contract: %v (want nil — blocked is dissolvable)", err)
 	}
 }
@@ -817,14 +819,14 @@ func TestDissolveSurvivesPaneCloseFailure(t *testing.T) {
 
 	_, cli := cmuxForSpawnButFailingClose()
 	if _, err := Spawn(context.Background(), Opts{
-		DB: db, Cmux: cli, Project: project, Team: team,
+		DB: db, Mux: cli, Project: project, Team: team,
 		Slot: "zombie", Role: "ic-base", Contract: contract, Agent: "claude",
 		VaultRoot: vaultRoot, DataRoot: dataRoot,
 	}); err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
 
-	r, err := Dissolve(context.Background(), DissolveOpts{DB: db, Cmux: cli, Slot: "zombie"})
+	r, err := Dissolve(context.Background(), DissolveOpts{DB: db, Mux: cli, Slot: "zombie"})
 	if err != nil {
 		t.Fatalf("Dissolve with failing close-pane: %v (want nil — state is SoT, pane close is best-effort)", err)
 	}
@@ -856,7 +858,7 @@ func TestDissolveSurvivesPaneCloseFailure(t *testing.T) {
 func TestDissolveRejectsBadSlug(t *testing.T) {
 	db := openTestDB(t)
 	_, cli := okCmuxForDissolve()
-	_, err := Dissolve(context.Background(), DissolveOpts{DB: db, Cmux: cli, Slot: "../evil"})
+	_, err := Dissolve(context.Background(), DissolveOpts{DB: db, Mux: cli, Slot: "../evil"})
 	if err == nil {
 		t.Error("expected validation error for bad slug")
 	}
@@ -883,7 +885,7 @@ func TestDissolveDecrementsHCMultipleSlots(t *testing.T) {
 	_, cli := okCmuxForDissolve()
 	for _, slotID := range []string{"a", "b"} {
 		if _, err := Spawn(context.Background(), Opts{
-			DB: db, Cmux: cli, Project: project, Team: team,
+			DB: db, Mux: cli, Project: project, Team: team,
 			Slot: slotID, Role: "ic-base", Contract: contract, Agent: "claude",
 			VaultRoot: vaultRoot, DataRoot: dataRoot,
 		}); err != nil {
@@ -894,7 +896,7 @@ func TestDissolveDecrementsHCMultipleSlots(t *testing.T) {
 	if pre.HC != 2 {
 		t.Fatalf("pre-dissolve HC = %d, want 2", pre.HC)
 	}
-	r, err := Dissolve(context.Background(), DissolveOpts{DB: db, Cmux: cli, Slot: "a"})
+	r, err := Dissolve(context.Background(), DissolveOpts{DB: db, Mux: cli, Slot: "a"})
 	if err != nil {
 		t.Fatalf("Dissolve a: %v", err)
 	}
@@ -931,7 +933,7 @@ func TestSpawnSendsBootstrapIntoPane(t *testing.T) {
 
 	f, cli := okCmuxForIC()
 	if _, err := Spawn(context.Background(), Opts{
-		DB: db, Cmux: cli, Project: project, Team: team, Slot: "watcher",
+		DB: db, Mux: cli, Project: project, Team: team, Slot: "watcher",
 		Contract: contract, Agent: "claude", VaultRoot: vaultRoot, DataRoot: dataRoot,
 	}); err != nil {
 		t.Fatalf("Spawn: %v", err)

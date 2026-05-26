@@ -19,6 +19,9 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.Tmux.DefaultSession != "agents" {
 		t.Errorf("DefaultSession = %q, want %q", cfg.Tmux.DefaultSession, "agents")
 	}
+	if cfg.Mux.Backend != "cmux" {
+		t.Errorf("Mux.Backend default = %q, want %q", cfg.Mux.Backend, "cmux")
+	}
 	if cfg.Hooks.AutoInstall != true {
 		t.Error("AutoInstall should default to true")
 	}
@@ -227,4 +230,47 @@ func TestPulse_DisableLeavesOtherFieldsParseable(t *testing.T) {
 	if pp.Cadence.Elon != 30*time.Second {
 		t.Errorf("Elon cadence dropped on disable: %v", pp.Cadence.Elon)
 	}
+}
+
+func TestLoad_MuxBackend(t *testing.T) {
+	t.Run("explicit tmux", func(t *testing.T) {
+		dir := t.TempDir()
+		p := filepath.Join(dir, "config.toml")
+		if err := os.WriteFile(p, []byte("[mux]\nbackend = \"tmux\"\n"), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		cfg, err := Load(p)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Mux.Backend != "tmux" {
+			t.Errorf("Mux.Backend = %q, want %q", cfg.Mux.Backend, "tmux")
+		}
+	})
+
+	t.Run("no [mux] section defaults to cmux", func(t *testing.T) {
+		dir := t.TempDir()
+		p := filepath.Join(dir, "config.toml")
+		if err := os.WriteFile(p, []byte("[daemon]\nsocket = \"/tmp/x.sock\"\n"), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		cfg, err := Load(p)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Mux.Backend != "cmux" {
+			t.Errorf("Mux.Backend = %q, want default cmux", cfg.Mux.Backend)
+		}
+	})
+
+	t.Run("unknown backend is rejected", func(t *testing.T) {
+		dir := t.TempDir()
+		p := filepath.Join(dir, "config.toml")
+		if err := os.WriteFile(p, []byte("[mux]\nbackend = \"bogus\"\n"), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if _, err := Load(p); err == nil {
+			t.Fatal("expected error on unknown backend, got nil")
+		}
+	})
 }

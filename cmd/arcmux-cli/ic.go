@@ -13,6 +13,8 @@ import (
 	"github.com/lin-labs/arcmux/internal/manager/icspawn"
 	"github.com/lin-labs/arcmux/internal/manager/paths"
 	"github.com/lin-labs/arcmux/internal/manager/store"
+	"github.com/lin-labs/arcmux/internal/mux"
+	cmuxbackend "github.com/lin-labs/arcmux/internal/mux/cmux"
 )
 
 // cmdIC dispatches `arcmux-cli ic <sub>`. Mirrors cmdTeam's shape: the
@@ -25,20 +27,20 @@ func cmdIC(args []string, stdout io.Writer) error {
 	}
 	switch args[0] {
 	case "spawn":
-		return cmdICSpawn(args[1:], stdout, cmuxcli.New())
+		return cmdICSpawn(args[1:], stdout, cmuxbackend.New(cmuxcli.New()))
 	case "list":
 		return cmdICList(args[1:], stdout)
 	case "get":
 		return cmdICGet(args[1:], stdout)
 	case "dissolve":
-		return cmdICDissolve(args[1:], stdout, cmuxcli.New())
+		return cmdICDissolve(args[1:], stdout, cmuxbackend.New(cmuxcli.New()))
 	default:
 		return fmt.Errorf("unknown ic subcommand %q (want spawn|list|get|dissolve)", args[0])
 	}
 }
 
 // cmdICSpawn handles `arcmux-cli ic spawn`.
-func cmdICSpawn(args []string, stdout io.Writer, cli *cmuxcli.Client) error {
+func cmdICSpawn(args []string, stdout io.Writer, backend mux.Backend) error {
 	fs := flag.NewFlagSet("ic spawn", flag.ContinueOnError)
 	team := fs.String("team", os.Getenv("ARCMUX_TEAM"), "owning team slug (required; default $ARCMUX_TEAM)")
 	slot := fs.String("slot", "", "unique slot id within the project (required, validated as slug)")
@@ -88,7 +90,7 @@ func cmdICSpawn(args []string, stdout io.Writer, cli *cmuxcli.Client) error {
 
 	r, err := icspawn.Spawn(context.Background(), icspawn.Opts{
 		DB:        db,
-		Cmux:      cli,
+		Mux:       backend,
 		Project:   *project,
 		Team:      *team,
 		Slot:      *slot,
@@ -194,10 +196,11 @@ func cmdICGet(args []string, stdout io.Writer) error {
 	return json.NewEncoder(stdout).Encode(map[string]any{"slot": got})
 }
 
-// cmdICDissolve handles `arcmux-cli ic dissolve --slot <id>`. The cmux
-// client is injectable for the same reason cmdICSpawn's is: unit tests
-// fake-runner-back the close-pane call, production threads cmuxcli.New().
-func cmdICDissolve(args []string, stdout io.Writer, cli *cmuxcli.Client) error {
+// cmdICDissolve handles `arcmux-cli ic dissolve --slot <id>`. The mux
+// backend is injectable for the same reason cmdICSpawn's is: unit tests
+// fake-runner-back the close-pane call, production threads through
+// cmuxbackend.New(cmuxcli.New()).
+func cmdICDissolve(args []string, stdout io.Writer, backend mux.Backend) error {
 	fs := flag.NewFlagSet("ic dissolve", flag.ContinueOnError)
 	slot := fs.String("slot", "", "slot id to dissolve (required, validated as slug)")
 	by := fs.String("by", defaultActor(), "actor recording the dissolve (default $ARCMUX_ROLE or 'arcmux-cli')")
@@ -226,7 +229,7 @@ func cmdICDissolve(args []string, stdout io.Writer, cli *cmuxcli.Client) error {
 	defer db.Close()
 
 	r, err := icspawn.Dissolve(context.Background(), icspawn.DissolveOpts{
-		DB: db, Cmux: cli, Slot: *slot, By: *by,
+		DB: db, Mux: backend, Slot: *slot, By: *by,
 	})
 	if err != nil {
 		return fmt.Errorf("ic dissolve: %w", err)

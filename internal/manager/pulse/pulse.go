@@ -21,7 +21,7 @@
 //     all of those. Auditing the failure is the durable record; the next
 //     tick will retry.
 //   - The wake target is a cmux pane ref. icspawn.go already calls
-//     `Cmux.Send(ctx, slot.PaneRef, …)`, so the same target works here.
+//     `Mux.Send(ctx, slot.PaneRef, …)`, so the same target works here.
 package pulse
 
 import (
@@ -32,8 +32,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lin-labs/arcmux/internal/manager/cmuxcli"
 	"github.com/lin-labs/arcmux/internal/manager/store"
+	"github.com/lin-labs/arcmux/internal/mux"
 )
 
 // Cadence holds per-role review intervals. A wake fires for a target when
@@ -88,7 +88,7 @@ type state struct {
 type Pulser struct {
 	Project string
 	DB      *store.DB
-	Cmux    *cmuxcli.Client
+	Mux     mux.Backend
 	Cadence Cadence
 	Now     func() time.Time
 	Log     *slog.Logger
@@ -98,11 +98,11 @@ type Pulser struct {
 }
 
 // New constructs a Pulser with default cadence and time sources.
-func New(project string, db *store.DB, c *cmuxcli.Client) *Pulser {
+func New(project string, db *store.DB, m mux.Backend) *Pulser {
 	return &Pulser{
 		Project: project,
 		DB:      db,
-		Cmux:    c,
+		Mux:     m,
 		Cadence: DefaultCadence(),
 		Now:     time.Now,
 		Log:     slog.Default(),
@@ -327,7 +327,7 @@ func (p *Pulser) evaluate(ctx context.Context, tg Target, now time.Time) Decisio
 	body := buildWakeBody(tg, depth, now.Sub(last))
 	d.WakePromptOK = body
 
-	if err := p.Cmux.Send(ctx, tg.PaneRef, body); err != nil {
+	if err := p.Mux.Send(ctx, tg.PaneRef, body); err != nil {
 		d.WakeError = err.Error()
 		// Leave LastInboxDepth and LastWakeAt unchanged — the wake didn't
 		// land, so the next tick should re-evaluate against the same

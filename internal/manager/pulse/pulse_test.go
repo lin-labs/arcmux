@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/lin-labs/arcmux/internal/manager/cmuxcli"
+	"github.com/lin-labs/arcmux/internal/mux"
+	cmuxbackend "github.com/lin-labs/arcmux/internal/mux/cmux"
 	"github.com/lin-labs/arcmux/internal/manager/store"
 )
 
@@ -76,7 +78,7 @@ func (f *fakeRunner) lastBodyTo(target string) string {
 	return ""
 }
 
-func setup(t *testing.T) (*store.DB, *cmuxcli.Client, *fakeRunner, *fakeClock, *Pulser) {
+func setup(t *testing.T) (*store.DB, mux.Backend, *fakeRunner, *fakeClock, *Pulser) {
 	t.Helper()
 	dir := t.TempDir()
 	db, err := store.Open(filepath.Join(dir, "state.bolt"))
@@ -86,14 +88,14 @@ func setup(t *testing.T) (*store.DB, *cmuxcli.Client, *fakeRunner, *fakeClock, *
 	t.Cleanup(func() { _ = db.Close() })
 
 	fr := &fakeRunner{}
-	cli := cmuxcli.NewWithRunnerForTest(fr)
+	backend := cmuxbackend.New(cmuxcli.NewWithRunnerForTest(fr))
 	clk := newFakeClock(time.Date(2026, 5, 25, 4, 0, 0, 0, time.UTC))
 
-	p := New("arcmux-test", db, cli)
+	p := New("arcmux-test", db, backend)
 	p.Now = clk.Now
 	// Tight cadences make the test fast and assertable.
 	p.Cadence = Cadence{Elon: 100 * time.Millisecond, Manager: 50 * time.Millisecond, IC: 25 * time.Millisecond}
-	return db, cli, fr, clk, p
+	return db, backend, fr, clk, p
 }
 
 func seedElon(t *testing.T, db *store.DB, paneRef string) {

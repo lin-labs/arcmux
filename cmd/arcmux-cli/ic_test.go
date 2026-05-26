@@ -14,6 +14,8 @@ import (
 	"github.com/lin-labs/arcmux/internal/manager/icspawn"
 	"github.com/lin-labs/arcmux/internal/manager/store"
 	"github.com/lin-labs/arcmux/internal/manager/teamspawn"
+	"github.com/lin-labs/arcmux/internal/mux"
+	cmuxbackend "github.com/lin-labs/arcmux/internal/mux/cmux"
 )
 
 // icFakeRunner answers both team-spawn AND ic-spawn cmux calls so a single
@@ -36,13 +38,13 @@ func (f *icFakeRunner) Run(_ context.Context, args ...string) (string, error) {
 	return "", nil
 }
 
-func newICCmux() *cmuxcli.Client {
-	return cmuxcli.NewWithRunnerForTest(&icFakeRunner{outs: map[string]string{
+func newICCmux() mux.Backend {
+	return cmuxbackend.New(cmuxcli.NewWithRunnerForTest(&icFakeRunner{outs: map[string]string{
 		"new-workspace": "OK workspace:cli-7\n",
 		"list-panes":    `{"workspace_ref":"workspace:cli-7","panes":[{"ref":"pane:cli-mgr","index":0,"focused":true,"surface_refs":["surface:s1"]}]}`,
 		"new-pane":      "OK pane:cli-9\n",
 		"close-pane":    "OK\n",
-	}})
+	}}))
 }
 
 // writeICRoleFile drops ic-base.md (or whatever) into the test vault so
@@ -69,7 +71,7 @@ func preseedTeamAndContract(t *testing.T, dataRoot, vault, project, teamSlug, co
 	}
 	defer db.Close()
 	if _, err := teamspawn.Spawn(context.Background(), teamspawn.Opts{
-		DB: db, Cmux: newICCmux(), Project: project, Slug: teamSlug,
+		DB: db, Mux: newICCmux(), Project: project, Slug: teamSlug,
 		Vision: "seeded for ic-cli", Agent: "claude",
 		VaultRoot: vault, DataRoot: dataRoot,
 	}); err != nil {
@@ -94,7 +96,7 @@ func preseedSlot(t *testing.T, dataRoot, vault, project, team, slot, contract st
 	}
 	defer db.Close()
 	if _, err := icspawn.Spawn(context.Background(), icspawn.Opts{
-		DB: db, Cmux: newICCmux(), Project: project, Team: team,
+		DB: db, Mux: newICCmux(), Project: project, Team: team,
 		Slot: slot, Role: "ic-base", Contract: contract, Agent: "claude",
 		VaultRoot: vault, DataRoot: dataRoot,
 	}); err != nil {

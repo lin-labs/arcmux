@@ -116,6 +116,25 @@ func (c *Client) KillPane(ctx context.Context, target string) error {
 	return err
 }
 
+// KillSession terminates a session by name.
+func (c *Client) KillSession(ctx context.Context, session string) error {
+	_, err := c.run(ctx, "kill-session", "-t", session)
+	return err
+}
+
+// SelectPane brings target to the foreground.
+func (c *Client) SelectPane(ctx context.Context, target string) error {
+	_, err := c.run(ctx, "select-pane", "-t", target)
+	return err
+}
+
+// ListPanesRaw returns one tab-delimited line per pane in the given session
+// in the form: <pane_id>\t<window_index>\t<pane_active>.
+func (c *Client) ListPanesRaw(ctx context.Context, session string) (string, error) {
+	return c.run(ctx, "list-panes", "-s", "-t", session,
+		"-F", "#{pane_id}\t#{window_index}\t#{pane_active}")
+}
+
 // PipePaneStart begins piping pane output to a file.
 func (c *Client) PipePaneStart(ctx context.Context, target, outputFile string) error {
 	_, err := c.run(ctx, "pipe-pane", "-t", target, "-o",

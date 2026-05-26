@@ -23,10 +23,10 @@ import (
 	"time"
 
 	"github.com/lin-labs/arcmux/internal/manager/bootstrap"
-	"github.com/lin-labs/arcmux/internal/manager/cmuxcli"
 	"github.com/lin-labs/arcmux/internal/manager/paths"
 	"github.com/lin-labs/arcmux/internal/manager/scratchpad"
 	"github.com/lin-labs/arcmux/internal/manager/store"
+	"github.com/lin-labs/arcmux/internal/mux"
 )
 
 // ErrTeamExists is returned when a team with the requested slug already
@@ -36,22 +36,22 @@ var ErrTeamExists = errors.New("team already exists")
 
 // Opts configure Spawn.
 type Opts struct {
-	DB        *store.DB       // open project store; caller owns Close
-	Cmux      *cmuxcli.Client // cmux client (real or fakeRunner-backed)
-	Project   string          // project slug
-	Slug      string          // team slug
-	Vision    string          // free-text mission for the team
-	Agent     string          // "claude" | "codex"
-	VaultRoot string          // $OBS_AGENTS
-	DataRoot  string          // ~/data
-	Focus     bool            // focus the new cmux workspace
+	DB        *store.DB   // open project store; caller owns Close
+	Mux       mux.Backend // configured multiplexer backend (cmux or tmux)
+	Project   string      // project slug
+	Slug      string      // team slug
+	Vision    string      // free-text mission for the team
+	Agent     string      // "claude" | "codex"
+	VaultRoot string      // $OBS_AGENTS
+	DataRoot  string      // ~/data
+	Focus     bool        // focus the new group
 }
 
 // Result returns the artifacts created by Spawn.
 type Result struct {
 	Team           store.Team
-	Workspace      cmuxcli.Workspace
-	ManagerPane    cmuxcli.Pane
+	Group          mux.Group
+	ManagerPane    mux.Pane
 	BootstrapPath  string
 	ScratchpadPath string
 	CharterPath    string
@@ -65,8 +65,8 @@ func Spawn(ctx context.Context, o Opts) (*Result, error) {
 	if o.DB == nil {
 		return nil, fmt.Errorf("Spawn: DB required")
 	}
-	if o.Cmux == nil {
-		return nil, fmt.Errorf("Spawn: Cmux required")
+	if o.Mux == nil {
+		return nil, fmt.Errorf("Spawn: Mux required")
 	}
 	if o.Agent != "claude" && o.Agent != "codex" {
 		return nil, fmt.Errorf("unsupported agent %q (want claude or codex)", o.Agent)
@@ -172,11 +172,11 @@ func Spawn(ctx context.Context, o Opts) (*Result, error) {
 		return nil, fmt.Errorf("bootstrap render: %w", err)
 	}
 
-	// 4. Create the cmux workspace. Name convention "team: <slug>" mirrors
-	// the manager-launch "elon: <project>" convention so cmux users can
-	// scan workspaces by purpose.
+	// 4. Create the mux group. Name convention "team: <slug>" mirrors
+	// the manager-launch "elon: <project>" convention so users can scan
+	// groups by purpose.
 	wsName := "team: " + slug
-	ws, err := o.Cmux.NewWorkspace(ctx, cmuxcli.NewWorkspaceOptions{
+	group, err := o.Mux.NewGroup(ctx, mux.GroupOptions{
 		Name:        wsName,
 		Description: "arcmux manager pane for team " + slug + " (project " + o.Project + ")",
 		CWD:         pp.VaultRoot,
@@ -184,15 +184,15 @@ func Spawn(ctx context.Context, o Opts) (*Result, error) {
 		Focus:       o.Focus,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("cmux new-workspace: %w", err)
+		return nil, fmt.Errorf("mux new-group: %w", err)
 	}
 
-	panes, err := o.Cmux.ListPanes(ctx, ws.Ref)
+	panes, err := o.Mux.ListPanes(ctx, group.Ref)
 	if err != nil {
-		return nil, fmt.Errorf("cmux list-panes: %w", err)
+		return nil, fmt.Errorf("mux list-panes: %w", err)
 	}
 	if len(panes) == 0 {
-		return nil, fmt.Errorf("workspace %s has no panes after creation", ws.Ref)
+		return nil, fmt.Errorf("group %s has no panes after creation", group.Ref)
 	}
 	managerPane := panes[0]
 
@@ -204,7 +204,7 @@ func Spawn(ctx context.Context, o Opts) (*Result, error) {
 		State:        store.TeamActive,
 		HC:           0,
 		TargetHC:     0,
-		WorkspaceRef: ws.Ref,
+		WorkspaceRef: group.Ref,
 		ManagerPane:  managerPane.Ref,
 		CreatedAt:    startedAt,
 		UpdatedAt:    startedAt,
@@ -247,7 +247,7 @@ func Spawn(ctx context.Context, o Opts) (*Result, error) {
 		Subject:   slug,
 		Detail: map[string]any{
 			"agent":           o.Agent,
-			"workspace_ref":   ws.Ref,
+			"workspace_ref":   group.Ref,
 			"manager_pane":    managerPane.Ref,
 			"bootstrap_path":  bootstrapPath,
 			"scratchpad_path": spPath,
@@ -260,7 +260,7 @@ func Spawn(ctx context.Context, o Opts) (*Result, error) {
 
 	return &Result{
 		Team:           team,
-		Workspace:      ws,
+		Group:          group,
 		ManagerPane:    managerPane,
 		BootstrapPath:  bootstrapPath,
 		ScratchpadPath: spPath,

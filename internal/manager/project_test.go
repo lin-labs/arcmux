@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/lin-labs/arcmux/internal/manager/cmuxcli"
+	cmuxbackend "github.com/lin-labs/arcmux/internal/mux/cmux"
 )
 
 type fakeRunner struct {
@@ -40,7 +41,7 @@ func TestStartCreatesWorkspaceAndPane(t *testing.T) {
 	vault := t.TempDir()
 
 	f := okCmux()
-	cli := cmuxcli.NewWithRunnerForTest(f)
+	backend := cmuxbackend.New(cmuxcli.NewWithRunnerForTest(f))
 
 	p, err := Start(context.Background(), Options{
 		Agent:     "claude",
@@ -49,7 +50,7 @@ func TestStartCreatesWorkspaceAndPane(t *testing.T) {
 		Command:   "claude --some-flag",
 		DataRoot:  dataRoot,
 		VaultRoot: vault,
-		Cmux:      cli,
+		Mux:       backend,
 	})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
@@ -59,8 +60,8 @@ func TestStartCreatesWorkspaceAndPane(t *testing.T) {
 	if p.ElonPane.Ref != "pane:7" {
 		t.Errorf("ElonPane.Ref = %q, want pane:7", p.ElonPane.Ref)
 	}
-	if p.Workspace.Ref != "workspace:1" {
-		t.Errorf("Workspace.Ref = %q, want workspace:1", p.Workspace.Ref)
+	if p.Group.Ref != "workspace:1" {
+		t.Errorf("Group.Ref = %q, want workspace:1", p.Group.Ref)
 	}
 	if p.BootstrapPath == "" {
 		t.Error("BootstrapPath empty")
@@ -126,7 +127,7 @@ func TestStartSeedsMissionInboxAndScratchpad(t *testing.T) {
 		Command:   "claude",
 		DataRoot:  dataRoot,
 		VaultRoot: vault,
-		Cmux:      cmuxcli.NewWithRunnerForTest(okCmux()),
+		Mux:       cmuxbackend.New(cmuxcli.NewWithRunnerForTest(okCmux())),
 	})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
@@ -235,7 +236,7 @@ func TestStartEmptyMissionSkipsInboxPush(t *testing.T) {
 				Command:   "claude",
 				DataRoot:  dataRoot,
 				VaultRoot: vault,
-				Cmux:      cmuxcli.NewWithRunnerForTest(okCmux()),
+				Mux:       cmuxbackend.New(cmuxcli.NewWithRunnerForTest(okCmux())),
 			})
 			if err != nil {
 				t.Fatalf("Start: %v", err)
@@ -296,7 +297,7 @@ func TestStartE2EArcmuxCallReadback(t *testing.T) {
 		Command:   "claude",
 		DataRoot:  dataRoot,
 		VaultRoot: vault,
-		Cmux:      cmuxcli.NewWithRunnerForTest(okCmux()),
+		Mux:       cmuxbackend.New(cmuxcli.NewWithRunnerForTest(okCmux())),
 	})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
@@ -373,7 +374,7 @@ func TestStartRejectsBadProject(t *testing.T) {
 		Project:   "../evil",
 		DataRoot:  t.TempDir(),
 		VaultRoot: t.TempDir(),
-		Cmux:      cmuxcli.NewWithRunnerForTest(&fakeRunner{}),
+		Mux:       cmuxbackend.New(cmuxcli.NewWithRunnerForTest(&fakeRunner{})),
 	})
 	if err == nil {
 		t.Error("expected error for invalid project slug")
@@ -385,7 +386,7 @@ func TestStartRequiresVault(t *testing.T) {
 		Agent:    "claude",
 		Project:  "demo",
 		DataRoot: t.TempDir(),
-		Cmux:     cmuxcli.NewWithRunnerForTest(&fakeRunner{}),
+		Mux:      cmuxbackend.New(cmuxcli.NewWithRunnerForTest(&fakeRunner{})),
 	})
 	if err == nil {
 		t.Error("expected error when VaultRoot is empty")
@@ -397,7 +398,7 @@ func TestStartRequiresAgent(t *testing.T) {
 		Project:   "demo",
 		DataRoot:  t.TempDir(),
 		VaultRoot: t.TempDir(),
-		Cmux:      cmuxcli.NewWithRunnerForTest(&fakeRunner{}),
+		Mux:       cmuxbackend.New(cmuxcli.NewWithRunnerForTest(&fakeRunner{})),
 	})
 	if err == nil {
 		t.Error("expected error when Agent is empty")

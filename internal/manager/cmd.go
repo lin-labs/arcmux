@@ -7,6 +7,9 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/lin-labs/arcmux/internal/manager/cmuxcli"
+	cmuxbackend "github.com/lin-labs/arcmux/internal/mux/cmux"
 )
 
 // CmdManager parses args and runs the manager-mode launcher.
@@ -38,6 +41,11 @@ func CmdManager(ctx context.Context, args []string, stdout io.Writer) error {
 	}
 	agent, project := positional[0], positional[1]
 
+	// CmdManager is a CLI shim — it has no config layer, so default to the
+	// cmux backend (historical behavior). The daemon's main constructs a
+	// backend from [mux] config via muxbuild.New.
+	backend := cmuxbackend.New(cmuxcli.New())
+
 	p, err := Start(ctx, Options{
 		Agent:     agent,
 		Project:   project,
@@ -45,6 +53,7 @@ func CmdManager(ctx context.Context, args []string, stdout io.Writer) error {
 		Command:   *command,
 		DataRoot:  *dataRoot,
 		VaultRoot: *vaultRoot,
+		Mux:       backend,
 		Focus:     *focus,
 	})
 	if err != nil {
@@ -52,8 +61,8 @@ func CmdManager(ctx context.Context, args []string, stdout io.Writer) error {
 	}
 	defer p.Close()
 
-	fmt.Fprintf(stdout, "manager mode started: project=%s agent=%s workspace=%s pane=%s\n",
-		p.Paths.Project, p.Opts.Agent, p.Workspace.Ref, p.ElonPane.Ref)
+	fmt.Fprintf(stdout, "manager mode started: project=%s agent=%s group=%s pane=%s\n",
+		p.Paths.Project, p.Opts.Agent, p.Group.Ref, p.ElonPane.Ref)
 	fmt.Fprintf(stdout, "bootstrap script: %s\n", p.BootstrapPath)
 	fmt.Fprintf(stdout, "scratchpad:       %s\n", p.ScratchpadPath)
 	return nil

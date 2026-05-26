@@ -13,7 +13,9 @@ import (
 	"time"
 
 	"github.com/lin-labs/arcmux/internal/manager"
+	"github.com/lin-labs/arcmux/internal/manager/cmuxcli"
 	"github.com/lin-labs/arcmux/internal/manager/pulse"
+	cmuxbackend "github.com/lin-labs/arcmux/internal/mux/cmux"
 )
 
 // cmdPulse is a DEBUG SHIM. The canonical pulse runtime now lives inside
@@ -75,7 +77,10 @@ func cmdPulse(args []string) error {
 	}
 	defer p.Close()
 
-	pp := pulse.New(*project, p.DB, p.Opts.Cmux)
+	// Debug shim: default to the cmux backend. Production callers use the
+	// daemon's PulseSupervisor, which honors [mux] backend config.
+	backend := cmuxbackend.New(cmuxcli.New())
+	pp := pulse.New(*project, p.DB, backend)
 	pp.Log = logger
 
 	if *once {

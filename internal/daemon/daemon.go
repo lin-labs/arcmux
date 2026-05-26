@@ -16,8 +16,9 @@ import (
 	"github.com/lin-labs/arcmux/internal/delivery"
 	"github.com/lin-labs/arcmux/internal/health"
 	"github.com/lin-labs/arcmux/internal/hooks"
-	"github.com/lin-labs/arcmux/internal/manager/cmuxcli"
 	"github.com/lin-labs/arcmux/internal/manager/store"
+	"github.com/lin-labs/arcmux/internal/mux"
+	"github.com/lin-labs/arcmux/internal/muxbuild"
 	"github.com/lin-labs/arcmux/internal/profile"
 	"github.com/lin-labs/arcmux/internal/session"
 	"github.com/lin-labs/arcmux/internal/tmux"
@@ -28,6 +29,7 @@ import (
 type Daemon struct {
 	cfg      *config.Config
 	tmux     *tmux.Client
+	mux      mux.Backend
 	hooks    *hooks.Installer
 	watcher  *hooks.Watcher
 	profiles map[string]profile.Profile
@@ -65,9 +67,20 @@ func New(cfg *config.Config, logger *slog.Logger) *Daemon {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	// Pick the configured backend. Falls back to cmux silently if Validate
+	// missed something (defense-in-depth — config.Load already validates).
+	backend, err := muxbuild.New(cfg)
+	if err != nil {
+		logger.Error("mux backend init failed; falling back to cmux", "error", err)
+		backend, _ = muxbuild.New(&config.Config{
+			Mux:  config.MuxConfig{Backend: "cmux"},
+			Tmux: cfg.Tmux,
+		})
+	}
 	return &Daemon{
 		cfg:          cfg,
 		tmux:         tmux.NewClient(cfg.Tmux.SocketName),
+		mux:          backend,
 		hooks:        hooks.NewInstaller(cfg.Hooks.HookOutputDir),
 		watcher:      hooks.NewWatcher(cfg.Hooks.HookOutputDir, logger),
 		profiles:     cfg.Agents,
@@ -139,7 +152,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 		return fmt.Errorf("pulse config: %w", err)
 	}
 	if pcfg.Enabled {
-		d.pulse = NewPulseSupervisor(pcfg, cmuxcli.New(), d.logger)
+		d.pulse = NewPulseSupervisor(pcfg, d.mux, d.logger)
 		go func() {
 			if err := d.pulse.Run(d.ctx); err != nil && err != context.Canceled {
 				d.logger.Error("pulse supervisor exited", "error", err)

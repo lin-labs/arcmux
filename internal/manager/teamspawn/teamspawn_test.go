@@ -12,6 +12,8 @@ import (
 	"github.com/lin-labs/arcmux/internal/manager/cmuxcli"
 	"github.com/lin-labs/arcmux/internal/manager/paths"
 	"github.com/lin-labs/arcmux/internal/manager/store"
+	"github.com/lin-labs/arcmux/internal/mux"
+	cmuxbackend "github.com/lin-labs/arcmux/internal/mux/cmux"
 )
 
 // fakeRunner mirrors the in-process fake used by manager/project_test.go.
@@ -32,12 +34,12 @@ func (f *fakeRunner) Run(_ context.Context, args ...string) (string, error) {
 	return "", nil
 }
 
-func okCmux() (*fakeRunner, *cmuxcli.Client) {
+func okCmux() (*fakeRunner, mux.Backend) {
 	f := &fakeRunner{outs: map[string]string{
 		"new-workspace": "OK workspace:42\n",
 		"list-panes":    `{"workspace_ref":"workspace:42","panes":[{"ref":"pane:11","index":0,"focused":true,"surface_refs":["surface:9"]}]}`,
 	}}
-	return f, cmuxcli.NewWithRunnerForTest(f)
+	return f, cmuxbackend.New(cmuxcli.NewWithRunnerForTest(f))
 }
 
 func openTestDB(t *testing.T) *store.DB {
@@ -62,7 +64,7 @@ func TestSpawnHappyPath(t *testing.T) {
 
 	r, err := Spawn(context.Background(), Opts{
 		DB:        db,
-		Cmux:      cli,
+		Mux:      cli,
 		Project:   "demo",
 		Slug:      "auth-refactor",
 		Vision:    "ship the new oauth bridge",
@@ -269,7 +271,7 @@ func TestSpawnEmptyVisionLeavesInboxBucketEmpty(t *testing.T) {
 	db := openTestDB(t)
 
 	r, err := Spawn(context.Background(), Opts{
-		DB: db, Cmux: cli, Project: "p", Slug: "silent",
+		DB: db, Mux: cli, Project: "p", Slug: "silent",
 		Vision: "  \n\t", Agent: "claude",
 		VaultRoot: vault, DataRoot: dataRoot,
 	})
@@ -316,7 +318,7 @@ func TestSpawnEmptyVision(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r, err := Spawn(context.Background(), Opts{
-				DB: db, Cmux: cli, Project: "p", Slug: tc.slug,
+				DB: db, Mux: cli, Project: "p", Slug: tc.slug,
 				Vision: tc.vision, Agent: "claude",
 				VaultRoot: vault, DataRoot: dataRoot,
 			})
@@ -341,7 +343,7 @@ func TestSpawnRejectsBadSlug(t *testing.T) {
 	for _, bad := range []string{"../evil", "", "has/slash", "has space", ".dotleading"} {
 		t.Run("slug="+bad, func(t *testing.T) {
 			_, err := Spawn(context.Background(), Opts{
-				DB: db, Cmux: cli, Project: "p", Slug: bad,
+				DB: db, Mux: cli, Project: "p", Slug: bad,
 				Vision: "x", Agent: "claude",
 				VaultRoot: t.TempDir(), DataRoot: t.TempDir(),
 			})
@@ -356,7 +358,7 @@ func TestSpawnRejectsBadProject(t *testing.T) {
 	_, cli := okCmux()
 	db := openTestDB(t)
 	_, err := Spawn(context.Background(), Opts{
-		DB: db, Cmux: cli, Project: "../evil", Slug: "t",
+		DB: db, Mux: cli, Project: "../evil", Slug: "t",
 		Vision: "x", Agent: "claude",
 		VaultRoot: t.TempDir(), DataRoot: t.TempDir(),
 	})
@@ -369,7 +371,7 @@ func TestSpawnRequiresAgent(t *testing.T) {
 	_, cli := okCmux()
 	db := openTestDB(t)
 	_, err := Spawn(context.Background(), Opts{
-		DB: db, Cmux: cli, Project: "p", Slug: "t",
+		DB: db, Mux: cli, Project: "p", Slug: "t",
 		Vision: "x", Agent: "bash",
 		VaultRoot: t.TempDir(), DataRoot: t.TempDir(),
 	})
@@ -382,13 +384,13 @@ func TestSpawnRequiresVaultAndDataRoot(t *testing.T) {
 	_, cli := okCmux()
 	db := openTestDB(t)
 	if _, err := Spawn(context.Background(), Opts{
-		DB: db, Cmux: cli, Project: "p", Slug: "t",
+		DB: db, Mux: cli, Project: "p", Slug: "t",
 		Vision: "x", Agent: "claude", DataRoot: t.TempDir(),
 	}); err == nil {
 		t.Error("expected error for missing VaultRoot")
 	}
 	if _, err := Spawn(context.Background(), Opts{
-		DB: db, Cmux: cli, Project: "p", Slug: "t",
+		DB: db, Mux: cli, Project: "p", Slug: "t",
 		Vision: "x", Agent: "claude", VaultRoot: t.TempDir(),
 	}); err == nil {
 		t.Error("expected error for missing DataRoot")
@@ -402,7 +404,7 @@ func TestSpawnRejectsDuplicateActive(t *testing.T) {
 	db := openTestDB(t)
 
 	common := Opts{
-		DB: db, Cmux: cli, Project: "p", Slug: "dup",
+		DB: db, Mux: cli, Project: "p", Slug: "dup",
 		Vision: "v", Agent: "claude",
 		VaultRoot: vault, DataRoot: dataRoot,
 	}
@@ -430,7 +432,7 @@ func TestSpawnAllowsRespawnOverArchived(t *testing.T) {
 	db := openTestDB(t)
 
 	common := Opts{
-		DB: db, Cmux: cli, Project: "p", Slug: "phoenix",
+		DB: db, Mux: cli, Project: "p", Slug: "phoenix",
 		Vision: "v1", Agent: "claude",
 		VaultRoot: vault, DataRoot: dataRoot,
 	}
@@ -463,14 +465,14 @@ func TestSpawnRejectsNilDeps(t *testing.T) {
 	_, cli := okCmux()
 	db := openTestDB(t)
 	if _, err := Spawn(context.Background(), Opts{
-		DB: nil, Cmux: cli, Project: "p", Slug: "t",
+		DB: nil, Mux: cli, Project: "p", Slug: "t",
 		Vision: "x", Agent: "claude",
 		VaultRoot: t.TempDir(), DataRoot: t.TempDir(),
 	}); err == nil {
 		t.Error("expected error for nil DB")
 	}
 	if _, err := Spawn(context.Background(), Opts{
-		DB: db, Cmux: nil, Project: "p", Slug: "t",
+		DB: db, Mux: nil, Project: "p", Slug: "t",
 		Vision: "x", Agent: "claude",
 		VaultRoot: t.TempDir(), DataRoot: t.TempDir(),
 	}); err == nil {
@@ -488,7 +490,7 @@ func TestSpawnPaths(t *testing.T) {
 	db := openTestDB(t)
 
 	r, err := Spawn(context.Background(), Opts{
-		DB: db, Cmux: cli, Project: "p", Slug: "checkpaths",
+		DB: db, Mux: cli, Project: "p", Slug: "checkpaths",
 		Vision: "x", Agent: "claude",
 		VaultRoot: vault, DataRoot: dataRoot,
 	})

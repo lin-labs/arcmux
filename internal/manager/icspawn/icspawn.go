@@ -28,10 +28,10 @@ import (
 	"time"
 
 	"github.com/lin-labs/arcmux/internal/manager/bootstrap"
-	"github.com/lin-labs/arcmux/internal/manager/cmuxcli"
 	"github.com/lin-labs/arcmux/internal/manager/paths"
 	"github.com/lin-labs/arcmux/internal/manager/scratchpad"
 	"github.com/lin-labs/arcmux/internal/manager/store"
+	"github.com/lin-labs/arcmux/internal/mux"
 )
 
 // ErrSlotExists is returned when a slot with the requested ID already
@@ -46,23 +46,23 @@ var ErrHCCap = errors.New("team at IC headcount cap")
 
 // Opts configure Spawn.
 type Opts struct {
-	DB        *store.DB       // open project store; caller owns Close
-	Cmux      *cmuxcli.Client // cmux client (real or fakeRunner-backed)
-	Project   string          // project slug
-	Team      string          // existing team slug; must be active
-	Slot      string          // unique slot id within the project (slug)
-	Role      string          // specialization name (ic-base | linus | ... ; default ic-base)
-	Contract  string          // initial bound contract id; must belong to Team and not be terminal
-	Agent     string          // "claude" | "codex"
-	VaultRoot string          // $OBS_AGENTS
-	DataRoot  string          // ~/data
-	Focus     bool            // focus the new pane after split
+	DB        *store.DB   // open project store; caller owns Close
+	Mux       mux.Backend // configured multiplexer backend (cmux or tmux)
+	Project   string      // project slug
+	Team      string      // existing team slug; must be active
+	Slot      string      // unique slot id within the project (slug)
+	Role      string      // specialization name (ic-base | linus | ... ; default ic-base)
+	Contract  string      // initial bound contract id; must belong to Team and not be terminal
+	Agent     string      // "claude" | "codex"
+	VaultRoot string      // $OBS_AGENTS
+	DataRoot  string      // ~/data
+	Focus     bool        // focus the new pane after split
 }
 
 // Result returns the artifacts created by Spawn.
 type Result struct {
 	Slot           store.Slot
-	Pane           cmuxcli.Pane
+	Pane           mux.Pane
 	BootstrapPath  string
 	ScratchpadPath string
 	Team           store.Team     // post-spawn team record (HC incremented)
@@ -75,8 +75,8 @@ func Spawn(ctx context.Context, o Opts) (*Result, error) {
 	if o.DB == nil {
 		return nil, fmt.Errorf("Spawn: DB required")
 	}
-	if o.Cmux == nil {
-		return nil, fmt.Errorf("Spawn: Cmux required")
+	if o.Mux == nil {
+		return nil, fmt.Errorf("Spawn: Mux required")
 	}
 	if o.Agent != "claude" && o.Agent != "codex" {
 		return nil, fmt.Errorf("unsupported agent %q (want claude or codex)", o.Agent)
@@ -231,28 +231,27 @@ func Spawn(ctx context.Context, o Opts) (*Result, error) {
 		return nil, fmt.Errorf("bootstrap render: %w", err)
 	}
 
-	// 3. Split a new pane inside the team's existing workspace. Direction
-	// "right" matches the convention (manager on the left, ICs to the
-	// right). cmux's new-pane has no --command, so we send the bootstrap
-	// path into the pane's fresh terminal as a second step.
-	pane, err := o.Cmux.NewPane(ctx, cmuxcli.NewPaneOptions{
-		Workspace: teamRec.WorkspaceRef,
+	// 3. Spawn a new pane inside the team's existing group. Direction
+	// "right" is a cmux nicety (manager on the left, ICs to the right);
+	// the tmux backend silently ignores it. The mux interface separates
+	// spawn from initial-command, so the bootstrap path is sent in step 4.
+	pane, err := o.Mux.NewPane(ctx, mux.PaneOptions{
+		Group:     teamRec.WorkspaceRef,
 		Direction: "right",
-		Type:      "terminal",
 		Focus:     o.Focus,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("cmux new-pane: %w", err)
+		return nil, fmt.Errorf("mux new-pane: %w", err)
 	}
 
-	// 4. Send the bootstrap command. Use the pane's focused surface — cmux
-	// send requires --surface, and a pane ref is not accepted there.
-	// NewPane populates SelectedSurf from cmux's multi-token OK output.
-	sendTarget := pane.SelectedSurf
+	// 4. Send the bootstrap command to the new pane. Use SendTarget — for
+	// cmux this is the pane's focused surface ref (required by `cmux send
+	// --surface`), for tmux it's the pane_id (same as Ref).
+	sendTarget := pane.SendTarget
 	if sendTarget == "" {
-		sendTarget = pane.Ref // fallback for unit-test fakes that don't echo surface
+		sendTarget = pane.Ref
 	}
-	if err := o.Cmux.Send(ctx, sendTarget, bootstrapPath); err != nil {
+	if err := o.Mux.Send(ctx, sendTarget, bootstrapPath); err != nil {
 		return nil, fmt.Errorf("send bootstrap to pane: %w", err)
 	}
 
@@ -350,10 +349,10 @@ var ErrContractInFlight = errors.New("bound contract still in flight")
 
 // DissolveOpts configure Dissolve.
 type DissolveOpts struct {
-	DB   *store.DB       // open project store; caller owns Close
-	Cmux *cmuxcli.Client // cmux client; pane close is best-effort
-	Slot string          // slot id to dissolve (validated as slug)
-	By   string          // audit actor; defaults to "arcmux-cli" when empty
+	DB   *store.DB   // open project store; caller owns Close
+	Mux  mux.Backend // configured multiplexer backend; pane close is best-effort
+	Slot string      // slot id to dissolve (validated as slug)
+	By   string      // audit actor; defaults to "arcmux-cli" when empty
 }
 
 // DissolveResult returns the artifacts of a successful Dissolve.
@@ -386,8 +385,8 @@ func Dissolve(ctx context.Context, o DissolveOpts) (*DissolveResult, error) {
 	if o.DB == nil {
 		return nil, fmt.Errorf("Dissolve: DB required")
 	}
-	if o.Cmux == nil {
-		return nil, fmt.Errorf("Dissolve: Cmux required")
+	if o.Mux == nil {
+		return nil, fmt.Errorf("Dissolve: Mux required")
 	}
 	slotID, err := paths.Validate(o.Slot)
 	if err != nil {
@@ -466,7 +465,7 @@ func Dissolve(ctx context.Context, o DissolveOpts) (*DissolveResult, error) {
 	// 4. Best-effort pane close. Capture but do not return the error.
 	var paneErr error
 	if slot.PaneRef != "" {
-		if cerr := o.Cmux.ClosePane(ctx, slot.PaneRef); cerr != nil {
+		if cerr := o.Mux.ClosePane(ctx, slot.PaneRef); cerr != nil {
 			paneErr = cerr
 		}
 	}

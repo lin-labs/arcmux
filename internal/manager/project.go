@@ -20,11 +20,11 @@ import (
 	"time"
 
 	"github.com/lin-labs/arcmux/internal/manager/bootstrap"
-	"github.com/lin-labs/arcmux/internal/manager/cmuxcli"
 	"github.com/lin-labs/arcmux/internal/manager/paths"
 	"github.com/lin-labs/arcmux/internal/manager/scaffold"
 	"github.com/lin-labs/arcmux/internal/manager/scratchpad"
 	"github.com/lin-labs/arcmux/internal/manager/store"
+	"github.com/lin-labs/arcmux/internal/mux"
 )
 
 // Options configure Start.
@@ -50,9 +50,9 @@ type Options struct {
 	DataRoot string
 	// VaultRoot is typically $OBS_AGENTS.
 	VaultRoot string
-	// Cmux is the cmux client; one is created lazily when nil.
-	Cmux *cmuxcli.Client
-	// Focus focuses the new workspace after creation.
+	// Mux is the configured multiplexer backend. Required.
+	Mux mux.Backend
+	// Focus focuses the new group after creation.
 	Focus bool
 }
 
@@ -61,8 +61,8 @@ type Project struct {
 	Opts           Options
 	Paths          paths.Project
 	DB             *store.DB
-	Workspace      cmuxcli.Workspace
-	ElonPane       cmuxcli.Pane
+	Group          mux.Group
+	ElonPane       mux.Pane
 	BootstrapPath  string
 	ScratchpadPath string // path to the seeded front-desk scratchpad
 	MissionInboxID string // empty when no mission was supplied
@@ -88,8 +88,8 @@ func Start(ctx context.Context, o Options) (*Project, error) {
 	if o.VaultRoot == "" {
 		return nil, fmt.Errorf("VaultRoot required (set OBS_AGENTS)")
 	}
-	if o.Cmux == nil {
-		o.Cmux = cmuxcli.New()
+	if o.Mux == nil {
+		return nil, fmt.Errorf("Mux required")
 	}
 	command := strings.TrimSpace(o.Command)
 	if command == "" {
@@ -172,9 +172,9 @@ func Start(ctx context.Context, o Options) (*Project, error) {
 	}
 	p.BootstrapPath = bootstrapPath
 
-	// 6. Create cmux workspace with the bootstrap script as initial command.
+	// 6. Create mux group with the bootstrap script as initial command.
 	wsName := slug
-	ws, err := o.Cmux.NewWorkspace(ctx, cmuxcli.NewWorkspaceOptions{
+	group, err := o.Mux.NewGroup(ctx, mux.GroupOptions{
 		Name:        wsName,
 		Description: "arcmux substrate — front-desk pane for project " + slug,
 		CWD:         p.Paths.VaultRoot,
@@ -183,28 +183,30 @@ func Start(ctx context.Context, o Options) (*Project, error) {
 	})
 	if err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("cmux new-workspace: %w", err)
+		return nil, fmt.Errorf("mux new-group: %w", err)
 	}
-	p.Workspace = ws
+	p.Group = group
 
 	// 7. Locate the initial pane.
-	panes, err := o.Cmux.ListPanes(ctx, ws.Ref)
+	panes, err := o.Mux.ListPanes(ctx, group.Ref)
 	if err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("cmux list-panes: %w", err)
+		return nil, fmt.Errorf("mux list-panes: %w", err)
 	}
 	if len(panes) == 0 {
 		_ = db.Close()
-		return nil, fmt.Errorf("workspace %s has no panes after creation", ws.Ref)
+		return nil, fmt.Errorf("group %s has no panes after creation", group.Ref)
 	}
 	p.ElonPane = panes[0]
 
 	// 8. Persist project meta so post-launch substrate (pulse, future
 	// heartbeats) can locate the front-desk without grepping the audit log.
+	// ElonSurfaceRef is left empty under the mux abstraction; the pane ref
+	// is the canonical send target on both cmux (resolves to focused
+	// surface internally) and tmux.
 	if err := db.PutProjectMeta(store.ProjectMeta{
 		ElonPaneRef:      p.ElonPane.Ref,
-		ElonSurfaceRef:   p.ElonPane.SelectedSurf,
-		ElonWorkspaceRef: ws.Ref,
+		ElonWorkspaceRef: group.Ref,
 	}); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("persist project meta: %w", err)
@@ -220,7 +222,7 @@ func Start(ctx context.Context, o Options) (*Project, error) {
 		Timestamp: startedAt,
 		Detail: map[string]any{
 			"agent":            o.Agent,
-			"workspace_ref":    ws.Ref,
+			"workspace_ref":    group.Ref,
 			"pane_ref":         p.ElonPane.Ref,
 			"bootstrap_path":   bootstrapPath,
 			"command":          command,

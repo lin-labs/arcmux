@@ -13,6 +13,8 @@ import (
 	"github.com/lin-labs/arcmux/internal/manager/paths"
 	"github.com/lin-labs/arcmux/internal/manager/store"
 	"github.com/lin-labs/arcmux/internal/manager/teamspawn"
+	"github.com/lin-labs/arcmux/internal/mux"
+	cmuxbackend "github.com/lin-labs/arcmux/internal/mux/cmux"
 )
 
 // cmdTeam dispatches `arcmux-cli team <sub>`.
@@ -22,7 +24,7 @@ func cmdTeam(args []string, stdout io.Writer) error {
 	}
 	switch args[0] {
 	case "spawn":
-		return cmdTeamSpawn(args[1:], stdout, cmuxcli.New())
+		return cmdTeamSpawn(args[1:], stdout, cmuxbackend.New(cmuxcli.New()))
 	case "list":
 		return cmdTeamList(args[1:], stdout)
 	case "get":
@@ -32,10 +34,10 @@ func cmdTeam(args []string, stdout io.Writer) error {
 	}
 }
 
-// cmdTeamSpawn handles `arcmux-cli team spawn`. The cmuxcli.Client is
-// injected so tests can supply a fakeRunner-backed client; production
-// callers go through cmdTeam → cmuxcli.New() above.
-func cmdTeamSpawn(args []string, stdout io.Writer, cli *cmuxcli.Client) error {
+// cmdTeamSpawn handles `arcmux-cli team spawn`. The mux.Backend is
+// injected so tests can supply a fake-backed backend; production callers
+// go through cmdTeam → cmuxbackend.New(cmuxcli.New()) above.
+func cmdTeamSpawn(args []string, stdout io.Writer, backend mux.Backend) error {
 	fs := flag.NewFlagSet("team spawn", flag.ContinueOnError)
 	slug := fs.String("slug", "", "team slug (required)")
 	vision := fs.String("vision", "", "team vision/mission (free text)")
@@ -68,7 +70,7 @@ func cmdTeamSpawn(args []string, stdout io.Writer, cli *cmuxcli.Client) error {
 
 	r, err := teamspawn.Spawn(context.Background(), teamspawn.Opts{
 		DB:        db,
-		Cmux:      cli,
+		Mux:       backend,
 		Project:   *project,
 		Slug:      *slug,
 		Vision:    *vision,
@@ -84,7 +86,7 @@ func cmdTeamSpawn(args []string, stdout io.Writer, cli *cmuxcli.Client) error {
 	return json.NewEncoder(stdout).Encode(map[string]any{
 		"ok":              true,
 		"team":            r.Team,
-		"workspace_ref":   r.Workspace.Ref,
+		"workspace_ref":   r.Group.Ref,
 		"manager_pane":    r.ManagerPane.Ref,
 		"bootstrap_path":  r.BootstrapPath,
 		"scratchpad_path": r.ScratchpadPath,

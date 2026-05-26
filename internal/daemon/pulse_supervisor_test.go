@@ -15,6 +15,7 @@ import (
 	"github.com/lin-labs/arcmux/internal/config"
 	"github.com/lin-labs/arcmux/internal/manager/pulse"
 	"github.com/lin-labs/arcmux/internal/manager/store"
+	"github.com/lin-labs/arcmux/internal/mux"
 )
 
 // stubPulser captures Run() calls and blocks until ctx cancels — the way a
@@ -56,7 +57,7 @@ func newHarness(t *testing.T, pcfg config.ParsedPulse) (*supervisorHarness, *Pul
 	silent := slog.New(slog.NewTextHandler(io.Discard, nil))
 	s := &PulseSupervisor{
 		cfg:    pcfg,
-		cmux:   nil, // stubPulser ignores it
+		mux:    nil, // stubPulser ignores it
 		logger: silent,
 		now:    time.Now,
 		discoverProjects: func() ([]string, error) {
@@ -65,7 +66,7 @@ func newHarness(t *testing.T, pcfg config.ParsedPulse) (*supervisorHarness, *Pul
 		boltPathFor: func(slug string) string {
 			return filepath.Join(dir, "arcmux", slug, "state.bolt")
 		},
-		newPulser: func(slug string, db *store.DB, _ pulseCmux, cad pulse.Cadence) pulser {
+		newPulser: func(slug string, db *store.DB, _ mux.Backend, cad pulse.Cadence) pulser {
 			h.mu.Lock()
 			defer h.mu.Unlock()
 			h.newPulserN++

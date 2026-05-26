@@ -14,6 +14,8 @@ import (
 	"github.com/lin-labs/arcmux/internal/manager/paths"
 	"github.com/lin-labs/arcmux/internal/manager/store"
 	"github.com/lin-labs/arcmux/internal/manager/teamspawn"
+	"github.com/lin-labs/arcmux/internal/mux"
+	cmuxbackend "github.com/lin-labs/arcmux/internal/mux/cmux"
 )
 
 // teamFakeRunner is the CLI-side cmux fake (mirrors teamspawn_test.go).
@@ -33,11 +35,11 @@ func (f *teamFakeRunner) Run(_ context.Context, args ...string) (string, error) 
 	return "", nil
 }
 
-func newTeamOKCmux() *cmuxcli.Client {
-	return cmuxcli.NewWithRunnerForTest(&teamFakeRunner{outs: map[string]string{
+func newTeamOKCmux() mux.Backend {
+	return cmuxbackend.New(cmuxcli.NewWithRunnerForTest(&teamFakeRunner{outs: map[string]string{
 		"new-workspace": "OK workspace:cli-1\n",
 		"list-panes":    `{"workspace_ref":"workspace:cli-1","panes":[{"ref":"pane:cli-3","index":0,"focused":true,"surface_refs":["surface:s1"]}]}`,
-	}})
+	}}))
 }
 
 // preseedTeam directly seeds a team via teamspawn.Spawn against an
@@ -51,7 +53,7 @@ func preseedTeam(t *testing.T, dataRoot, vault, project, slug, vision string) {
 	}
 	defer db.Close()
 	if _, err := teamspawn.Spawn(context.Background(), teamspawn.Opts{
-		DB: db, Cmux: newTeamOKCmux(), Project: project, Slug: slug,
+		DB: db, Mux: newTeamOKCmux(), Project: project, Slug: slug,
 		Vision: vision, Agent: "claude", VaultRoot: vault, DataRoot: dataRoot,
 	}); err != nil {
 		t.Fatalf("preseed Spawn: %v", err)

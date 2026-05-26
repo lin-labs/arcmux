@@ -6,17 +6,17 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/lin-labs/arcmux/internal/manager/cmuxcli"
 	"github.com/lin-labs/arcmux/internal/manager/paths"
 	"github.com/lin-labs/arcmux/internal/manager/store"
+	"github.com/lin-labs/arcmux/internal/mux"
 )
 
 // OpenOptions configure Open.
 type OpenOptions struct {
-	Project   string          // slug
-	DataRoot  string          // typically ~/data
-	VaultRoot string          // typically $OBS_AGENTS
-	Cmux      *cmuxcli.Client // optional; defaults to real cmux client
+	Project   string      // slug
+	DataRoot  string      // typically ~/data
+	VaultRoot string      // typically $OBS_AGENTS
+	Mux       mux.Backend // optional; pure state-attach calls leave it nil
 }
 
 // Open attaches to an already-scaffolded project's bbolt store and cmux
@@ -39,12 +39,11 @@ func Open(_ context.Context, o OpenOptions) (*Project, error) {
 			return nil, fmt.Errorf("VaultRoot required (set OBS_AGENTS)")
 		}
 	}
-	if o.Cmux == nil {
-		o.Cmux = cmuxcli.New()
-	}
-
+	// Open attaches to state only; callers that need to send into the
+	// project's mux can pass o.Mux through. nil is fine — Open does no
+	// mux calls itself.
 	p := &Project{
-		Opts:  Options{Project: slug, DataRoot: o.DataRoot, VaultRoot: o.VaultRoot, Cmux: o.Cmux},
+		Opts:  Options{Project: slug, DataRoot: o.DataRoot, VaultRoot: o.VaultRoot, Mux: o.Mux},
 		Paths: paths.ForProject(o.DataRoot, o.VaultRoot, slug),
 	}
 
