@@ -20,9 +20,9 @@ func TestProjectMeta_RoundTrip(t *testing.T) {
 	}
 
 	in := ProjectMeta{
-		ElonPaneRef:      "pane:elon",
-		ElonSurfaceRef:   "surf:elon",
-		ElonWorkspaceRef: "ws:project",
+		PaneRef:      "pane:front-desk",
+		SurfaceRef:   "surf:front-desk",
+		WorkspaceRef: "ws:project",
 	}
 	if err := db.PutProjectMeta(in); err != nil {
 		t.Fatalf("PutProjectMeta: %v", err)
@@ -32,7 +32,7 @@ func TestProjectMeta_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetProjectMeta: %v", err)
 	}
-	if out.ElonPaneRef != in.ElonPaneRef || out.ElonSurfaceRef != in.ElonSurfaceRef || out.ElonWorkspaceRef != in.ElonWorkspaceRef {
+	if out.PaneRef != in.PaneRef || out.SurfaceRef != in.SurfaceRef || out.WorkspaceRef != in.WorkspaceRef {
 		t.Fatalf("roundtrip mismatch: got %+v", out)
 	}
 	if out.UpdatedAt.IsZero() {
@@ -40,7 +40,7 @@ func TestProjectMeta_RoundTrip(t *testing.T) {
 	}
 
 	// Overwrite — only the new ref should remain.
-	in2 := ProjectMeta{ElonPaneRef: "pane:elon-v2", ElonSurfaceRef: "surf:elon-v2", ElonWorkspaceRef: "ws:project-v2"}
+	in2 := ProjectMeta{PaneRef: "pane:front-desk-v2", SurfaceRef: "surf:front-desk-v2", WorkspaceRef: "ws:project-v2"}
 	if err := db.PutProjectMeta(in2); err != nil {
 		t.Fatalf("PutProjectMeta v2: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestProjectMeta_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetProjectMeta v2: %v", err)
 	}
-	if out2.ElonPaneRef != "pane:elon-v2" {
-		t.Fatalf("v2 upsert lost: got %q", out2.ElonPaneRef)
+	if out2.PaneRef != "pane:front-desk-v2" {
+		t.Fatalf("v2 upsert lost: got %q", out2.PaneRef)
 	}
 }

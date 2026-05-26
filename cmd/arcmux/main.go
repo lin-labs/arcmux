@@ -10,7 +10,6 @@ import (
 
 	"github.com/lin-labs/arcmux/internal/config"
 	"github.com/lin-labs/arcmux/internal/daemon"
-	"github.com/lin-labs/arcmux/internal/manager"
 )
 
 const version = "0.1.0"
@@ -31,7 +30,12 @@ func run(args []string) error {
 	case "start":
 		return cmdStart(args[1:])
 	case "manager":
-		return manager.CmdManager(context.Background(), args[1:], os.Stdout)
+		// C4 removed the `arcmux manager` launcher: arcmux is now a pure
+		// substrate librarian and no longer owns the agent-class roles
+		// (Elon / Manager / IC) that the subcommand booted. Project
+		// registration moved to elonco's launcher, which calls
+		// `manager.RegisterSession` directly.
+		return fmt.Errorf("'arcmux manager' was removed in the pure-substrate refactor; use elonco's launcher (it calls arcmux's RegisterSession directly)")
 	case "pulse":
 		return cmdPulse(args[1:])
 	case "version":
@@ -86,22 +90,24 @@ func cmdStart(args []string) error {
 }
 
 func printUsage() {
-	fmt.Print(`arcmux — Agent Tmux Runtime Service
+	fmt.Print(`arcmux — Agent Tmux Runtime Service (pure substrate)
 
 Usage:
   arcmux start [--config path]                            Start the daemon (default command — also runs the pulse supervisor)
-  arcmux manager <agent> <project> [--mission "..."]      Launch three-tier manager mode (Elon+Manager+ICs in cmux)
   arcmux pulse --project <slug> [--interval 10s] [--once] Debug-only: pulse one project (the daemon does this for all projects)
   arcmux version                                          Print version
   arcmux help                                             Show this help
 
-The daemon listens on a Unix socket for gRPC requests.
-Orchestrators connect to manage coding agent sessions.
+The daemon listens on a Unix socket for gRPC requests. Orchestrators
+(elonco, etc.) connect to manage coding agent sessions and to register
+new projects via the in-process RegisterSession API. Project launch is
+NOT an arcmux concern post-C4 — the role-aware 'arcmux manager' launcher
+was removed.
 
 Pulse runtime: the daemon auto-discovers every project under
 <pulse.data_root>/arcmux/*/state.bolt and runs one pulser per project.
-Cadence defaults (configurable in ~/.config/arcmux/config.toml):
-  elon=30s  manager=10s  ic=5s   tick=10s   rescan=60s
+Cadence is one uniform per-target interval (configurable via
+~/.config/arcmux/config.toml under [pulse.cadence]).
 
 Configuration: ~/.config/arcmux/config.toml
 Socket: ~/.config/arcmux/arcmux.sock (configurable)

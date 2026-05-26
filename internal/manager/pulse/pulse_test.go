@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/lin-labs/arcmux/internal/manager/cmuxcli"
+	"github.com/lin-labs/arcmux/internal/manager/store"
 	"github.com/lin-labs/arcmux/internal/mux"
 	cmuxbackend "github.com/lin-labs/arcmux/internal/mux/cmux"
-	"github.com/lin-labs/arcmux/internal/manager/store"
 )
 
 // fakeClock is a monotonic clock the test drives explicitly.
@@ -35,10 +35,11 @@ func (f *fakeClock) Advance(d time.Duration) {
 	f.now = f.now.Add(d)
 }
 
-// fakeRunner records every cmux call. Send returns ErrSend if SendErr is set.
+// fakeRunner records every cmux call. Send returns ErrSend if SendErr is
+// set.
 type fakeRunner struct {
 	mu      sync.Mutex
-	calls   [][]string // each entry: ["send", "--target", ref, "--", body], etc.
+	calls   [][]string
 	SendErr error
 }
 
@@ -78,6 +79,8 @@ func (f *fakeRunner) lastBodyTo(target string) string {
 	return ""
 }
 
+const testProject = "arcmux-test"
+
 func setup(t *testing.T) (*store.DB, mux.Backend, *fakeRunner, *fakeClock, *Pulser) {
 	t.Helper()
 	dir := t.TempDir()
@@ -91,50 +94,36 @@ func setup(t *testing.T) (*store.DB, mux.Backend, *fakeRunner, *fakeClock, *Puls
 	backend := cmuxbackend.New(cmuxcli.NewWithRunnerForTest(fr))
 	clk := newFakeClock(time.Date(2026, 5, 25, 4, 0, 0, 0, time.UTC))
 
-	p := New("arcmux-test", db, backend)
+	p := New(testProject, db, backend)
 	p.Now = clk.Now
-	// Tight cadences make the test fast and assertable.
-	p.Cadence = Cadence{Elon: 100 * time.Millisecond, Manager: 50 * time.Millisecond, IC: 25 * time.Millisecond}
+	// Tight cadence makes the test fast and assertable.
+	p.Cadence = Cadence{Interval: 100 * time.Millisecond}
 	return db, backend, fr, clk, p
 }
 
-func seedElon(t *testing.T, db *store.DB, paneRef string) {
+func seedTarget(t *testing.T, db *store.DB, paneRef string) {
 	t.Helper()
 	if err := db.PutProjectMeta(store.ProjectMeta{
-		ElonPaneRef:      paneRef,
-		ElonSurfaceRef:   paneRef + "-surf",
-		ElonWorkspaceRef: "ws-test",
+		PaneRef:      paneRef,
+		SurfaceRef:   paneRef + "-surf",
+		WorkspaceRef: "ws-test",
 	}); err != nil {
 		t.Fatalf("PutProjectMeta: %v", err)
 	}
 }
 
-func seedTeam(t *testing.T, db *store.DB, id, paneRef string) {
+func pushSession(t *testing.T, db *store.DB, msgID string) {
 	t.Helper()
-	if err := db.PutTeam(store.Team{
-		ID: id, State: store.TeamActive, ManagerPane: paneRef, WorkspaceRef: "ws-team-" + id,
-	}); err != nil {
-		t.Fatalf("PutTeam: %v", err)
+	if err := db.EnsureSessionInbox(testProject); err != nil {
+		t.Fatalf("EnsureSessionInbox: %v", err)
 	}
-	if err := db.EnsureManagerInbox(id); err != nil {
-		t.Fatalf("EnsureManagerInbox: %v", err)
+	if err := db.PushSessionInbox(testProject, store.InboxMsg{ID: msgID, Verb: "add", From: "user", Body: "x"}); err != nil {
+		t.Fatalf("PushSessionInbox: %v", err)
 	}
 }
 
-func seedSlot(t *testing.T, db *store.DB, slotID, team, paneRef string) {
-	t.Helper()
-	if err := db.PutSlot(store.Slot{
-		ID: slotID, Team: team, Role: "ic-base", State: store.SlotActive, PaneRef: paneRef,
-	}); err != nil {
-		t.Fatalf("PutSlot: %v", err)
-	}
-	if err := db.EnsureICInbox(slotID); err != nil {
-		t.Fatalf("EnsureICInbox: %v", err)
-	}
-}
-
-// TestTick_NoTargets verifies an empty project ticks cleanly (no panic, no
-// wakes) — covers the "freshly-scaffolded but never-launched" case.
+// TestTick_NoTargets verifies an empty project ticks cleanly (no panic,
+// no wakes) — covers the "freshly-scaffolded but never-registered" case.
 func TestTick_NoTargets(t *testing.T) {
 	_, _, fr, _, p := setup(t)
 	rep, err := p.Tick(context.Background())
@@ -149,12 +138,12 @@ func TestTick_NoTargets(t *testing.T) {
 	}
 }
 
-// TestTick_FirstSightNoWake verifies the storm-on-restart guard: on first
-// sight, we anchor cadence at now and only fire if the inbox already has
-// messages (i.e., depth > 0 vs the prev=0 baseline IS a "grew" trigger).
+// TestTick_FirstSightNoWake_EmptyInbox: on first sight with an empty
+// inbox the pulser anchors cadence and does NOT wake — the storm-on-
+// restart guard.
 func TestTick_FirstSightNoWake_EmptyInbox(t *testing.T) {
 	db, _, fr, _, p := setup(t)
-	seedElon(t, db, "pane:elon")
+	seedTarget(t, db, "pane:fd")
 	rep, err := p.Tick(context.Background())
 	if err != nil {
 		t.Fatalf("Tick: %v", err)
@@ -162,20 +151,18 @@ func TestTick_FirstSightNoWake_EmptyInbox(t *testing.T) {
 	if rep.Targets != 1 || rep.Wakes != 0 {
 		t.Errorf("first-sight empty: targets=%d wakes=%d, want 1/0", rep.Targets, rep.Wakes)
 	}
-	if got := fr.sendsTo("pane:elon"); got != 0 {
+	if got := fr.sendsTo("pane:fd"); got != 0 {
 		t.Errorf("first-sight empty inbox should not wake; got %d sends", got)
 	}
 }
 
-// TestTick_FirstSight_InboxGrewFires verifies the spec's trigger (a): a
-// pre-existing inbox message at first-sight time is "depth>0 from prev=0"
-// and DOES fire a wake.
+// TestTick_FirstSight_InboxGrewFires: a pre-existing inbox message at
+// first-sight time is "depth>0 from prev=0" and DOES fire a wake.
 func TestTick_FirstSight_InboxGrewFires(t *testing.T) {
 	db, _, fr, _, p := setup(t)
-	seedElon(t, db, "pane:elon")
-	if err := db.PushElonInbox(store.InboxMsg{ID: "m1", Verb: "add", From: "user", Body: "mission"}); err != nil {
-		t.Fatalf("push: %v", err)
-	}
+	seedTarget(t, db, "pane:fd")
+	pushSession(t, db, "m1")
+
 	rep, err := p.Tick(context.Background())
 	if err != nil {
 		t.Fatalf("Tick: %v", err)
@@ -186,10 +173,10 @@ func TestTick_FirstSight_InboxGrewFires(t *testing.T) {
 	if rep.Decisions[0].Trigger != TriggerInboxGrew {
 		t.Errorf("trigger = %q, want inbox-grew", rep.Decisions[0].Trigger)
 	}
-	if got := fr.sendsTo("pane:elon"); got != 1 {
-		t.Errorf("send to elon pane = %d, want 1", got)
+	if got := fr.sendsTo("pane:fd"); got != 1 {
+		t.Errorf("send to pane = %d, want 1", got)
 	}
-	body := fr.lastBodyTo("pane:elon")
+	body := fr.lastBodyTo("pane:fd")
 	if !strings.Contains(body, "1 queued inbox message") {
 		t.Errorf("wake body missing depth count: %q", body)
 	}
@@ -198,20 +185,19 @@ func TestTick_FirstSight_InboxGrewFires(t *testing.T) {
 	}
 }
 
-// TestTick_CadenceElapsedFires verifies the spec's trigger (b): once a
-// target has been seen, advancing the clock past the cadence wakes it even
-// with a flat (zero) inbox.
+// TestTick_CadenceElapsedFires: once a target has been seen, advancing
+// the clock past the cadence wakes it even with a flat (zero) inbox.
 func TestTick_CadenceElapsedFires(t *testing.T) {
 	db, _, fr, clk, p := setup(t)
-	seedElon(t, db, "pane:elon")
-	// Tick 1: first sight, empty inbox → no wake.
+	seedTarget(t, db, "pane:fd")
+	// Tick 1: first sight, empty → no wake.
 	if _, err := p.Tick(context.Background()); err != nil {
 		t.Fatalf("tick1: %v", err)
 	}
-	if fr.sendsTo("pane:elon") != 0 {
+	if fr.sendsTo("pane:fd") != 0 {
 		t.Fatal("tick1 should not wake")
 	}
-	// Advance past Elon cadence (100ms).
+	// Advance past cadence.
 	clk.Advance(200 * time.Millisecond)
 	rep, err := p.Tick(context.Background())
 	if err != nil {
@@ -225,19 +211,17 @@ func TestTick_CadenceElapsedFires(t *testing.T) {
 	}
 }
 
-// TestTick_NewMessageBetweenTicksFires covers the canonical case: an inbox
-// push arrives between two ticks; the second tick fires.
+// TestTick_NewMessageBetweenTicksFires: an inbox push arrives between
+// two ticks; the second tick fires.
 func TestTick_NewMessageBetweenTicksFires(t *testing.T) {
 	db, _, _, clk, p := setup(t)
-	seedElon(t, db, "pane:elon")
+	seedTarget(t, db, "pane:fd")
 	// Tick 1: empty → no wake.
 	if _, err := p.Tick(context.Background()); err != nil {
 		t.Fatalf("tick1: %v", err)
 	}
 	// New message arrives.
-	if err := db.PushElonInbox(store.InboxMsg{ID: "m1", Verb: "add", From: "user"}); err != nil {
-		t.Fatalf("push: %v", err)
-	}
+	pushSession(t, db, "m1")
 	// Advance less than cadence so ONLY the inbox trigger can fire.
 	clk.Advance(5 * time.Millisecond)
 	rep, err := p.Tick(context.Background())
@@ -252,17 +236,17 @@ func TestTick_NewMessageBetweenTicksFires(t *testing.T) {
 	}
 }
 
-// TestTick_NoDoubleWakeSameTick: even when both triggers fire on the same
-// tick we send exactly one cmux Send.
+// TestTick_NoDoubleWakeSameTick: even when both triggers fire on the
+// same tick we send exactly one cmux Send.
 func TestTick_NoDoubleWakeSameTick(t *testing.T) {
 	db, _, fr, clk, p := setup(t)
-	seedElon(t, db, "pane:elon")
+	seedTarget(t, db, "pane:fd")
 	// Tick 1: first sight, empty → no wake.
 	if _, err := p.Tick(context.Background()); err != nil {
 		t.Fatalf("tick1: %v", err)
 	}
 	// Inbox grows AND cadence elapses.
-	_ = db.PushElonInbox(store.InboxMsg{ID: "m1", Verb: "add"})
+	pushSession(t, db, "m1")
 	clk.Advance(200 * time.Millisecond)
 	rep, err := p.Tick(context.Background())
 	if err != nil {
@@ -274,122 +258,38 @@ func TestTick_NoDoubleWakeSameTick(t *testing.T) {
 	if rep.Decisions[0].Trigger != TriggerBoth {
 		t.Errorf("trigger = %q, want inbox-grew+cadence-elapsed", rep.Decisions[0].Trigger)
 	}
-	if fr.sendsTo("pane:elon") != 1 {
-		t.Errorf("send count = %d, want 1 (no double-send for combined trigger)", fr.sendsTo("pane:elon"))
+	if fr.sendsTo("pane:fd") != 1 {
+		t.Errorf("send count = %d, want 1 (no double-send for combined trigger)", fr.sendsTo("pane:fd"))
 	}
 }
 
-// TestTick_AllThreeKinds verifies Elon + Manager + IC are all reached, with
-// per-kind cadence honored independently.
-func TestTick_AllThreeKinds(t *testing.T) {
-	db, _, fr, clk, p := setup(t)
-	seedElon(t, db, "pane:elon")
-	seedTeam(t, db, "alpha", "pane:mgr-alpha")
-	seedSlot(t, db, "worker-1", "alpha", "pane:ic-worker-1")
-
-	// First tick: all three first-sight + empty inboxes → no wakes.
-	rep, err := p.Tick(context.Background())
-	if err != nil {
-		t.Fatalf("tick1: %v", err)
-	}
-	if rep.Targets != 3 || rep.Wakes != 0 {
-		t.Fatalf("tick1: targets=%d wakes=%d, want 3/0", rep.Targets, rep.Wakes)
-	}
-
-	// Advance past IC cadence (25ms) but not Manager (50ms) or Elon (100ms).
-	clk.Advance(30 * time.Millisecond)
-	rep, err = p.Tick(context.Background())
-	if err != nil {
-		t.Fatalf("tick2: %v", err)
-	}
-	if rep.Wakes != 1 {
-		t.Fatalf("tick2 wakes=%d, want 1 (only IC cadence elapsed)", rep.Wakes)
-	}
-	if fr.sendsTo("pane:ic-worker-1") != 1 {
-		t.Errorf("IC pane was not woken; sends=%d", fr.sendsTo("pane:ic-worker-1"))
-	}
-	if fr.sendsTo("pane:mgr-alpha") != 0 || fr.sendsTo("pane:elon") != 0 {
-		t.Errorf("manager/elon woken too early; mgr=%d elon=%d",
-			fr.sendsTo("pane:mgr-alpha"), fr.sendsTo("pane:elon"))
-	}
-
-	// Advance further so all three cadences have elapsed (relative to
-	// their respective last-wake-or-first-sight anchors).
-	clk.Advance(200 * time.Millisecond)
-	rep, err = p.Tick(context.Background())
-	if err != nil {
-		t.Fatalf("tick3: %v", err)
-	}
-	if rep.Wakes != 3 {
-		t.Fatalf("tick3 wakes=%d, want 3", rep.Wakes)
-	}
-}
-
-// TestTick_DissolvedSlotNotPulsed verifies dissolved slots are excluded —
-// otherwise pulse would keep trying to wake a dead pane forever.
-func TestTick_DissolvedSlotNotPulsed(t *testing.T) {
-	db, _, fr, clk, p := setup(t)
-	seedTeam(t, db, "alpha", "pane:mgr-alpha")
-	seedSlot(t, db, "worker-1", "alpha", "pane:ic-worker-1")
-	// Mark slot dissolved.
-	s, _ := db.GetSlot("worker-1")
-	s.State = store.SlotDissolved
-	if err := db.PutSlot(s); err != nil {
-		t.Fatalf("dissolve: %v", err)
-	}
-
-	// First tick.
-	if _, err := p.Tick(context.Background()); err != nil {
-		t.Fatalf("tick1: %v", err)
-	}
-	// Advance past everything.
-	clk.Advance(time.Second)
-	rep, err := p.Tick(context.Background())
-	if err != nil {
-		t.Fatalf("tick2: %v", err)
-	}
-	if fr.sendsTo("pane:ic-worker-1") != 0 {
-		t.Errorf("dissolved slot was pulsed; sends=%d", fr.sendsTo("pane:ic-worker-1"))
-	}
-	// Manager (still active, empty inbox, cadence elapsed) should fire.
-	if fr.sendsTo("pane:mgr-alpha") < 1 {
-		t.Errorf("active manager not pulsed; sends=%d", fr.sendsTo("pane:mgr-alpha"))
-	}
-	_ = rep
-}
-
-// TestTick_CmuxSendFailureNonFatal: cmux returning an error must be logged
-// (in the Decision) but not abort the tick — other targets must still get
-// their evaluation pass.
+// TestTick_CmuxSendFailureNonFatal: cmux returning an error must be
+// logged (in the Decision) but not abort the tick.
 func TestTick_CmuxSendFailureNonFatal(t *testing.T) {
 	db, _, fr, clk, p := setup(t)
-	seedElon(t, db, "pane:elon")
-	seedTeam(t, db, "alpha", "pane:mgr-alpha")
+	seedTarget(t, db, "pane:fd")
 	fr.SendErr = errors.New("cmux: workspace closed")
 
 	// First tick: first sight, empty → no wake → no error.
 	if _, err := p.Tick(context.Background()); err != nil {
 		t.Fatalf("tick1: %v", err)
 	}
-	// Force wakes on next tick.
-	_ = db.PushElonInbox(store.InboxMsg{ID: "m1", Verb: "add"})
-	_ = db.PushManagerInbox("alpha", store.InboxMsg{ID: "m2", Verb: "add"})
+	// Force a wake on next tick.
+	pushSession(t, db, "m1")
 	clk.Advance(10 * time.Millisecond)
 
 	rep, err := p.Tick(context.Background())
 	if err != nil {
 		t.Fatalf("tick2: %v", err)
 	}
-	if rep.Errors != 2 {
-		t.Errorf("rep.Errors = %d, want 2", rep.Errors)
+	if rep.Errors != 1 {
+		t.Errorf("rep.Errors = %d, want 1", rep.Errors)
 	}
 	if rep.Wakes != 0 {
 		t.Errorf("rep.Wakes = %d on send failure, want 0", rep.Wakes)
 	}
-	for _, d := range rep.Decisions {
-		if d.WakeError == "" {
-			t.Errorf("decision %+v missing WakeError", d)
-		}
+	if rep.Decisions[0].WakeError == "" {
+		t.Errorf("decision %+v missing WakeError", rep.Decisions[0])
 	}
 
 	// On retry (next tick) with cmux healthy again, wakes should land —
@@ -400,13 +300,13 @@ func TestTick_CmuxSendFailureNonFatal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tick3: %v", err)
 	}
-	if rep.Wakes != 2 {
-		t.Errorf("recovery tick wakes = %d, want 2", rep.Wakes)
+	if rep.Wakes != 1 {
+		t.Errorf("recovery tick wakes = %d, want 1", rep.Wakes)
 	}
 }
 
 // TestRun_RespectsContextCancel verifies Run returns cleanly on context
-// cancellation (the SIGINT/SIGTERM path).
+// cancellation.
 func TestRun_RespectsContextCancel(t *testing.T) {
 	_, _, _, _, p := setup(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -424,8 +324,8 @@ func TestRun_RespectsContextCancel(t *testing.T) {
 	}
 }
 
-// TestRun_RejectsBadInterval prevents a misconfigured deploy from busy-
-// looping.
+// TestRun_RejectsBadInterval prevents a misconfigured deploy from
+// busy-looping.
 func TestRun_RejectsBadInterval(t *testing.T) {
 	_, _, _, _, p := setup(t)
 	if err := p.Run(context.Background(), 0); err == nil {
@@ -436,12 +336,12 @@ func TestRun_RejectsBadInterval(t *testing.T) {
 	}
 }
 
-// TestTick_AuditRowsRecordTickAndWake — the audit log is the durable proof
-// pulse ran. Verify a tick row + a wake row land.
+// TestTick_AuditRowsRecordTickAndWake — the audit log is the durable
+// proof pulse ran. Verify a tick row + a wake row land.
 func TestTick_AuditRowsRecordTickAndWake(t *testing.T) {
 	db, _, _, _, p := setup(t)
-	seedElon(t, db, "pane:elon")
-	_ = db.PushElonInbox(store.InboxMsg{ID: "m1", Verb: "add"})
+	seedTarget(t, db, "pane:fd")
+	pushSession(t, db, "m1")
 	if _, err := p.Tick(context.Background()); err != nil {
 		t.Fatalf("tick: %v", err)
 	}

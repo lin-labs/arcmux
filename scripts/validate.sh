@@ -74,10 +74,9 @@ run_step "build arcmux-cli"   go build -o bin/arcmux-cli ./cmd/arcmux-cli
 
 # 4) e2e smoke against built binary
 run_step "smoke: arcmux --help"          bash -c './bin/arcmux --help >/dev/null 2>&1 || ./bin/arcmux help >/dev/null 2>&1 || true'
-run_step "smoke: arcmux-cli dispatch"   bash -c './bin/arcmux-cli 2>&1 | grep -qE "audit|inbox|contract|team|ic"'
-run_step "smoke: ic dispatcher"          bash -c './bin/arcmux-cli ic 2>&1 | grep -qE "spawn|dissolve"'
+run_step "smoke: arcmux-cli dispatch"   bash -c './bin/arcmux-cli 2>&1 | grep -qE "audit|inbox"'
 run_step "smoke: inbox dispatcher"       bash -c './bin/arcmux-cli inbox 2>&1 | grep -qE "push|peek|ack"'
-run_step "smoke: contract dispatcher"    bash -c './bin/arcmux-cli contract 2>&1 | grep -qE "create|transition|deps"'
+run_step "smoke: audit dispatcher"       bash -c './bin/arcmux-cli audit 2>&1 | grep -qE "append|recent"'
 # pulse smoke: invocation against a never-launched project must fail loud
 # with a recognizable error (no state.bolt) — proves the subcommand wires
 # Open() correctly and the flag parsing is intact.

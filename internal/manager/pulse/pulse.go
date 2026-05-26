@@ -1,27 +1,29 @@
-// Package pulse drives the per-project wake loop. Without it, every agent
-// in the system (Elon, every Manager, every IC) waits for Boyan to type at
-// it. Pulse turns "queued inbox message" and "review cadence elapsed" into
-// actual `cmux send` calls so an actor wakes up, peeks its inbox, and acts.
+// Package pulse drives the per-project wake loop. Without it, a pane
+// that holds the project's primary session waits for a human to type at
+// it. Pulse turns "queued inbox message" and "review cadence elapsed"
+// into actual `mux.Send` calls so the pane wakes up, peeks its inbox,
+// and acts.
 //
-// Design choices:
+// Post-C3 design:
 //   - One Pulser per project. Each project has its own state.bolt; a single
 //     per-project process matches the store ownership model and keeps blast
-//     radius small. Cross-project orchestration is explicitly out of scope
-//     (forward-plan.md anti-roadmap).
+//     radius small. Cross-project orchestration is explicitly out of scope.
+//   - One target per project: the pane recorded in ProjectMeta. Role-class
+//     concepts (Elon / Manager / IC) were demolished in C3 — arcmux no
+//     longer enumerates panes by role. Per-session pulse (one wake per
+//     active session inbox) is a future slice; today the singleton
+//     ProjectMeta pane is the only wake target.
 //   - Triggers are OR-ed: (a) inbox depth grew since last tick OR (b) the
-//     per-role review cadence has elapsed since the last wake. Either fires
-//     ONE wake send (we don't multi-wake the same target in the same tick).
+//     review cadence has elapsed since the last wake. Either fires ONE
+//     wake send (we don't multi-wake the same target in the same tick).
 //   - State is in-memory. A restart effectively resets the cadence clock —
-//     each target gets its first wake one cadence after the pulser starts,
-//     not immediately. This avoids storm-on-restart while keeping the
-//     substrate stateless (no on-disk "last_pulse_at" to keep in sync with
-//     the bolt store).
-//   - Send failures are logged but never abort the tick. cmux can be flaky,
-//     a pane can be dead, a workspace can be closed — Pulse must outlive
-//     all of those. Auditing the failure is the durable record; the next
-//     tick will retry.
-//   - The wake target is a cmux pane ref. icspawn.go already calls
-//     `Mux.Send(ctx, slot.PaneRef, …)`, so the same target works here.
+//     the target gets its first cadence wake one cadence after the pulser
+//     starts, not immediately. This avoids storm-on-restart while keeping
+//     the substrate stateless.
+//   - Send failures are logged but never abort the tick. cmux can be
+//     flaky, a pane can be dead, a workspace can be closed — Pulse must
+//     outlive all of those. Auditing the failure is the durable record;
+//     the next tick will retry.
 package pulse
 
 import (
@@ -36,45 +38,39 @@ import (
 	"github.com/lin-labs/arcmux/internal/mux"
 )
 
-// Cadence holds per-role review intervals. A wake fires for a target when
-// `now - lastWakeAt >= cadence`, independent of inbox depth.
-type Cadence struct {
-	Elon    time.Duration
-	Manager time.Duration
-	IC      time.Duration
-}
-
-// DefaultCadence matches the lab-service rhythm Boyan set as canonical when
-// pulse moved into the arcmux daemon: Elon 30s, Manager 10s, IC 5s. These
-// are the "how often does an idle actor self-review" intervals; the
-// inbox-depth trigger is independent and fires regardless of cadence.
+// Cadence is the per-target review interval. A wake fires for the
+// project's pane when (now - lastWakeAt) >= Cadence, independent of
+// inbox depth.
 //
-// Production wiring overrides these via [pulse.cadence] in
-// ~/.config/arcmux/config.toml, so these defaults only apply when (a) the
-// pulse package is used directly (e.g. tests, the `arcmux pulse` debug
-// shim with no overrides) or (b) the user has not set the config file.
-func DefaultCadence() Cadence {
-	return Cadence{
-		Elon:    30 * time.Second,
-		Manager: 10 * time.Second,
-		IC:      5 * time.Second,
-	}
+// Pre-C3 this struct held one duration per role class (Elon / Manager /
+// IC) because arcmux enumerated panes by role. After demolition there
+// is one wake target per project, so Cadence collapses to one field.
+type Cadence struct {
+	Interval time.Duration
 }
 
-// Kind identifies the actor class behind a wake target.
-type Kind string
+// DefaultCadence returns 30s — the historical "Elon" cadence that the
+// pre-C3 daemon used for the singleton front-desk target. With teams
+// and ICs gone, this is the only cadence left and stays at 30s.
+//
+// Production wiring overrides this via [pulse.cadence] in
+// ~/.config/arcmux/config.toml.
+func DefaultCadence() Cadence {
+	return Cadence{Interval: 30 * time.Second}
+}
 
-const (
-	KindElon    Kind = "elon"
-	KindManager Kind = "manager"
-	KindIC      Kind = "ic"
-)
-
-// Target is one pane the pulser may wake on a given tick.
+// Target identifies one pane the pulser may wake on a tick. After C3
+// there is exactly one target per project — the pane stored in
+// ProjectMeta — so Kind/ID exist only for audit-log readability.
 type Target struct {
-	Kind    Kind
-	ID      string // "elon" | team slug | slot id; stable identity across ticks
-	PaneRef string // cmux target for Send (pane ref; surface refs also accepted by cmux)
+	// ID is a stable identity for the target (currently always
+	// "session" to match the ProjectMeta singleton; reserved for the
+	// per-session pulse slice).
+	ID string
+	// PaneRef is the mux target for Send (pane ref; surface refs are
+	// also accepted by cmux).
+	PaneRef string
+	// Cadence is how often this target wakes on a flat inbox.
 	Cadence time.Duration
 }
 
@@ -94,7 +90,7 @@ type Pulser struct {
 	Log     *slog.Logger
 
 	mu  sync.Mutex
-	mem map[string]*state // key: kind+":"+id
+	mem map[string]*state // key: target ID
 }
 
 // New constructs a Pulser with default cadence and time sources.
@@ -142,8 +138,8 @@ type Report struct {
 }
 
 // Run ticks every interval until ctx cancels. Returns the ctx's error so
-// callers can distinguish clean shutdown (context.Canceled) from a deeper
-// failure.
+// callers can distinguish clean shutdown (context.Canceled) from a
+// deeper failure.
 func (p *Pulser) Run(ctx context.Context, interval time.Duration) error {
 	if interval <= 0 {
 		return fmt.Errorf("pulse interval must be > 0, got %v", interval)
@@ -192,9 +188,9 @@ func (p *Pulser) Tick(ctx context.Context) (Report, error) {
 		rep.Decisions = append(rep.Decisions, d)
 	}
 
-	// One audit row per tick captures the aggregate; a row per wake is the
-	// fine-grained record. Keeping both lets a future operator answer "did
-	// pulse run at all" without scanning every wake.
+	// One audit row per tick captures the aggregate; a row per wake is
+	// the fine-grained record. Keeping both lets a future operator
+	// answer "did pulse run at all" without scanning every wake.
 	_ = p.DB.AppendAudit(store.AuditEntry{
 		Timestamp: now,
 		Action:    "pulse.tick",
@@ -209,80 +205,45 @@ func (p *Pulser) Tick(ctx context.Context) (Report, error) {
 	return rep, nil
 }
 
-// collectTargets enumerates all wake-eligible panes from the store. Elon is
-// a singleton (project meta); managers come from active teams; ICs come
-// from active slots.
+// collectTargets enumerates wake-eligible panes from the store. Post-C3
+// there is exactly one target per project — the pane recorded in
+// ProjectMeta. Absent ProjectMeta means the project was scaffolded but
+// never registered; we return an empty slice (no panic, no error) so a
+// partially-bootstrapped project ticks cleanly.
 func (p *Pulser) collectTargets() ([]Target, error) {
-	var out []Target
-
-	// Elon (singleton). Absent ProjectMeta means manager-mode never ran for
-	// this project; that's a configuration error, not a tick-time error —
-	// log and continue with the team/IC scan so a partially-bootstrapped
-	// project still pulses what it has.
-	if meta, err := p.DB.GetProjectMeta(); err == nil {
-		if meta.ElonPaneRef != "" {
-			out = append(out, Target{
-				Kind:    KindElon,
-				ID:      "elon",
-				PaneRef: meta.ElonPaneRef,
-				Cadence: p.Cadence.Elon,
-			})
+	meta, err := p.DB.GetProjectMeta()
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, nil
 		}
-	} else if !errors.Is(err, store.ErrNotFound) {
 		return nil, fmt.Errorf("get project meta: %w", err)
 	}
-
-	// Managers (one per active team).
-	teams, err := p.DB.ListTeams(store.TeamActive)
-	if err != nil {
-		return nil, fmt.Errorf("list teams: %w", err)
+	if meta.PaneRef == "" {
+		return nil, nil
 	}
-	for _, t := range teams {
-		if t.ManagerPane == "" {
-			continue
-		}
-		out = append(out, Target{
-			Kind:    KindManager,
-			ID:      t.ID,
-			PaneRef: t.ManagerPane,
-			Cadence: p.Cadence.Manager,
-		})
-	}
-
-	// ICs (one per active slot across all teams).
-	slots, err := p.DB.ListSlots("", store.SlotActive)
-	if err != nil {
-		return nil, fmt.Errorf("list slots: %w", err)
-	}
-	for _, s := range slots {
-		if s.PaneRef == "" {
-			continue
-		}
-		out = append(out, Target{
-			Kind:    KindIC,
-			ID:      s.ID,
-			PaneRef: s.PaneRef,
-			Cadence: p.Cadence.IC,
-		})
-	}
-
-	return out, nil
+	return []Target{{
+		ID:      "session",
+		PaneRef: meta.PaneRef,
+		Cadence: p.Cadence.Interval,
+	}}, nil
 }
 
-// evaluate computes the trigger for one target and sends a wake if needed.
+// evaluate computes the trigger for one target and sends a wake if
+// needed.
 func (p *Pulser) evaluate(ctx context.Context, tg Target, now time.Time) Decision {
 	depth, depthErr := p.inboxDepth(tg)
 
 	p.mu.Lock()
-	st, seen := p.mem[stateKey(tg)]
+	st, seen := p.mem[tg.ID]
 	if !seen {
-		// First sight: anchor the cadence at "now". Don't fire a wake just
-		// because we've never seen this target — it would storm-wake every
-		// pane on pulser restart. The first cadence-trigger fires one
-		// `cadence` later. An inbox-grew trigger still fires immediately
-		// if the bucket already has content (prev=0 vs current>0).
+		// First sight: anchor the cadence at "now". Don't fire a wake
+		// just because we've never seen this target — it would
+		// storm-wake on pulser restart. The first cadence-trigger
+		// fires one `cadence` later. An inbox-grew trigger still fires
+		// immediately if the bucket already has content (prev=0 vs
+		// current>0).
 		st = &state{LastInboxDepth: 0, LastWakeAt: now}
-		p.mem[stateKey(tg)] = st
+		p.mem[tg.ID] = st
 	}
 	prev := st.LastInboxDepth
 	last := st.LastWakeAt
@@ -296,11 +257,12 @@ func (p *Pulser) evaluate(ctx context.Context, tg Target, now time.Time) Decisio
 		Trigger:    TriggerNone,
 	}
 	if depthErr != nil {
-		// Inbox bucket missing for an active manager/IC is a substrate bug;
-		// for Elon it means the schema bucket is missing. Record and skip —
-		// don't crash the whole tick.
-		d.WakeError = depthErr.Error()
-		return d
+		// Inbox bucket missing for the target is not fatal (the
+		// session may not have been pushed to yet). Treat as depth 0
+		// and continue — cadence can still fire.
+		depth = 0
+		d.InboxDepth = 0
+		depthErr = nil
 	}
 
 	grew := depth > prev
@@ -311,8 +273,9 @@ func (p *Pulser) evaluate(ctx context.Context, tg Target, now time.Time) Decisio
 	case grew:
 		d.Trigger = TriggerInboxGrew
 	case elapsed && seen:
-		// Only fire cadence-elapsed for targets we've seen on a prior tick.
-		// On first sight we anchor at now (see above), so SinceLast is 0.
+		// Only fire cadence-elapsed for targets we've seen on a prior
+		// tick. On first sight we anchor at now (see above), so
+		// SinceLast is 0.
 		d.Trigger = TriggerCadenceElapsed
 	}
 
@@ -329,12 +292,13 @@ func (p *Pulser) evaluate(ctx context.Context, tg Target, now time.Time) Decisio
 
 	if err := p.Mux.Send(ctx, tg.PaneRef, body); err != nil {
 		d.WakeError = err.Error()
-		// Leave LastInboxDepth and LastWakeAt unchanged — the wake didn't
-		// land, so the next tick should re-evaluate against the same
-		// baseline and retry. This means a permanent send failure will
-		// re-fire forever; that's intentional (visible in the audit log
-		// instead of silently swallowed). A dissolved pane will drop out
-		// of collectTargets and stop being retried.
+		// Leave LastInboxDepth and LastWakeAt unchanged — the wake
+		// didn't land, so the next tick should re-evaluate against
+		// the same baseline and retry. This means a permanent send
+		// failure will re-fire forever; that's intentional (visible
+		// in the audit log instead of silently swallowed). A
+		// dissolved pane will drop out of collectTargets and stop
+		// being retried.
 		p.audit(now, tg, "pulse.wake.error", map[string]any{
 			"trigger":     string(d.Trigger),
 			"inbox_depth": depth,
@@ -359,49 +323,45 @@ func (p *Pulser) evaluate(ctx context.Context, tg Target, now time.Time) Decisio
 	return d
 }
 
+// inboxDepth returns the queued count for a target. Post-C3 the inbox
+// surface is keyed by session name; the singleton target uses the
+// project slug as its session name (matching the historical "elon"
+// inbox semantics, just without the role-coded bucket).
+//
+// A missing bucket is not an error — it means nothing has been pushed
+// yet. Callers treat that as depth 0.
 func (p *Pulser) inboxDepth(tg Target) (int, error) {
-	switch tg.Kind {
-	case KindElon:
-		return p.DB.DepthElonInbox()
-	case KindManager:
-		return p.DB.DepthManagerInbox(tg.ID)
-	case KindIC:
-		return p.DB.DepthICInbox(tg.ID)
-	default:
-		return 0, fmt.Errorf("unknown kind %q", tg.Kind)
+	n, err := p.DB.DepthSessionInbox(p.Project)
+	if err != nil {
+		if errors.Is(err, store.ErrSessionInboxMissing) {
+			return 0, nil
+		}
+		return 0, err
 	}
+	return n, nil
 }
 
 func (p *Pulser) audit(at time.Time, tg Target, action string, detail map[string]any) {
-	detail["kind"] = string(tg.Kind)
 	detail["target_id"] = tg.ID
 	detail["pane_ref"] = tg.PaneRef
 	_ = p.DB.AppendAudit(store.AuditEntry{
 		Timestamp: at,
 		Action:    action,
 		Actor:     "pulse",
-		Subject:   p.Project + "/" + string(tg.Kind) + ":" + tg.ID,
+		Subject:   p.Project + "/" + tg.ID,
 		Detail:    detail,
 	})
 }
 
-func stateKey(tg Target) string { return string(tg.Kind) + ":" + tg.ID }
-
 // buildWakeBody returns the prompt the pulser sends into the pane. Kept
-// short on purpose — the actor's own role file describes the bootstrap
-// protocol; the wake just signals "you have work, run it."
+// short on purpose — the pane's own bootstrap protocol describes what
+// to do on wake; the wake just signals "you have work, run it."
 func buildWakeBody(tg Target, depth int, since time.Duration) string {
-	role := string(tg.Kind)
-	if tg.Kind == KindManager {
-		role = "manager:" + tg.ID
-	} else if tg.Kind == KindIC {
-		role = "ic:" + tg.ID
-	}
 	return fmt.Sprintf(
 		"[arcmux pulse] %s — you have %d queued inbox message(s); "+
 			"%s since last wake. Run your bootstrap protocol: peek your "+
 			"inbox, act on what's there, then journal + scratchpad before "+
 			"yielding.",
-		role, depth, since.Round(time.Second),
+		tg.ID, depth, since.Round(time.Second),
 	)
 }

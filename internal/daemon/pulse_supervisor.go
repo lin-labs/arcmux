@@ -163,9 +163,7 @@ func (s *PulseSupervisor) Run(ctx context.Context) error {
 		"data_root", s.cfg.DataRoot,
 		"interval", s.cfg.Interval,
 		"discovery_interval", s.cfg.DiscoveryInterval,
-		"elon_cadence", s.cfg.Cadence.Elon,
-		"manager_cadence", s.cfg.Cadence.Manager,
-		"ic_cadence", s.cfg.Cadence.IC,
+		"cadence", s.cfg.Cadence.Interval,
 	)
 
 	// Immediate first scan so the supervisor isn't dead for a full
@@ -250,11 +248,7 @@ func (s *PulseSupervisor) startProject(parent context.Context, slug string) erro
 		return fmt.Errorf("open %s: %w", boltPath, err)
 	}
 
-	cad := pulse.Cadence{
-		Elon:    s.cfg.Cadence.Elon,
-		Manager: s.cfg.Cadence.Manager,
-		IC:      s.cfg.Cadence.IC,
-	}
+	cad := pulse.Cadence{Interval: s.cfg.Cadence.Interval}
 	pp := s.newPulser(slug, db, s.mux, cad)
 
 	ctx, cancel := context.WithCancel(parent)

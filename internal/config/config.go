@@ -38,7 +38,13 @@ func (m MuxConfig) Validate() error {
 }
 
 // PulseConfig drives the in-daemon pulse supervisor: one Pulser per
-// discovered project, with per-role cadence and a project-rescan cadence.
+// discovered project, with a per-target review cadence and a
+// project-rescan cadence.
+//
+// Pre-C3 this struct held one cadence per role class (elon/manager/ic)
+// because arcmux enumerated panes by role. After the pure-substrate
+// demolition there is one wake target per project, so Cadence collapses
+// to a single interval.
 //
 // Durations are stored as strings here so the TOML stays human-readable
 // ("30s", "1m"). Parse them with the helpers below.
@@ -50,12 +56,11 @@ type PulseConfig struct {
 	Cadence           PulseCadenceConfig `toml:"cadence"`
 }
 
-// PulseCadenceConfig holds per-role review intervals. A wake fires for a
-// target when (now - lastWakeAt) >= cadence, independent of inbox depth.
+// PulseCadenceConfig holds the per-target review interval. A wake fires
+// for a target when (now - lastWakeAt) >= cadence, independent of inbox
+// depth. Single field after C3 (used to be per-role).
 type PulseCadenceConfig struct {
-	Elon    string `toml:"elon"`    // "30s"
-	Manager string `toml:"manager"` // "10s"
-	IC      string `toml:"ic"`      // "5s"
+	Interval string `toml:"interval"` // "30s"
 }
 
 type DaemonConfig struct {
@@ -126,9 +131,7 @@ func Load(path string) (*Config, error) {
 			Interval:          "10s",
 			DiscoveryInterval: "60s",
 			Cadence: PulseCadenceConfig{
-				Elon:    "30s",
-				Manager: "10s",
-				IC:      "5s",
+				Interval: "30s",
 			},
 		},
 		Agents: copyAgentProfiles(defaultAgents),
@@ -183,13 +186,7 @@ func (p PulseConfig) ParsePulse() (ParsedPulse, error) {
 	if pp.DiscoveryInterval, err = parseDur("pulse.discovery_interval", p.DiscoveryInterval); err != nil {
 		return pp, err
 	}
-	if pp.Cadence.Elon, err = parseDur("pulse.cadence.elon", p.Cadence.Elon); err != nil {
-		return pp, err
-	}
-	if pp.Cadence.Manager, err = parseDur("pulse.cadence.manager", p.Cadence.Manager); err != nil {
-		return pp, err
-	}
-	if pp.Cadence.IC, err = parseDur("pulse.cadence.ic", p.Cadence.IC); err != nil {
+	if pp.Cadence.Interval, err = parseDur("pulse.cadence.interval", p.Cadence.Interval); err != nil {
 		return pp, err
 	}
 	return pp, nil
@@ -204,11 +201,10 @@ type ParsedPulse struct {
 	Cadence           ParsedCadence
 }
 
-// ParsedCadence holds per-role intervals as time.Duration.
+// ParsedCadence holds the per-target review interval as time.Duration.
+// Single field after C3 (used to be per-role: elon/manager/ic).
 type ParsedCadence struct {
-	Elon    time.Duration
-	Manager time.Duration
-	IC      time.Duration
+	Interval time.Duration
 }
 
 func parseDur(field, s string) (time.Duration, error) {
@@ -271,14 +267,8 @@ func mergePulseConfig(defaults, loaded PulseConfig) PulseConfig {
 	if out.DiscoveryInterval == "" {
 		out.DiscoveryInterval = defaults.DiscoveryInterval
 	}
-	if out.Cadence.Elon == "" {
-		out.Cadence.Elon = defaults.Cadence.Elon
-	}
-	if out.Cadence.Manager == "" {
-		out.Cadence.Manager = defaults.Cadence.Manager
-	}
-	if out.Cadence.IC == "" {
-		out.Cadence.IC = defaults.Cadence.IC
+	if out.Cadence.Interval == "" {
+		out.Cadence.Interval = defaults.Cadence.Interval
 	}
 	return out
 }

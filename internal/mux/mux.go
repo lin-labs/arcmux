@@ -2,7 +2,7 @@
 //
 // arcmux supports two backends as equal first-class citizens: cmux and tmux.
 // The active backend is chosen globally per daemon via config (`[mux] backend`).
-// Manager code (icspawn, teamspawn, pulse, health, daemon) talks to
+// Manager code (registration, pulse, health, daemon) talks to
 // `mux.Backend` and is backend-agnostic. Backend-specific operations that
 // don't translate (e.g. cmux browser panes, cmux multi-surface panes,
 // tmux Direction-based pane splitting) return ErrUnsupported when called

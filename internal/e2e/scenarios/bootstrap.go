@@ -18,15 +18,17 @@ import (
 	"github.com/lin-labs/arcmux/internal/manager/store"
 )
 
-// Bootstrap proves the substrate-only invariants of project scaffolding +
-// mission-delivery work end-to-end. ACT uses the substrate primitives the
-// same way `manager.Start` does, but without going through cmux.
+// Bootstrap proves the substrate-only invariants of project
+// scaffolding + session inbox queueing work end-to-end. ACT uses the
+// substrate primitives the same way `manager.RegisterSession` does, but
+// without going through cmux.
 //
-// Post-C2 the assertions are substrate-only: state.bolt opens, mission
-// goes to the inbox, the bootstrap script is generated (prompt-agnostic),
-// and ProjectMeta singleton roundtrips. Vault-tree scaffolding and the
-// role-file library are no longer arcmux's responsibility — those moved
-// to elonco.
+// Post-C3 assertions are substrate-only: state.bolt opens, a mission
+// queues onto the project's per-session inbox (no role-class addressing
+// involved), the bootstrap script is generated (prompt-agnostic), and
+// ProjectMeta singleton roundtrips. Vault-tree scaffolding and any
+// agent-shaped state are not arcmux's responsibility — those moved to
+// elonco.
 type Bootstrap struct{}
 
 func (Bootstrap) Name() string { return "bootstrap" }
@@ -40,8 +42,9 @@ func (Bootstrap) Run(ctx context.Context, env *e2e.Env, log io.Writer) error {
 		return fmt.Errorf("scaffold: %w", err)
 	}
 
-	// ACT 2: open store + seed mission as an inbox "add" message + write
-	// ProjectMeta singleton — same shape as manager.Start (project.go).
+	// ACT 2: open store + seed a mission as an "add" message on the
+	// project's per-session inbox + write ProjectMeta singleton — the
+	// post-C3 shape (no role-class addressing).
 	db, err := store.Open(pp.StateBolt)
 	if err != nil {
 		return fmt.Errorf("store open: %w", err)
@@ -52,7 +55,10 @@ func (Bootstrap) Run(ctx context.Context, env *e2e.Env, log io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("inbox id: %w", err)
 	}
-	if err := db.PushElonInbox(store.InboxMsg{
+	if err := db.EnsureSessionInbox(env.ProjectSlug); err != nil {
+		return fmt.Errorf("ensure session inbox: %w", err)
+	}
+	if err := db.PushSessionInbox(env.ProjectSlug, store.InboxMsg{
 		ID:         missionID,
 		Verb:       "add",
 		From:       "user",
@@ -79,14 +85,14 @@ func (Bootstrap) Run(ctx context.Context, env *e2e.Env, log io.Writer) error {
 		return fmt.Errorf("render bootstrap: %w", err)
 	}
 
-	// ACT 4: persist project meta — pulses + future heartbeats locate the
-	// front-desk through this singleton. Use a placeholder pane ref since
-	// we aren't going through cmux in this scenario.
+	// ACT 4: persist project meta — pulses + future heartbeats locate
+	// the registered pane through this singleton. Use a placeholder pane
+	// ref since we aren't going through cmux in this scenario.
 	fakePane := e2e.FormatPaneRef(0)
 	if err := db.PutProjectMeta(store.ProjectMeta{
-		ElonPaneRef:      fakePane,
-		ElonSurfaceRef:   "surface:99000",
-		ElonWorkspaceRef: "workspace:99000",
+		PaneRef:      fakePane,
+		SurfaceRef:   "surface:99000",
+		WorkspaceRef: "workspace:99000",
 	}); err != nil {
 		return fmt.Errorf("put project meta: %w", err)
 	}
@@ -96,9 +102,9 @@ func (Bootstrap) Run(ctx context.Context, env *e2e.Env, log io.Writer) error {
 		return fmt.Errorf("assert: state.bolt missing at %s: %w", pp.StateBolt, err)
 	}
 
-	msgs, err := db.PeekElonInbox(10)
+	msgs, err := db.PeekSessionInbox(env.ProjectSlug, 10)
 	if err != nil {
-		return fmt.Errorf("assert: peek elon inbox: %w", err)
+		return fmt.Errorf("assert: peek session inbox: %w", err)
 	}
 	var found *store.InboxMsg
 	for i := range msgs {
@@ -149,8 +155,8 @@ func (Bootstrap) Run(ctx context.Context, env *e2e.Env, log io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("assert: get project meta: %w", err)
 	}
-	if meta.ElonPaneRef != fakePane {
-		return fmt.Errorf("assert: project meta pane mismatch: got %q want %q", meta.ElonPaneRef, fakePane)
+	if meta.PaneRef != fakePane {
+		return fmt.Errorf("assert: project meta pane mismatch: got %q want %q", meta.PaneRef, fakePane)
 	}
 
 	fmt.Fprintf(log, "bootstrap PASS: state.bolt=%s mission_id=%s script=%s\n",

@@ -19,13 +19,15 @@ type OpenOptions struct {
 	Mux       mux.Backend // optional; pure state-attach calls leave it nil
 }
 
-// Open attaches to an already-scaffolded project's bbolt store and cmux
-// client without creating an Elon workspace. Use this from arcmux-cli
-// subcommands that need to read/write project state.
+// Open attaches to an already-registered project's bbolt store and cmux
+// client without creating a new workspace. Use this from arcmux-cli
+// subcommands or the debug pulse shim that need to read/write project
+// state.
 //
-// The caller must Close the returned Project to release the bbolt handle.
-// Concurrent Opens on the same project block on bbolt's file lock.
-func Open(_ context.Context, o OpenOptions) (*Project, error) {
+// The caller must Close the returned Registration to release the bbolt
+// handle. Concurrent Opens on the same project block on bbolt's file
+// lock.
+func Open(_ context.Context, o OpenOptions) (*Registration, error) {
 	slug, err := paths.Validate(o.Project)
 	if err != nil {
 		return nil, err
@@ -42,22 +44,22 @@ func Open(_ context.Context, o OpenOptions) (*Project, error) {
 	// Open attaches to state only; callers that need to send into the
 	// project's mux can pass o.Mux through. nil is fine — Open does no
 	// mux calls itself.
-	p := &Project{
+	r := &Registration{
 		Opts:  Options{Project: slug, DataRoot: o.DataRoot, VaultRoot: o.VaultRoot, Mux: o.Mux},
 		Paths: paths.ForProject(o.DataRoot, o.VaultRoot, slug),
 	}
 
-	// The state.bolt file is created by Bootstrap (the manager-mode Start).
-	// Open requires it exists; we don't scaffold from Open since that would
-	// hide the user error of "talking to a project that was never started."
-	if _, err := os.Stat(p.Paths.StateBolt); err != nil {
-		return nil, fmt.Errorf("project %q not started (no state.bolt at %s): %w", slug, p.Paths.StateBolt, err)
+	// The state.bolt file is created by RegisterSession. Open requires it
+	// exists; we don't scaffold from Open since that would hide the user
+	// error of "talking to a project that was never registered."
+	if _, err := os.Stat(r.Paths.StateBolt); err != nil {
+		return nil, fmt.Errorf("project %q not registered (no state.bolt at %s): %w", slug, r.Paths.StateBolt, err)
 	}
 
-	db, err := store.Open(p.Paths.StateBolt)
+	db, err := store.Open(r.Paths.StateBolt)
 	if err != nil {
 		return nil, fmt.Errorf("store open: %w", err)
 	}
-	p.DB = db
-	return p, nil
+	r.DB = db
+	return r, nil
 }

@@ -119,9 +119,7 @@ func defaultPCfg() config.ParsedPulse {
 		Interval:          50 * time.Millisecond,
 		DiscoveryInterval: 50 * time.Millisecond,
 		Cadence: config.ParsedCadence{
-			Elon:    30 * time.Second,
-			Manager: 10 * time.Second,
-			IC:      5 * time.Second,
+			Interval: 30 * time.Second,
 		},
 	}
 }
@@ -222,15 +220,11 @@ func TestSupervisor_DropsVanishedProject(t *testing.T) {
 	}
 }
 
-// TestSupervisor_CadencePropagates: per-role cadence overrides reach the
+// TestSupervisor_CadencePropagates: cadence overrides reach the
 // constructed pulser, not just the supervisor's own struct.
 func TestSupervisor_CadencePropagates(t *testing.T) {
 	pcfg := defaultPCfg()
-	pcfg.Cadence = config.ParsedCadence{
-		Elon:    7 * time.Second,
-		Manager: 3 * time.Second,
-		IC:      1 * time.Second,
-	}
+	pcfg.Cadence = config.ParsedCadence{Interval: 7 * time.Second}
 	h, s := newHarness(t, pcfg)
 	h.seedProject("alpha")
 
@@ -240,8 +234,8 @@ func TestSupervisor_CadencePropagates(t *testing.T) {
 
 	waitFor(t, time.Second, func() bool { return h.pulser("alpha") != nil }, "pulser constructed")
 	got := h.pulser("alpha").cadence
-	if got.Elon != 7*time.Second || got.Manager != 3*time.Second || got.IC != time.Second {
-		t.Errorf("cadence = %+v, want {7s 3s 1s}", got)
+	if got.Interval != 7*time.Second {
+		t.Errorf("cadence = %+v, want {Interval: 7s}", got)
 	}
 }
 

@@ -99,10 +99,9 @@ func TestSessionInboxIsolation(t *testing.T) {
 		t.Errorf("B inbox = %+v, want [mb]", gotB)
 	}
 
-	// Legacy inboxes untouched.
-	if elon, _ := db.PeekElonInbox(10); len(elon) != 0 {
-		t.Errorf("session push leaked to Elon inbox: %+v", elon)
-	}
+	// (Pre-C3 this test also asserted the now-removed Elon inbox stayed
+	// untouched. With role-class inboxes deleted, per-session isolation
+	// is the only invariant left to pin and we already pinned it above.)
 }
 
 // TestSessionInboxPeekUnknown ensures peek on a never-ensured name surfaces

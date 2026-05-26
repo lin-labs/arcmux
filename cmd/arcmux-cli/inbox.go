@@ -14,45 +14,13 @@ import (
 	"github.com/lin-labs/arcmux/internal/manager/store"
 )
 
-// queueRef identifies an inbox queue. Kind is "elon", "manager", or "ic";
-// Slug is the team slug for manager queues, the slot id for IC queues,
-// and empty for elon.
-type queueRef struct {
-	Kind string
-	Slug string
-}
-
-// parseQueue parses a --to value:
-//   - "elon" → {Kind:"elon"}
-//   - "manager:<slug>" → {Kind:"manager", Slug:<slug>} (slug validated)
-//   - "ic:<slot-id>" → {Kind:"ic", Slug:<slot-id>} (slug validated)
-//
-// Empty input returns {Kind:"elon"} so legacy callers (no --to) keep
-// behaving. The three queue kinds are intentionally addressed through the
-// same verb so callers learn one mental model rather than three.
-func parseQueue(s string) (queueRef, error) {
-	s = strings.TrimSpace(s)
-	if s == "" || s == "elon" {
-		return queueRef{Kind: "elon"}, nil
-	}
-	if strings.HasPrefix(s, "manager:") {
-		slug := strings.TrimPrefix(s, "manager:")
-		if _, err := paths.Validate(slug); err != nil {
-			return queueRef{}, fmt.Errorf("--to manager:<slug>: %w", err)
-		}
-		return queueRef{Kind: "manager", Slug: slug}, nil
-	}
-	if strings.HasPrefix(s, "ic:") {
-		slug := strings.TrimPrefix(s, "ic:")
-		if _, err := paths.Validate(slug); err != nil {
-			return queueRef{}, fmt.Errorf("--to ic:<slot-id>: %w", err)
-		}
-		return queueRef{Kind: "ic", Slug: slug}, nil
-	}
-	return queueRef{}, fmt.Errorf("--to: unknown queue %q (want 'elon', 'manager:<slug>', or 'ic:<slot-id>')", s)
-}
-
 // cmdInbox dispatches `arcmux-cli inbox <sub>`.
+//
+// After C3 the only inbox surface arcmux owns is the per-session inbox
+// (BucketSessionInbox). The CLI addresses queues uniformly by session
+// name through `--session <name>` (alias `--to <name>` kept for older
+// callers). The pre-C3 multi-kind addressing (`elon` / `manager:<slug>` /
+// `ic:<slot-id>`) is gone — arcmux no longer knows what role a pane plays.
 func cmdInbox(args []string, stdin io.Reader, stdout io.Writer) error {
 	if len(args) < 1 {
 		return fmt.Errorf("usage: arcmux-cli inbox push|peek|ack [flags]")
@@ -69,6 +37,34 @@ func cmdInbox(args []string, stdin io.Reader, stdout io.Writer) error {
 	}
 }
 
+// sessionFlag wires a pair of synonymous flags (--session, --to) so the
+// CLI accepts whichever form the caller has memorized. Returns the
+// resolved name (whichever is non-empty; --session wins on tie) or an
+// error if neither is supplied.
+type sessionFlag struct {
+	session string
+	to      string
+}
+
+func (sf *sessionFlag) attach(fs *flag.FlagSet) {
+	fs.StringVar(&sf.session, "session", "", "target session name (required; also accepts --to)")
+	fs.StringVar(&sf.to, "to", "", "alias for --session; target session name")
+}
+
+func (sf *sessionFlag) resolve() (string, error) {
+	name := strings.TrimSpace(sf.session)
+	if name == "" {
+		name = strings.TrimSpace(sf.to)
+	}
+	if name == "" {
+		return "", fmt.Errorf("--session (or --to) required")
+	}
+	if _, err := paths.Validate(name); err != nil {
+		return "", fmt.Errorf("--session %q: %w", name, err)
+	}
+	return name, nil
+}
+
 func cmdInboxPush(args []string, stdin io.Reader, stdout io.Writer) error {
 	fs := flag.NewFlagSet("inbox push", flag.ContinueOnError)
 	verb := fs.String("verb", "", "message verb (required)")
@@ -76,7 +72,8 @@ func cmdInboxPush(args []string, stdin io.Reader, stdout io.Writer) error {
 	priority := fs.Int("priority", 0, "priority (higher = more urgent)")
 	id := fs.String("id", "", "explicit message id (auto-generated when empty)")
 	refsRaw := fs.String("refs", "", "refs JSON object (optional)")
-	to := fs.String("to", "elon", "destination queue: elon | manager:<slug>")
+	var sf sessionFlag
+	sf.attach(fs)
 	project := fs.String("project", os.Getenv("ARCMUX_PROJECT"), "project slug (default $ARCMUX_PROJECT)")
 	dataRoot := fs.String("data-root", defaultDataRoot(), "ephemeral data root (default $ARCMUX_DATA or $HOME/data)")
 	if err := fs.Parse(args); err != nil {
@@ -91,7 +88,7 @@ func cmdInboxPush(args []string, stdin io.Reader, stdout io.Writer) error {
 	if _, err := paths.Validate(*project); err != nil {
 		return err
 	}
-	q, err := parseQueue(*to)
+	sessionName, err := sf.resolve()
 	if err != nil {
 		return fmt.Errorf("inbox push: %w", err)
 	}
@@ -122,6 +119,14 @@ func cmdInboxPush(args []string, stdin io.Reader, stdout io.Writer) error {
 	}
 	defer db.Close()
 
+	// Ensure-then-push: the CLI is the user-facing surface, so a push to a
+	// name we've never seen lazily creates the bucket. This matches the C1
+	// gRPC Send semantics (push implies ensure when the session isn't
+	// ready yet).
+	if err := db.EnsureSessionInbox(sessionName); err != nil {
+		return fmt.Errorf("inbox push: ensure %q: %w", sessionName, err)
+	}
+
 	m := store.InboxMsg{
 		ID:         msgID,
 		Verb:       *verb,
@@ -131,30 +136,13 @@ func cmdInboxPush(args []string, stdin io.Reader, stdout io.Writer) error {
 		Refs:       refs,
 		ReceivedAt: time.Now(),
 	}
-	switch q.Kind {
-	case "elon":
-		if err := db.PushElonInbox(m); err != nil {
-			return fmt.Errorf("inbox push: %w", err)
-		}
-	case "manager":
-		if err := db.PushManagerInbox(q.Slug, m); err != nil {
-			if errors.Is(err, store.ErrManagerInboxMissing) {
-				return fmt.Errorf("inbox push: team %q has no inbox (spawn it first)", q.Slug)
-			}
-			return fmt.Errorf("inbox push: %w", err)
-		}
-	case "ic":
-		if err := db.PushICInbox(q.Slug, m); err != nil {
-			if errors.Is(err, store.ErrICInboxMissing) {
-				return fmt.Errorf("inbox push: ic %q has no inbox (spawn the slot first)", q.Slug)
-			}
-			return fmt.Errorf("inbox push: %w", err)
-		}
+	if err := db.PushSessionInbox(sessionName, m); err != nil {
+		return fmt.Errorf("inbox push: %w", err)
 	}
 	return json.NewEncoder(stdout).Encode(map[string]any{
 		"ok":          true,
 		"id":          m.ID,
-		"to":          formatQueue(q),
+		"session":     sessionName,
 		"received_at": m.ReceivedAt.Format(time.RFC3339Nano),
 	})
 }
@@ -162,7 +150,8 @@ func cmdInboxPush(args []string, stdin io.Reader, stdout io.Writer) error {
 func cmdInboxPeek(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("inbox peek", flag.ContinueOnError)
 	n := fs.Int("n", 20, "max messages (oldest-first)")
-	to := fs.String("to", "elon", "source queue: elon | manager:<slug>")
+	var sf sessionFlag
+	sf.attach(fs)
 	project := fs.String("project", os.Getenv("ARCMUX_PROJECT"), "project slug (default $ARCMUX_PROJECT)")
 	dataRoot := fs.String("data-root", defaultDataRoot(), "ephemeral data root (default $ARCMUX_DATA or $HOME/data)")
 	if err := fs.Parse(args); err != nil {
@@ -174,7 +163,7 @@ func cmdInboxPeek(args []string, stdout io.Writer) error {
 	if _, err := paths.Validate(*project); err != nil {
 		return err
 	}
-	q, err := parseQueue(*to)
+	sessionName, err := sf.resolve()
 	if err != nil {
 		return fmt.Errorf("inbox peek: %w", err)
 	}
@@ -185,28 +174,13 @@ func cmdInboxPeek(args []string, stdout io.Writer) error {
 	}
 	defer db.Close()
 
-	var msgs []store.InboxMsg
-	switch q.Kind {
-	case "elon":
-		msgs, err = db.PeekElonInbox(*n)
-	case "manager":
-		msgs, err = db.PeekManagerInbox(q.Slug, *n)
-		// A team that has never been spawned has no inbox yet. From the
-		// CLI's perspective that is identical to an empty queue: return
-		// {"messages":[]} so polling scripts don't have to special-case
-		// the very first poll before a spawn lands.
-		if errors.Is(err, store.ErrManagerInboxMissing) {
-			msgs, err = nil, nil
-		}
-	case "ic":
-		msgs, err = db.PeekICInbox(q.Slug, *n)
-		// Same silent-empty contract as manager peek: an IC polling its
-		// own inbox in a tight loop while spawn is still in flight sees
-		// {"messages":[]} instead of an error, which keeps the IC's
-		// peek-on-every-loop pattern clean.
-		if errors.Is(err, store.ErrICInboxMissing) {
-			msgs, err = nil, nil
-		}
+	msgs, err := db.PeekSessionInbox(sessionName, *n)
+	// A session that's never been pushed to has no inbox yet. From the
+	// CLI's perspective that is identical to an empty queue: return
+	// {"messages":[]} so polling scripts don't have to special-case the
+	// very first poll before a push lands.
+	if errors.Is(err, store.ErrSessionInboxMissing) {
+		msgs, err = nil, nil
 	}
 	if err != nil {
 		return fmt.Errorf("inbox peek: %w", err)
@@ -216,14 +190,15 @@ func cmdInboxPeek(args []string, stdout io.Writer) error {
 	}
 	return json.NewEncoder(stdout).Encode(map[string]any{
 		"messages": msgs,
-		"to":       formatQueue(q),
+		"session":  sessionName,
 	})
 }
 
 func cmdInboxAck(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("inbox ack", flag.ContinueOnError)
 	id := fs.String("id", "", "message id to ack (required)")
-	to := fs.String("to", "elon", "source queue: elon | manager:<slug>")
+	var sf sessionFlag
+	sf.attach(fs)
 	project := fs.String("project", os.Getenv("ARCMUX_PROJECT"), "project slug (default $ARCMUX_PROJECT)")
 	dataRoot := fs.String("data-root", defaultDataRoot(), "ephemeral data root (default $ARCMUX_DATA or $HOME/data)")
 	if err := fs.Parse(args); err != nil {
@@ -238,7 +213,7 @@ func cmdInboxAck(args []string, stdout io.Writer) error {
 	if _, err := paths.Validate(*project); err != nil {
 		return err
 	}
-	q, err := parseQueue(*to)
+	sessionName, err := sf.resolve()
 	if err != nil {
 		return fmt.Errorf("inbox ack: %w", err)
 	}
@@ -249,41 +224,15 @@ func cmdInboxAck(args []string, stdout io.Writer) error {
 	}
 	defer db.Close()
 
-	switch q.Kind {
-	case "elon":
-		err = db.AckElonInbox(*id)
-	case "manager":
-		err = db.AckManagerInbox(q.Slug, *id)
-		if errors.Is(err, store.ErrManagerInboxMissing) {
-			return fmt.Errorf("inbox ack: team %q has no inbox", q.Slug)
-		}
-	case "ic":
-		err = db.AckICInbox(q.Slug, *id)
-		if errors.Is(err, store.ErrICInboxMissing) {
-			return fmt.Errorf("inbox ack: ic %q has no inbox", q.Slug)
-		}
-	}
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("inbox ack: id %q not found", *id)
+	if err := db.AckSessionInbox(sessionName, *id); err != nil {
+		if errors.Is(err, store.ErrSessionInboxMissing) {
+			return fmt.Errorf("inbox ack: session %q has no inbox", sessionName)
 		}
 		return fmt.Errorf("inbox ack: %w", err)
 	}
 	return json.NewEncoder(stdout).Encode(map[string]any{
-		"ok": true,
-		"id": *id,
-		"to": formatQueue(q),
+		"ok":      true,
+		"id":      *id,
+		"session": sessionName,
 	})
-}
-
-// formatQueue renders a queueRef back to the --to string form, for echoing
-// in CLI responses so scripts can confirm routing without re-parsing.
-func formatQueue(q queueRef) string {
-	switch q.Kind {
-	case "manager":
-		return "manager:" + q.Slug
-	case "ic":
-		return "ic:" + q.Slug
-	}
-	return "elon"
 }

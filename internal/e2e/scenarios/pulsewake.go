@@ -16,10 +16,10 @@ import (
 // PulseWake proves that `arcmux start` (the daemon) discovers a freshly
 // scaffolded project under its configured data_root, runs the pulse
 // supervisor against it, and emits audit rows for ticks + attempted
-// wakes. We do NOT depend on the wake landing — the project's Elon
-// pane ref is a placeholder, so the pulser emits pulse.wake.error
-// instead of pulse.wake. Either row counts: both prove the loop walked
-// all the way to "would send a wake".
+// wakes. We do NOT depend on the wake landing — the project's
+// registered pane ref is a placeholder, so the pulser emits
+// pulse.wake.error instead of pulse.wake. Either row counts: both prove
+// the loop walked all the way to "would send a wake".
 //
 // Substrate note (turn 18 risk #2): the daemon holds an exclusive bbolt
 // lock on every discovered project's state.bolt for its entire uptime.
@@ -56,9 +56,9 @@ func (PulseWake) Run(ctx context.Context, env *e2e.Env, log io.Writer) error {
 		}
 		defer db.Close()
 		if err := db.PutProjectMeta(store.ProjectMeta{
-			ElonPaneRef:      e2e.FormatPaneRef(1),
-			ElonSurfaceRef:   "surface:99001",
-			ElonWorkspaceRef: "workspace:99001",
+			PaneRef:      e2e.FormatPaneRef(1),
+			SurfaceRef:   "surface:99001",
+			WorkspaceRef: "workspace:99001",
 		}); err != nil {
 			return fmt.Errorf("put project meta: %w", err)
 		}
@@ -66,7 +66,10 @@ func (PulseWake) Run(ctx context.Context, env *e2e.Env, log io.Writer) error {
 		if err != nil {
 			return err
 		}
-		return db.PushElonInbox(store.InboxMsg{
+		if err := db.EnsureSessionInbox(env.ProjectSlug); err != nil {
+			return fmt.Errorf("ensure session inbox: %w", err)
+		}
+		return db.PushSessionInbox(env.ProjectSlug, store.InboxMsg{
 			ID:         id,
 			Verb:       "add",
 			From:       "user",
@@ -108,11 +111,12 @@ func (PulseWake) Run(ctx context.Context, env *e2e.Env, log io.Writer) error {
 	}
 
 	// pulse audit subject format: pulse.tick is the project slug;
-	// pulse.wake / pulse.wake.error is "<project>/<kind>:<target_id>" —
-	// see internal/manager/pulse/pulse.go::audit().
+	// pulse.wake / pulse.wake.error is "<project>/<target-id>" — see
+	// internal/manager/pulse/pulse.go::audit(). Post-C3 there is one
+	// target id per project: "session".
 	var wantTick, wantWake bool
 	var tickCount, wakeCount, wakeErrCount int
-	elonSuffix := "/elon:elon"
+	wakeSuffix := "/session"
 	for _, e := range entries {
 		switch e.Action {
 		case "pulse.tick":
@@ -121,12 +125,12 @@ func (PulseWake) Run(ctx context.Context, env *e2e.Env, log io.Writer) error {
 				tickCount++
 			}
 		case "pulse.wake":
-			if strings.HasSuffix(e.Subject, elonSuffix) {
+			if strings.HasSuffix(e.Subject, wakeSuffix) {
 				wantWake = true
 				wakeCount++
 			}
 		case "pulse.wake.error":
-			if strings.HasSuffix(e.Subject, elonSuffix) {
+			if strings.HasSuffix(e.Subject, wakeSuffix) {
 				wantWake = true
 				wakeErrCount++
 			}
@@ -137,7 +141,7 @@ func (PulseWake) Run(ctx context.Context, env *e2e.Env, log io.Writer) error {
 			env.ProjectSlug, len(entries))
 	}
 	if !wantWake {
-		return fmt.Errorf("assert: no pulse.wake[.error] row for elon (audit=%d entries, ticks=%d)",
+		return fmt.Errorf("assert: no pulse.wake[.error] row for session target (audit=%d entries, ticks=%d)",
 			len(entries), tickCount)
 	}
 

@@ -2,10 +2,7 @@ package manager
 
 import (
 	"context"
-	"encoding/json"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -36,37 +33,41 @@ func okCmux() *fakeRunner {
 	}}
 }
 
-func TestStartCreatesWorkspaceAndPane(t *testing.T) {
+// TestRegisterSession_CreatesWorkspaceAndPane pins the substrate-only
+// shape of the post-C4 registrar: workspace + pane + bootstrap script +
+// project meta land on disk, and the audit log records the registration.
+// Nothing role-shaped (mission inbox seed, scratchpad seed) — those are
+// the caller's job now.
+func TestRegisterSession_CreatesWorkspaceAndPane(t *testing.T) {
 	dataRoot := t.TempDir()
 	vault := t.TempDir()
 
 	f := okCmux()
 	backend := cmuxbackend.New(cmuxcli.NewWithRunnerForTest(f))
 
-	p, err := Start(context.Background(), Options{
+	r, err := RegisterSession(context.Background(), Options{
 		Agent:     "claude",
 		Project:   "demo",
-		Mission:   "do the demo",
 		Command:   "claude --some-flag",
 		DataRoot:  dataRoot,
 		VaultRoot: vault,
 		Mux:       backend,
 	})
 	if err != nil {
-		t.Fatalf("Start: %v", err)
+		t.Fatalf("RegisterSession: %v", err)
 	}
-	defer p.Close()
+	defer r.Close()
 
-	if p.ElonPane.Ref != "pane:7" {
-		t.Errorf("ElonPane.Ref = %q, want pane:7", p.ElonPane.Ref)
+	if r.Pane.Ref != "pane:7" {
+		t.Errorf("Pane.Ref = %q, want pane:7", r.Pane.Ref)
 	}
-	if p.Group.Ref != "workspace:1" {
-		t.Errorf("Group.Ref = %q, want workspace:1", p.Group.Ref)
+	if r.Group.Ref != "workspace:1" {
+		t.Errorf("Group.Ref = %q, want workspace:1", r.Group.Ref)
 	}
-	if p.BootstrapPath == "" {
+	if r.BootstrapPath == "" {
 		t.Error("BootstrapPath empty")
 	}
-	if _, err := os.Stat(p.BootstrapPath); err != nil {
+	if _, err := os.Stat(r.BootstrapPath); err != nil {
 		t.Errorf("bootstrap script missing: %v", err)
 	}
 
@@ -93,7 +94,7 @@ func TestStartCreatesWorkspaceAndPane(t *testing.T) {
 	}
 
 	// The bootstrap script body exec's the caller-supplied command verbatim.
-	body, err := os.ReadFile(p.BootstrapPath)
+	body, err := os.ReadFile(r.BootstrapPath)
 	if err != nil {
 		t.Fatalf("read bootstrap: %v", err)
 	}
@@ -101,275 +102,95 @@ func TestStartCreatesWorkspaceAndPane(t *testing.T) {
 		t.Errorf("bootstrap missing caller command:\n%s", string(body))
 	}
 
-	entries, err := p.DB.RecentAudit(10)
+	entries, err := r.DB.RecentAudit(10)
 	if err != nil {
 		t.Fatalf("RecentAudit: %v", err)
 	}
-	if len(entries) == 0 || entries[0].Action != "manager-mode-started" {
-		t.Errorf("expected manager-mode-started audit, got %+v", entries)
+	if len(entries) == 0 || entries[0].Action != "session-registered" {
+		t.Errorf("expected session-registered audit, got %+v", entries)
 	}
 }
 
-// TestStartSeedsMissionInboxAndScratchpad verifies the substrate-seeding
-// the launcher performs on every successful Start: the mission becomes the
-// first inbox message (verb=add, from=user), the audit entry records the
-// id and scratchpad path, and the scratchpad lands on disk with the
-// expected shape.
-func TestStartSeedsMissionInboxAndScratchpad(t *testing.T) {
+// TestRegisterSession_WritesProjectMeta verifies the singleton header
+// the rest of the substrate reads from lands on disk with the spawned
+// pane's ref so pulse / heartbeats can find it.
+func TestRegisterSession_WritesProjectMeta(t *testing.T) {
 	dataRoot := t.TempDir()
 	vault := t.TempDir()
-	mission := "ship the kernel by friday"
 
-	p, err := Start(context.Background(), Options{
+	r, err := RegisterSession(context.Background(), Options{
 		Agent:     "claude",
-		Project:   "seed",
-		Mission:   mission,
+		Project:   "meta",
 		Command:   "claude",
 		DataRoot:  dataRoot,
 		VaultRoot: vault,
 		Mux:       cmuxbackend.New(cmuxcli.NewWithRunnerForTest(okCmux())),
 	})
 	if err != nil {
-		t.Fatalf("Start: %v", err)
+		t.Fatalf("RegisterSession: %v", err)
 	}
-	defer p.Close()
+	defer r.Close()
 
-	// Inbox: exactly one message, with the mission body verbatim.
-	msgs, err := p.DB.PeekElonInbox(10)
+	meta, err := r.DB.GetProjectMeta()
 	if err != nil {
-		t.Fatalf("PeekElonInbox: %v", err)
+		t.Fatalf("GetProjectMeta: %v", err)
 	}
-	if len(msgs) != 1 {
-		t.Fatalf("inbox len = %d, want 1; msgs=%+v", len(msgs), msgs)
+	if meta.PaneRef != r.Pane.Ref {
+		t.Errorf("meta.PaneRef = %q, want %q", meta.PaneRef, r.Pane.Ref)
 	}
-	m := msgs[0]
-	if m.Verb != "add" || m.From != "user" || m.Body != mission {
-		t.Errorf("inbox msg = %+v, want verb=add from=user body=%q", m, mission)
-	}
-	if m.ID == "" {
-		t.Error("inbox msg ID empty")
-	}
-	if p.MissionInboxID != m.ID {
-		t.Errorf("Project.MissionInboxID = %q, want %q", p.MissionInboxID, m.ID)
-	}
-
-	// Scratchpad file exists at the path Project reports, with 0600 perms,
-	// and parses as JSON with the bootstrap struct populated.
-	info, err := os.Stat(p.ScratchpadPath)
-	if err != nil {
-		t.Fatalf("stat scratchpad: %v", err)
-	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Errorf("scratchpad perm = %o, want 0600", got)
-	}
-	if !strings.HasSuffix(p.ScratchpadPath, filepath.Join("arcmux", "seed", "scratchpads", "elon.json")) {
-		t.Errorf("scratchpad path = %q, missing expected suffix", p.ScratchpadPath)
-	}
-	body, err := os.ReadFile(p.ScratchpadPath)
-	if err != nil {
-		t.Fatalf("read scratchpad: %v", err)
-	}
-	var pad struct {
-		Turn      int `json:"turn"`
-		Bootstrap struct {
-			Project        string `json:"project"`
-			Agent          string `json:"agent"`
-			MissionSeeded  bool   `json:"mission_seeded"`
-			MissionInboxID string `json:"mission_inbox_id"`
-			MissionBytes   int    `json:"mission_bytes"`
-		} `json:"bootstrap"`
-	}
-	if err := json.Unmarshal(body, &pad); err != nil {
-		t.Fatalf("unmarshal scratchpad: %v\nraw:\n%s", err, body)
-	}
-	if pad.Turn != 0 {
-		t.Errorf("scratchpad.turn = %d, want 0", pad.Turn)
-	}
-	if pad.Bootstrap.Project != "seed" || pad.Bootstrap.Agent != "claude" {
-		t.Errorf("scratchpad bootstrap header off: %+v", pad.Bootstrap)
-	}
-	if !pad.Bootstrap.MissionSeeded {
-		t.Errorf("mission_seeded = false, want true")
-	}
-	if pad.Bootstrap.MissionInboxID != m.ID {
-		t.Errorf("scratchpad mission_inbox_id = %q, want %q", pad.Bootstrap.MissionInboxID, m.ID)
-	}
-	if pad.Bootstrap.MissionBytes != len(mission) {
-		t.Errorf("scratchpad mission_bytes = %d, want %d", pad.Bootstrap.MissionBytes, len(mission))
-	}
-
-	// Audit entry carries the seeded metadata.
-	entries, err := p.DB.RecentAudit(5)
-	if err != nil {
-		t.Fatalf("RecentAudit: %v", err)
-	}
-	if len(entries) == 0 {
-		t.Fatal("no audit entries")
-	}
-	a := entries[0]
-	if a.Action != "manager-mode-started" {
-		t.Fatalf("audit action = %q, want manager-mode-started", a.Action)
-	}
-	if got, _ := a.Detail["mission_seeded"].(bool); !got {
-		t.Errorf("audit detail.mission_seeded = %v, want true", a.Detail["mission_seeded"])
-	}
-	if got, _ := a.Detail["mission_inbox_id"].(string); got != m.ID {
-		t.Errorf("audit detail.mission_inbox_id = %q, want %q", got, m.ID)
-	}
-	if got, _ := a.Detail["scratchpad_path"].(string); got != p.ScratchpadPath {
-		t.Errorf("audit detail.scratchpad_path = %q, want %q", got, p.ScratchpadPath)
+	if meta.WorkspaceRef != r.Group.Ref {
+		t.Errorf("meta.WorkspaceRef = %q, want %q", meta.WorkspaceRef, r.Group.Ref)
 	}
 }
 
-// TestStartEmptyMissionSkipsInboxPush asserts the "no mission" branch:
-// inbox stays empty, scratchpad is still written with a (no mission
-// supplied) focus, and the audit entry records mission_seeded=false.
-func TestStartEmptyMissionSkipsInboxPush(t *testing.T) {
-	for _, mission := range []string{"", "   \n\t  "} {
-		t.Run("mission="+mission, func(t *testing.T) {
-			dataRoot := t.TempDir()
-			vault := t.TempDir()
-			p, err := Start(context.Background(), Options{
-				Agent:     "claude",
-				Project:   "empty",
-				Mission:   mission,
-				Command:   "claude",
-				DataRoot:  dataRoot,
-				VaultRoot: vault,
-				Mux:       cmuxbackend.New(cmuxcli.NewWithRunnerForTest(okCmux())),
-			})
-			if err != nil {
-				t.Fatalf("Start: %v", err)
-			}
-			defer p.Close()
-
-			msgs, err := p.DB.PeekElonInbox(10)
-			if err != nil {
-				t.Fatalf("PeekElonInbox: %v", err)
-			}
-			if len(msgs) != 0 {
-				t.Errorf("inbox len = %d, want 0 for empty mission; msgs=%+v", len(msgs), msgs)
-			}
-			if p.MissionInboxID != "" {
-				t.Errorf("MissionInboxID = %q, want empty", p.MissionInboxID)
-			}
-			if _, err := os.Stat(p.ScratchpadPath); err != nil {
-				t.Fatalf("scratchpad missing: %v", err)
-			}
-			body, err := os.ReadFile(p.ScratchpadPath)
-			if err != nil {
-				t.Fatalf("read scratchpad: %v", err)
-			}
-			if !strings.Contains(string(body), "no mission supplied") {
-				t.Errorf("scratchpad focus missing '(no mission supplied)' marker:\n%s", body)
-			}
-			entries, _ := p.DB.RecentAudit(5)
-			if got, _ := entries[0].Detail["mission_seeded"].(bool); got {
-				t.Errorf("audit mission_seeded = true, want false")
-			}
-		})
-	}
-}
-
-// TestStartE2EArcmuxCallReadback builds bin/arcmux-cli and uses it to peek
-// the seeded inbox and read the seeded scratchpad. This is the honest
-// dogfood path — the same binary every spawned pane will run.
-func TestStartE2EArcmuxCallReadback(t *testing.T) {
-	if testing.Short() {
-		t.Skip("e2e dogfood — requires building arcmux-cli binary")
-	}
-
-	bin := filepath.Join(t.TempDir(), "arcmux-cli")
-	build := exec.Command("go", "build", "-o", bin, "../../cmd/arcmux-cli")
-	build.Stderr = os.Stderr
-	if err := build.Run(); err != nil {
-		t.Fatalf("build arcmux-cli: %v", err)
-	}
-
+// TestRegisterSession_NoInboxOrScratchpadSeeded pins the post-C4
+// invariant: arcmux is a pure substrate librarian. It does NOT push a
+// mission message into any inbox, and it does NOT write a scratchpad
+// file. That seeding moved to elonco.
+func TestRegisterSession_NoInboxOrScratchpadSeeded(t *testing.T) {
 	dataRoot := t.TempDir()
 	vault := t.TempDir()
-	mission := "e2e: validate the dogfood roundtrip"
 
-	p, err := Start(context.Background(), Options{
+	r, err := RegisterSession(context.Background(), Options{
 		Agent:     "claude",
-		Project:   "e2e",
-		Mission:   mission,
+		Project:   "puresub",
 		Command:   "claude",
 		DataRoot:  dataRoot,
 		VaultRoot: vault,
 		Mux:       cmuxbackend.New(cmuxcli.NewWithRunnerForTest(okCmux())),
 	})
 	if err != nil {
-		t.Fatalf("Start: %v", err)
+		t.Fatalf("RegisterSession: %v", err)
 	}
-	// Close the launcher's DB before subprocess access — bbolt holds an
-	// exclusive write lock per file.
-	if err := p.Close(); err != nil {
-		t.Fatalf("close: %v", err)
+	defer r.Close()
+
+	// No per-session inbox sub-buckets exist — the registrar never
+	// creates one.
+	if r.DB.HasSessionInbox("puresub") {
+		t.Error("RegisterSession created a session-inbox sub-bucket; want pure-substrate (none)")
+	}
+	if r.DB.HasSessionInbox(r.Pane.Ref) {
+		t.Error("RegisterSession created a pane-keyed inbox; want pure-substrate (none)")
 	}
 
-	// arcmux-cli inbox peek — should see the mission message.
-	peek := exec.Command(bin, "inbox", "peek",
-		"--project", "e2e", "--data-root", dataRoot, "--n", "10")
-	peek.Stderr = os.Stderr
-	out, err := peek.Output()
+	// No scratchpad dir written on disk under the project's ephemeral
+	// root (scaffold creates the empty directory, but no file inside).
+	entries, err := os.ReadDir(r.Paths.Scratchpads)
 	if err != nil {
-		t.Fatalf("inbox peek: %v", err)
+		// Dir absent is also acceptable.
+		return
 	}
-	var peekOut struct {
-		Messages []struct {
-			ID   string `json:"id"`
-			Verb string `json:"verb"`
-			From string `json:"from"`
-			Body string `json:"body"`
-		} `json:"messages"`
-	}
-	if err := json.Unmarshal(out, &peekOut); err != nil {
-		t.Fatalf("decode peek: %v\nraw: %s", err, out)
-	}
-	if len(peekOut.Messages) != 1 {
-		t.Fatalf("peek messages = %d, want 1; raw=%s", len(peekOut.Messages), out)
-	}
-	m := peekOut.Messages[0]
-	if m.Verb != "add" || m.From != "user" || m.Body != mission {
-		t.Errorf("peek msg = %+v, want verb=add from=user body=%q", m, mission)
-	}
-	if m.ID != p.MissionInboxID {
-		t.Errorf("peek msg id = %q, want %q", m.ID, p.MissionInboxID)
-	}
-
-	// arcmux-cli scratchpad read — should see the seeded JSON.
-	read := exec.Command(bin, "scratchpad", "read",
-		"--project", "e2e", "--data-root", dataRoot, "--role", "elon")
-	read.Stderr = os.Stderr
-	out, err = read.Output()
-	if err != nil {
-		t.Fatalf("scratchpad read: %v", err)
-	}
-	var readOut struct {
-		Exists  bool   `json:"exists"`
-		Content string `json:"content"`
-		Path    string `json:"path"`
-	}
-	if err := json.Unmarshal(out, &readOut); err != nil {
-		t.Fatalf("decode read: %v\nraw: %s", err, out)
-	}
-	if !readOut.Exists {
-		t.Fatal("scratchpad reports exists=false after launcher seed")
-	}
-	if readOut.Path != p.ScratchpadPath {
-		t.Errorf("scratchpad path = %q, want %q", readOut.Path, p.ScratchpadPath)
-	}
-	if !strings.Contains(readOut.Content, `"mission_seeded": true`) {
-		t.Errorf("scratchpad content missing mission_seeded:true marker:\n%s", readOut.Content)
-	}
-	if !strings.Contains(readOut.Content, p.MissionInboxID) {
-		t.Errorf("scratchpad content missing mission inbox id %q:\n%s", p.MissionInboxID, readOut.Content)
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("scratchpads dir is non-empty; arcmux should not seed any files (got %v)", names)
 	}
 }
 
-func TestStartRejectsBadProject(t *testing.T) {
-	_, err := Start(context.Background(), Options{
+func TestRegisterSession_RejectsBadProject(t *testing.T) {
+	_, err := RegisterSession(context.Background(), Options{
 		Agent:     "claude",
 		Project:   "../evil",
 		DataRoot:  t.TempDir(),
@@ -381,8 +202,8 @@ func TestStartRejectsBadProject(t *testing.T) {
 	}
 }
 
-func TestStartRequiresVault(t *testing.T) {
-	_, err := Start(context.Background(), Options{
+func TestRegisterSession_RequiresVault(t *testing.T) {
+	_, err := RegisterSession(context.Background(), Options{
 		Agent:    "claude",
 		Project:  "demo",
 		DataRoot: t.TempDir(),
@@ -393,8 +214,8 @@ func TestStartRequiresVault(t *testing.T) {
 	}
 }
 
-func TestStartRequiresAgent(t *testing.T) {
-	_, err := Start(context.Background(), Options{
+func TestRegisterSession_RequiresAgent(t *testing.T) {
+	_, err := RegisterSession(context.Background(), Options{
 		Project:   "demo",
 		DataRoot:  t.TempDir(),
 		VaultRoot: t.TempDir(),

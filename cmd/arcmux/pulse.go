@@ -93,8 +93,8 @@ func cmdPulse(args []string) error {
 		return nil
 	}
 
-	fmt.Fprintf(os.Stderr, "arcmux pulse: project=%s interval=%s elon=%s manager=%s ic=%s\n",
-		*project, *interval, pp.Cadence.Elon, pp.Cadence.Manager, pp.Cadence.IC)
+	fmt.Fprintf(os.Stderr, "arcmux pulse: project=%s interval=%s cadence=%s\n",
+		*project, *interval, pp.Cadence.Interval)
 
 	if err := pp.Run(ctx, *interval); err != nil && !errors.Is(err, context.Canceled) {
 		return err

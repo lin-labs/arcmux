@@ -1,5 +1,9 @@
 // Package store implements the per-project coordination data store backed
-// by bbolt. It owns contracts, teams, audit log, inboxes, and DAG indices.
+// by bbolt. It owns project meta, audit log, and per-session inboxes —
+// the generic substrate primitives. Role-class concepts (teams/contracts/
+// slots/elon-vs-manager-vs-ic) used to live here and were removed in C3:
+// arcmux is now a pure substrate librarian and leaves agent-class decisions
+// to its callers (elonco, etc.).
 package store
 
 import (
@@ -10,51 +14,33 @@ import (
 )
 
 // CurrentSchemaVersion is the on-disk schema version this binary expects.
+//
+// The C3 demolition dropped a number of role-specific buckets
+// (teams/contracts/slots/elon-inbox/manager-inboxes/ic-inboxes plus the
+// associated DAG/state/priority indices). Old dev-time state.bolt files
+// still carry those buckets — they become orphaned dead data but do not
+// affect correctness, so the schema version stays at 1. There is no
+// migration: cutover throws away dev state.
 const CurrentSchemaVersion uint64 = 1
 
 // Bucket names.
 const (
-	BucketTeams           = "teams"
-	BucketContracts       = "contracts"
-	BucketSlots           = "slots"
-	BucketIdxTeamContract = "idx-team-contract"
-	BucketIdxTeamSlot     = "idx-team-slot"
-	BucketIdxDepsParent   = "idx-deps-parent"
-	BucketIdxDepsChild    = "idx-deps-child"
-	BucketIdxState        = "idx-state"
-	BucketIdxPriority     = "idx-priority"
-	BucketInboxElon       = "inbox-elon"
-	BucketInboxManagers   = "inbox-managers"
-	BucketInboxICs        = "inbox-ics"
-	BucketAudit           = "audit"
-	BucketMeta            = "meta"
+	// BucketAudit is the append-only project-wide audit log.
+	BucketAudit = "audit"
+	// BucketMeta holds the singleton ProjectMeta record (and the schema
+	// version key).
+	BucketMeta = "meta"
 
-	// BucketSessionInbox (C1, additive) is the parent bucket holding one
+	// BucketSessionInbox (added in C1) is the parent bucket holding one
 	// nested sub-bucket per arcmux Session — keyed by session name. Each
-	// nested bucket stores InboxMsg JSON values under time-sortable keys,
-	// same shape as the elon/manager/ic inboxes. Created lazily by
-	// EnsureSessionInbox; readers tolerate a missing sub-bucket as "no
-	// queue exists yet".
+	// nested bucket stores InboxMsg JSON values under time-sortable keys.
+	// Created lazily by EnsureSessionInbox; readers tolerate a missing
+	// sub-bucket as "no queue exists yet".
 	BucketSessionInbox = "session-inbox"
 )
 
-// AllBuckets lists buckets created on Open. BucketInboxManagers and
-// BucketInboxICs are parent buckets that hold one nested sub-bucket per
-// team / per slot respectively; the sub-buckets are created lazily by
-// EnsureManagerInbox / EnsureICInbox at spawn time.
+// AllBuckets lists buckets created on Open.
 var AllBuckets = []string{
-	BucketTeams,
-	BucketContracts,
-	BucketSlots,
-	BucketIdxTeamContract,
-	BucketIdxTeamSlot,
-	BucketIdxDepsParent,
-	BucketIdxDepsChild,
-	BucketIdxState,
-	BucketIdxPriority,
-	BucketInboxElon,
-	BucketInboxManagers,
-	BucketInboxICs,
 	BucketAudit,
 	BucketMeta,
 	BucketSessionInbox,

@@ -8,16 +8,27 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-// ProjectMeta is a per-project singleton record holding launcher-time facts
-// that downstream substrate (pulse, future heartbeats, future state-of-
-// substrate dumps) needs to locate the Elon pane after the launcher exits.
-// The audit log is append-only and not a stable lookup key; ProjectMeta is
-// the small mutable header the rest of the substrate reads from.
+// ErrNotFound is returned when a singleton or keyed lookup misses (e.g.
+// GetProjectMeta on a project that hasn't been registered yet). It used to
+// live in the (deleted) teams store; it now lives with meta because that's
+// the only single-lookup surface left after C3.
+var ErrNotFound = errors.New("not found")
+
+// ProjectMeta is a per-project singleton record holding registration-time
+// facts that downstream substrate (pulse, future heartbeats, future
+// state-of-substrate dumps) needs to locate the project's primary session
+// pane after the registrar exits. The audit log is append-only and not a
+// stable lookup key; ProjectMeta is the small mutable header the rest of
+// the substrate reads from.
+//
+// The fields are agent-class-agnostic post-C4: arcmux records WHICH pane
+// belongs to the project, not what role that pane plays. Callers (elonco,
+// other launchers) decide the agent identity.
 type ProjectMeta struct {
-	ElonPaneRef      string    `json:"elon_pane_ref"`
-	ElonSurfaceRef   string    `json:"elon_surface_ref"`
-	ElonWorkspaceRef string    `json:"elon_workspace_ref"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	PaneRef      string    `json:"pane_ref"`
+	SurfaceRef   string    `json:"surface_ref"`
+	WorkspaceRef string    `json:"workspace_ref"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 const metaProjectKey = "project-meta"

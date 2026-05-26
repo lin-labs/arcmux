@@ -7,39 +7,45 @@ import (
 	"testing"
 )
 
+// TestInboxPushPeekAck exercises the full CLI roundtrip against a single
+// session inbox: push two messages, peek (oldest-first), ack one, peek
+// again, ack last, peek empty. The post-C3 CLI addresses queues uniformly
+// by session name via --session.
 func TestInboxPushPeekAck(t *testing.T) {
 	dataRoot := t.TempDir()
 	project := "inboxtest"
+	session := "front-desk"
+
+	common := []string{"--project", project, "--data-root", dataRoot, "--session", session}
 
 	// Push #1 (auto-id, no refs).
 	var out bytes.Buffer
-	args1 := []string{
-		"--project", project, "--data-root", dataRoot,
-		"--verb", "add", "--from", "user", "--priority", "1",
-	}
+	args1 := append([]string{}, common...)
+	args1 = append(args1, "--verb", "add", "--from", "user", "--priority", "1")
 	if err := cmdInboxPush(args1, strings.NewReader("do X"), &out); err != nil {
 		t.Fatalf("push #1: %v", err)
 	}
 	var ack1 struct {
 		OK         bool   `json:"ok"`
 		ID         string `json:"id"`
+		Session    string `json:"session"`
 		ReceivedAt string `json:"received_at"`
 	}
 	if err := json.Unmarshal(out.Bytes(), &ack1); err != nil {
 		t.Fatalf("decode ack #1: %v (raw: %q)", err, out.String())
 	}
-	if !ack1.OK || ack1.ID == "" || ack1.ReceivedAt == "" {
+	if !ack1.OK || ack1.ID == "" || ack1.ReceivedAt == "" || ack1.Session != session {
 		t.Errorf("ack #1 unexpected: %+v", ack1)
 	}
 
 	// Push #2 (explicit id, refs JSON).
 	out.Reset()
-	args2 := []string{
-		"--project", project, "--data-root", dataRoot,
+	args2 := append([]string{}, common...)
+	args2 = append(args2,
 		"--verb", "revise", "--from", "user", "--priority", "2",
 		"--id", "explicit-2",
 		"--refs", `{"ticket":"T-7","linked":["a","b"]}`,
-	}
+	)
 	if err := cmdInboxPush(args2, strings.NewReader("actually Y"), &out); err != nil {
 		t.Fatalf("push #2: %v", err)
 	}
@@ -55,7 +61,9 @@ func TestInboxPushPeekAck(t *testing.T) {
 
 	// Peek (oldest-first: #1 then #2).
 	out.Reset()
-	if err := cmdInboxPeek([]string{"--project", project, "--data-root", dataRoot, "--n", "10"}, &out); err != nil {
+	peekArgs := append([]string{}, common...)
+	peekArgs = append(peekArgs, "--n", "10")
+	if err := cmdInboxPeek(peekArgs, &out); err != nil {
 		t.Fatalf("peek: %v", err)
 	}
 	var peek struct {
@@ -67,12 +75,16 @@ func TestInboxPushPeekAck(t *testing.T) {
 			Body     string         `json:"body"`
 			Refs     map[string]any `json:"refs"`
 		} `json:"messages"`
+		Session string `json:"session"`
 	}
 	if err := json.Unmarshal(out.Bytes(), &peek); err != nil {
 		t.Fatalf("decode peek: %v (raw: %q)", err, out.String())
 	}
 	if len(peek.Messages) != 2 {
 		t.Fatalf("got %d messages, want 2", len(peek.Messages))
+	}
+	if peek.Session != session {
+		t.Errorf("peek.session = %q, want %q", peek.Session, session)
 	}
 	if peek.Messages[0].ID != ack1.ID {
 		t.Errorf("peek[0].ID = %q, want %q (oldest-first)", peek.Messages[0].ID, ack1.ID)
@@ -92,12 +104,15 @@ func TestInboxPushPeekAck(t *testing.T) {
 
 	// Ack the older one.
 	out.Reset()
-	if err := cmdInboxAck([]string{"--project", project, "--data-root", dataRoot, "--id", ack1.ID}, &out); err != nil {
+	ackArgs := append([]string{}, common...)
+	ackArgs = append(ackArgs, "--id", ack1.ID)
+	if err := cmdInboxAck(ackArgs, &out); err != nil {
 		t.Fatalf("ack #1: %v", err)
 	}
 	var ackResp struct {
-		OK bool   `json:"ok"`
-		ID string `json:"id"`
+		OK      bool   `json:"ok"`
+		ID      string `json:"id"`
+		Session string `json:"session"`
 	}
 	if err := json.Unmarshal(out.Bytes(), &ackResp); err != nil {
 		t.Fatalf("decode ack resp: %v", err)
@@ -108,7 +123,7 @@ func TestInboxPushPeekAck(t *testing.T) {
 
 	// Peek again — only #2 remains.
 	out.Reset()
-	if err := cmdInboxPeek([]string{"--project", project, "--data-root", dataRoot, "--n", "10"}, &out); err != nil {
+	if err := cmdInboxPeek(peekArgs, &out); err != nil {
 		t.Fatalf("peek after ack: %v", err)
 	}
 	peek.Messages = peek.Messages[:0]
@@ -121,13 +136,15 @@ func TestInboxPushPeekAck(t *testing.T) {
 
 	// Ack last.
 	out.Reset()
-	if err := cmdInboxAck([]string{"--project", project, "--data-root", dataRoot, "--id", "explicit-2"}, &out); err != nil {
+	ackArgs2 := append([]string{}, common...)
+	ackArgs2 = append(ackArgs2, "--id", "explicit-2")
+	if err := cmdInboxAck(ackArgs2, &out); err != nil {
 		t.Fatalf("ack #2: %v", err)
 	}
 
 	// Peek-empty.
 	out.Reset()
-	if err := cmdInboxPeek([]string{"--project", project, "--data-root", dataRoot}, &out); err != nil {
+	if err := cmdInboxPeek(peekArgs, &out); err != nil {
 		t.Fatalf("peek empty: %v", err)
 	}
 	var empty struct {
@@ -141,6 +158,32 @@ func TestInboxPushPeekAck(t *testing.T) {
 	}
 }
 
+// TestInboxToFlagAlias verifies --to is accepted as a synonym for
+// --session, preserving callers that memorized the pre-C3 spelling.
+func TestInboxToFlagAlias(t *testing.T) {
+	dataRoot := t.TempDir()
+	project := "aliastest"
+
+	var out bytes.Buffer
+	pushArgs := []string{
+		"--project", project, "--data-root", dataRoot,
+		"--to", "via-to",
+		"--verb", "add", "--from", "user", "--id", "m1",
+	}
+	if err := cmdInboxPush(pushArgs, strings.NewReader("hello"), &out); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	var ack struct {
+		Session string `json:"session"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &ack); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if ack.Session != "via-to" {
+		t.Errorf("ack session = %q, want via-to", ack.Session)
+	}
+}
+
 func TestInboxPushRejectsBadInput(t *testing.T) {
 	// Strip ambient env so missing-project case actually triggers.
 	t.Setenv("ARCMUX_PROJECT", "")
@@ -151,11 +194,13 @@ func TestInboxPushRejectsBadInput(t *testing.T) {
 		args []string
 		body string
 	}{
-		{"missing verb", []string{"--project", "p", "--data-root", t.TempDir(), "--from", "u"}, "x"},
-		{"missing from", []string{"--project", "p", "--data-root", t.TempDir(), "--verb", "add"}, "x"},
-		{"missing project", []string{"--data-root", t.TempDir(), "--verb", "add", "--from", "u"}, "x"},
-		{"bad project slug", []string{"--project", "../etc", "--data-root", t.TempDir(), "--verb", "add", "--from", "u"}, "x"},
-		{"bad refs json", []string{"--project", "p", "--data-root", t.TempDir(), "--verb", "add", "--from", "u", "--refs", "not-json"}, "x"},
+		{"missing verb", []string{"--project", "p", "--data-root", t.TempDir(), "--session", "s", "--from", "u"}, "x"},
+		{"missing from", []string{"--project", "p", "--data-root", t.TempDir(), "--session", "s", "--verb", "add"}, "x"},
+		{"missing project", []string{"--data-root", t.TempDir(), "--session", "s", "--verb", "add", "--from", "u"}, "x"},
+		{"missing session", []string{"--project", "p", "--data-root", t.TempDir(), "--verb", "add", "--from", "u"}, "x"},
+		{"bad project slug", []string{"--project", "../etc", "--data-root", t.TempDir(), "--session", "s", "--verb", "add", "--from", "u"}, "x"},
+		{"bad session slug", []string{"--project", "p", "--data-root", t.TempDir(), "--session", "../evil", "--verb", "add", "--from", "u"}, "x"},
+		{"bad refs json", []string{"--project", "p", "--data-root", t.TempDir(), "--session", "s", "--verb", "add", "--from", "u", "--refs", "not-json"}, "x"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -167,14 +212,17 @@ func TestInboxPushRejectsBadInput(t *testing.T) {
 	}
 }
 
+// TestInboxAckMissingID: acking a message that isn't in the queue is
+// idempotent (returns ok), matching AckSessionInbox semantics.
 func TestInboxAckMissingID(t *testing.T) {
 	dataRoot := t.TempDir()
 	project := "ackmiss"
+	session := "s1"
 
 	// Push one so the bucket exists.
 	var out bytes.Buffer
 	if err := cmdInboxPush(
-		[]string{"--project", project, "--data-root", dataRoot, "--verb", "x", "--from", "u", "--id", "real"},
+		[]string{"--project", project, "--data-root", dataRoot, "--session", session, "--verb", "x", "--from", "u", "--id", "real"},
 		strings.NewReader("body"),
 		&out,
 	); err != nil {
@@ -182,12 +230,35 @@ func TestInboxAckMissingID(t *testing.T) {
 	}
 
 	out.Reset()
-	err := cmdInboxAck([]string{"--project", project, "--data-root", dataRoot, "--id", "nope"}, &out)
-	if err == nil {
-		t.Fatalf("expected not-found error, got nil; stdout=%q", out.String())
+	if err := cmdInboxAck([]string{"--project", project, "--data-root", dataRoot, "--session", session, "--id", "nope"}, &out); err != nil {
+		t.Fatalf("ack of missing id should be idempotent ok; got err=%v", err)
 	}
-	if !strings.Contains(err.Error(), "not found") {
-		t.Errorf("error = %q, want substring 'not found'", err)
+	var resp struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v (raw=%q)", err, out.String())
+	}
+	if !resp.OK {
+		t.Errorf("ack of missing id: ok=%v, want true (idempotent)", resp.OK)
+	}
+}
+
+// TestInboxAckUnknownSession: acking against a session that was never
+// pushed to is loud — surfaces ErrSessionInboxMissing.
+func TestInboxAckUnknownSession(t *testing.T) {
+	dataRoot := t.TempDir()
+	project := "ackunknown"
+	var out bytes.Buffer
+	err := cmdInboxAck(
+		[]string{"--project", project, "--data-root", dataRoot, "--session", "ghost", "--id", "anything"},
+		&out,
+	)
+	if err == nil {
+		t.Fatalf("ack against unknown session: want error, got nil (out=%q)", out.String())
+	}
+	if !strings.Contains(err.Error(), "no inbox") {
+		t.Errorf("err = %q, want substring 'no inbox'", err)
 	}
 }
 
@@ -199,9 +270,11 @@ func TestInboxAckRejectsMissingFields(t *testing.T) {
 		name string
 		args []string
 	}{
-		{"missing id", []string{"--project", "p", "--data-root", t.TempDir()}},
-		{"missing project", []string{"--data-root", t.TempDir(), "--id", "x"}},
-		{"bad project slug", []string{"--project", "../etc", "--data-root", t.TempDir(), "--id", "x"}},
+		{"missing id", []string{"--project", "p", "--data-root", t.TempDir(), "--session", "s"}},
+		{"missing project", []string{"--data-root", t.TempDir(), "--session", "s", "--id", "x"}},
+		{"missing session", []string{"--project", "p", "--data-root", t.TempDir(), "--id", "x"}},
+		{"bad project slug", []string{"--project", "../etc", "--data-root", t.TempDir(), "--session", "s", "--id", "x"}},
+		{"bad session slug", []string{"--project", "p", "--data-root", t.TempDir(), "--session", "../evil", "--id", "x"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -213,10 +286,13 @@ func TestInboxAckRejectsMissingFields(t *testing.T) {
 	}
 }
 
-func TestInboxPeekEmptyFreshProject(t *testing.T) {
+// TestInboxPeekEmptyFreshSession: peeking a session that was never pushed
+// to returns an empty list rather than an error — the polling-friendly
+// contract that cron-style scripts depend on.
+func TestInboxPeekEmptyFreshSession(t *testing.T) {
 	dataRoot := t.TempDir()
 	var out bytes.Buffer
-	if err := cmdInboxPeek([]string{"--project", "freshinbox", "--data-root", dataRoot, "--n", "5"}, &out); err != nil {
+	if err := cmdInboxPeek([]string{"--project", "freshinbox", "--data-root", dataRoot, "--session", "ghost", "--n", "5"}, &out); err != nil {
 		t.Fatalf("peek fresh: %v", err)
 	}
 	var got struct {
@@ -230,418 +306,38 @@ func TestInboxPeekEmptyFreshProject(t *testing.T) {
 	}
 }
 
-func TestParseQueue(t *testing.T) {
-	cases := []struct {
-		in       string
-		wantKind string
-		wantSlug string
-		wantErr  bool
-	}{
-		{"", "elon", "", false},
-		{"elon", "elon", "", false},
-		{"  elon  ", "elon", "", false},
-		{"manager:team-a", "manager", "team-a", false},
-		{"manager:auth-refactor", "manager", "auth-refactor", false},
-		{"manager:", "", "", true},
-		{"manager:../etc", "", "", true},
-		{"manager:has/slash", "", "", true},
-		{"ic:linus-1", "ic", "linus-1", false},
-		{"ic:typescript-validator", "ic", "typescript-validator", false},
-		{"ic:", "", "", true},
-		{"ic:../evil", "", "", true},
-		{"ic:has/slash", "", "", true},
-		{"unknown", "", "", true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.in, func(t *testing.T) {
-			q, err := parseQueue(tc.in)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("want error, got nil (%+v)", q)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected err: %v", err)
-			}
-			if q.Kind != tc.wantKind || q.Slug != tc.wantSlug {
-				t.Errorf("parseQueue(%q) = %+v, want kind=%s slug=%s", tc.in, q, tc.wantKind, tc.wantSlug)
-			}
-		})
-	}
-}
-
-// TestInboxManagerQueueLifecycle exercises the full push/peek/ack roundtrip
-// against a manager queue. The manager bucket has to be created out-of-band
-// because the CLI alone has no spawn primitive in this test scope; we
-// reach into the store API directly to mimic what teamspawn.Spawn does.
-func TestInboxManagerQueueLifecycle(t *testing.T) {
+// TestInboxIsolation: two sessions on the same project keep their queues
+// separate. The C3 demolition collapsed the elon/manager/ic kinds into a
+// uniform per-session bucket; this test pins that the per-name namespace
+// still isolates.
+func TestInboxIsolation(t *testing.T) {
 	dataRoot := t.TempDir()
-	project := "mgrqueue"
+	project := "isol"
 
-	// Pre-create the manager inbox bucket. In production this happens
-	// inside teamspawn.Spawn; here we use openProjectDB directly so the
-	// CLI test stays focused on the --to flag plumbing.
-	db, _, err := openProjectDB(dataRoot, project)
-	if err != nil {
-		t.Fatalf("openProjectDB: %v", err)
-	}
-	if err := db.EnsureManagerInbox("team-a"); err != nil {
-		_ = db.Close()
-		t.Fatalf("EnsureManagerInbox: %v", err)
-	}
-	_ = db.Close()
-
-	// Push to manager:team-a.
-	var out bytes.Buffer
-	pushArgs := []string{
-		"--project", project, "--data-root", dataRoot,
-		"--to", "manager:team-a",
-		"--verb", "add", "--from", "elon", "--id", "mgr-1",
-	}
-	if err := cmdInboxPush(pushArgs, strings.NewReader("plan auth refactor"), &out); err != nil {
-		t.Fatalf("push: %v", err)
-	}
-	var pushAck struct {
-		OK bool   `json:"ok"`
-		ID string `json:"id"`
-		To string `json:"to"`
-	}
-	if err := json.Unmarshal(out.Bytes(), &pushAck); err != nil {
-		t.Fatalf("decode push: %v (raw: %q)", err, out.String())
-	}
-	if !pushAck.OK || pushAck.ID != "mgr-1" || pushAck.To != "manager:team-a" {
-		t.Errorf("push ack = %+v, want ok=true id=mgr-1 to=manager:team-a", pushAck)
+	for _, s := range []string{"a", "b"} {
+		var out bytes.Buffer
+		if err := cmdInboxPush(
+			[]string{"--project", project, "--data-root", dataRoot, "--session", s, "--verb", "add", "--from", "u", "--id", "msg-" + s},
+			strings.NewReader("for "+s),
+			&out,
+		); err != nil {
+			t.Fatalf("push %s: %v", s, err)
+		}
 	}
 
-	// Peek elon queue stays empty.
-	out.Reset()
-	if err := cmdInboxPeek([]string{"--project", project, "--data-root", dataRoot}, &out); err != nil {
-		t.Fatalf("peek elon: %v", err)
-	}
-	var elonPeek struct {
-		Messages []map[string]any `json:"messages"`
-		To       string           `json:"to"`
-	}
-	if err := json.Unmarshal(out.Bytes(), &elonPeek); err != nil {
-		t.Fatalf("decode elon peek: %v", err)
-	}
-	if len(elonPeek.Messages) != 0 {
-		t.Errorf("elon queue not empty (cross-queue leak): %+v", elonPeek.Messages)
-	}
-	if elonPeek.To != "elon" {
-		t.Errorf("elon peek 'to' = %q, want elon", elonPeek.To)
-	}
-
-	// Peek manager queue finds the message.
-	out.Reset()
-	if err := cmdInboxPeek([]string{
-		"--project", project, "--data-root", dataRoot, "--to", "manager:team-a",
-	}, &out); err != nil {
-		t.Fatalf("peek manager: %v", err)
-	}
-	var mgrPeek struct {
-		Messages []struct {
-			ID   string `json:"id"`
-			Body string `json:"body"`
-			From string `json:"from"`
-		} `json:"messages"`
-		To string `json:"to"`
-	}
-	if err := json.Unmarshal(out.Bytes(), &mgrPeek); err != nil {
-		t.Fatalf("decode mgr peek: %v", err)
-	}
-	if len(mgrPeek.Messages) != 1 || mgrPeek.Messages[0].ID != "mgr-1" || mgrPeek.Messages[0].Body != "plan auth refactor" {
-		t.Errorf("manager peek = %+v, want one mgr-1 message", mgrPeek.Messages)
-	}
-	if mgrPeek.To != "manager:team-a" {
-		t.Errorf("manager peek 'to' = %q, want manager:team-a", mgrPeek.To)
-	}
-
-	// Ack manager queue message.
-	out.Reset()
-	if err := cmdInboxAck([]string{
-		"--project", project, "--data-root", dataRoot,
-		"--to", "manager:team-a", "--id", "mgr-1",
-	}, &out); err != nil {
-		t.Fatalf("ack manager: %v", err)
-	}
-
-	// Peek manager queue is empty again.
-	out.Reset()
-	if err := cmdInboxPeek([]string{
-		"--project", project, "--data-root", dataRoot, "--to", "manager:team-a",
-	}, &out); err != nil {
-		t.Fatalf("peek manager after ack: %v", err)
-	}
-	mgrPeek.Messages = nil
-	if err := json.Unmarshal(out.Bytes(), &mgrPeek); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(mgrPeek.Messages) != 0 {
-		t.Errorf("manager queue not empty after ack: %+v", mgrPeek.Messages)
-	}
-}
-
-// TestInboxManagerPushUnspawnedTeam confirms the CLI surfaces a clear
-// "spawn it first" error when pushing to a team without an inbox.
-func TestInboxManagerPushUnspawnedTeam(t *testing.T) {
-	dataRoot := t.TempDir()
-	project := "unspawned"
-	var out bytes.Buffer
-	err := cmdInboxPush(
-		[]string{
-			"--project", project, "--data-root", dataRoot,
-			"--to", "manager:ghost",
-			"--verb", "add", "--from", "elon",
-		},
-		strings.NewReader("orphan"),
-		&out,
-	)
-	if err == nil {
-		t.Fatalf("want error pushing to unspawned team, got nil; out=%q", out.String())
-	}
-	if !strings.Contains(err.Error(), "no inbox") || !strings.Contains(err.Error(), "ghost") {
-		t.Errorf("err = %q, want substring about missing inbox and team slug", err)
-	}
-}
-
-// TestInboxICQueueLifecycle mirrors TestInboxManagerQueueLifecycle but
-// against an `ic:<slot-id>` queue. The IC inbox bucket is pre-created via
-// the store API (as icspawn.Spawn would do in production) so the CLI test
-// can focus on the --to flag plumbing. Push → peek (oldest-first, no
-// cross-queue leak) → ack → empty.
-func TestInboxICQueueLifecycle(t *testing.T) {
-	dataRoot := t.TempDir()
-	project := "icqueue"
-
-	db, _, err := openProjectDB(dataRoot, project)
-	if err != nil {
-		t.Fatalf("openProjectDB: %v", err)
-	}
-	if err := db.EnsureICInbox("linus-1"); err != nil {
-		_ = db.Close()
-		t.Fatalf("EnsureICInbox: %v", err)
-	}
-	_ = db.Close()
-
-	var out bytes.Buffer
-	pushArgs := []string{
-		"--project", project, "--data-root", dataRoot,
-		"--to", "ic:linus-1",
-		"--verb", "consult", "--from", "manager", "--id", "consult-1",
-	}
-	if err := cmdInboxPush(pushArgs, strings.NewReader("use the existing http.Client"), &out); err != nil {
-		t.Fatalf("push: %v", err)
-	}
-	var pushAck struct {
-		OK bool   `json:"ok"`
-		ID string `json:"id"`
-		To string `json:"to"`
-	}
-	if err := json.Unmarshal(out.Bytes(), &pushAck); err != nil {
-		t.Fatalf("decode push: %v (raw: %q)", err, out.String())
-	}
-	if !pushAck.OK || pushAck.ID != "consult-1" || pushAck.To != "ic:linus-1" {
-		t.Errorf("push ack = %+v, want ok=true id=consult-1 to=ic:linus-1", pushAck)
-	}
-
-	// Cross-queue isolation: elon + a different ic slug stay empty.
-	out.Reset()
-	if err := cmdInboxPeek([]string{"--project", project, "--data-root", dataRoot}, &out); err != nil {
-		t.Fatalf("peek elon: %v", err)
-	}
-	var elonPeek struct {
-		Messages []map[string]any `json:"messages"`
-	}
-	_ = json.Unmarshal(out.Bytes(), &elonPeek)
-	if len(elonPeek.Messages) != 0 {
-		t.Errorf("elon queue leaked from IC push: %+v", elonPeek.Messages)
-	}
-
-	// Peek the IC queue finds the message.
-	out.Reset()
-	if err := cmdInboxPeek([]string{
-		"--project", project, "--data-root", dataRoot, "--to", "ic:linus-1",
-	}, &out); err != nil {
-		t.Fatalf("peek ic: %v", err)
-	}
-	var icPeek struct {
-		Messages []struct {
-			ID   string `json:"id"`
-			Body string `json:"body"`
-			From string `json:"from"`
-			Verb string `json:"verb"`
-		} `json:"messages"`
-		To string `json:"to"`
-	}
-	if err := json.Unmarshal(out.Bytes(), &icPeek); err != nil {
-		t.Fatalf("decode ic peek: %v", err)
-	}
-	if len(icPeek.Messages) != 1 || icPeek.Messages[0].ID != "consult-1" ||
-		icPeek.Messages[0].Body != "use the existing http.Client" ||
-		icPeek.Messages[0].Verb != "consult" {
-		t.Errorf("ic peek = %+v, want one consult-1 message", icPeek.Messages)
-	}
-	if icPeek.To != "ic:linus-1" {
-		t.Errorf("ic peek 'to' = %q, want ic:linus-1", icPeek.To)
-	}
-
-	// Ack.
-	out.Reset()
-	if err := cmdInboxAck([]string{
-		"--project", project, "--data-root", dataRoot,
-		"--to", "ic:linus-1", "--id", "consult-1",
-	}, &out); err != nil {
-		t.Fatalf("ack ic: %v", err)
-	}
-
-	// Peek again — empty.
-	out.Reset()
-	if err := cmdInboxPeek([]string{
-		"--project", project, "--data-root", dataRoot, "--to", "ic:linus-1",
-	}, &out); err != nil {
-		t.Fatalf("peek ic after ack: %v", err)
-	}
-	icPeek.Messages = nil
-	_ = json.Unmarshal(out.Bytes(), &icPeek)
-	if len(icPeek.Messages) != 0 {
-		t.Errorf("ic queue not empty after ack: %+v", icPeek.Messages)
-	}
-}
-
-// TestInboxICPushUnspawnedSlot proves the CLI surfaces a clear
-// "spawn the slot first" error when pushing to a never-spawned IC.
-func TestInboxICPushUnspawnedSlot(t *testing.T) {
-	dataRoot := t.TempDir()
-	project := "icunspawned"
-	var out bytes.Buffer
-	err := cmdInboxPush(
-		[]string{
-			"--project", project, "--data-root", dataRoot,
-			"--to", "ic:ghost",
-			"--verb", "consult", "--from", "manager",
-		},
-		strings.NewReader("orphan"),
-		&out,
-	)
-	if err == nil {
-		t.Fatalf("want error pushing to unspawned IC, got nil; out=%q", out.String())
-	}
-	if !strings.Contains(err.Error(), "no inbox") || !strings.Contains(err.Error(), "ghost") {
-		t.Errorf("err = %q, want substring about missing inbox and slot id", err)
-	}
-}
-
-// TestInboxICPeekUnspawnedReturnsEmpty mirrors the manager-peek silent-
-// empty contract: peeking a never-spawned slot returns {"messages":[]}
-// instead of erroring, so an IC bootstrap that polls before its inbox is
-// fully ready (race against spawn) sees an empty queue, not a crash.
-func TestInboxICPeekUnspawnedReturnsEmpty(t *testing.T) {
-	dataRoot := t.TempDir()
-	project := "icracey"
-	var out bytes.Buffer
-	if err := cmdInboxPeek([]string{
-		"--project", project, "--data-root", dataRoot, "--to", "ic:ghost",
-	}, &out); err != nil {
-		t.Fatalf("peek: %v", err)
-	}
-	var got struct {
-		Messages []map[string]any `json:"messages"`
-		To       string           `json:"to"`
-	}
-	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
-		t.Fatalf("decode: %v (raw: %q)", err, out.String())
-	}
-	if len(got.Messages) != 0 {
-		t.Errorf("expected empty, got %d", len(got.Messages))
-	}
-	if got.To != "ic:ghost" {
-		t.Errorf("to = %q, want ic:ghost", got.To)
-	}
-}
-
-// TestInboxICAckUnspawnedSlot proves ack against a never-spawned slot is
-// loud (not silently a no-op). Otherwise an IC could "ack" a typoed slot
-// id and never notice.
-func TestInboxICAckUnspawnedSlot(t *testing.T) {
-	dataRoot := t.TempDir()
-	project := "icackmiss"
-	var out bytes.Buffer
-	err := cmdInboxAck([]string{
-		"--project", project, "--data-root", dataRoot,
-		"--to", "ic:ghost", "--id", "anything",
-	}, &out)
-	if err == nil {
-		t.Fatalf("want error acking unspawned ic, got nil; out=%q", out.String())
-	}
-	if !strings.Contains(err.Error(), "no inbox") {
-		t.Errorf("err = %q, want substring 'no inbox'", err)
-	}
-}
-
-// TestInboxManagerPeekUnspawnedReturnsEmpty proves the polling-friendly
-// behavior: peeking a never-spawned team's inbox returns {"messages":[]}
-// instead of erroring, so cron-like scripts can race with spawn.
-func TestInboxManagerPeekUnspawnedReturnsEmpty(t *testing.T) {
-	dataRoot := t.TempDir()
-	project := "racey"
-	var out bytes.Buffer
-	if err := cmdInboxPeek([]string{
-		"--project", project, "--data-root", dataRoot, "--to", "manager:ghost",
-	}, &out); err != nil {
-		t.Fatalf("peek: %v", err)
-	}
-	var got struct {
-		Messages []map[string]any `json:"messages"`
-		To       string           `json:"to"`
-	}
-	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
-		t.Fatalf("decode: %v (raw: %q)", err, out.String())
-	}
-	if len(got.Messages) != 0 {
-		t.Errorf("expected empty, got %d", len(got.Messages))
-	}
-	if got.To != "manager:ghost" {
-		t.Errorf("to = %q, want manager:ghost", got.To)
-	}
-}
-
-func TestInboxBadQueueRejected(t *testing.T) {
-	t.Setenv("ARCMUX_PROJECT", "")
-	t.Setenv("ARCMUX_DATA", "")
-	dataRoot := t.TempDir()
-	project := "qbad"
-
-	cases := []struct {
-		name string
-		args []string
-	}{
-		{"push bad queue", []string{"--project", project, "--data-root", dataRoot,
-			"--verb", "add", "--from", "u", "--to", "nope"}},
-		{"push bad slug", []string{"--project", project, "--data-root", dataRoot,
-			"--verb", "add", "--from", "u", "--to", "manager:../evil"}},
-		{"push bad ic slug", []string{"--project", project, "--data-root", dataRoot,
-			"--verb", "add", "--from", "u", "--to", "ic:../evil"}},
-		{"peek bad queue", []string{"--project", project, "--data-root", dataRoot, "--to", "garbage"}},
-		{"peek bad ic slug", []string{"--project", project, "--data-root", dataRoot, "--to", "ic:has/slash"}},
-		{"ack bad queue", []string{"--project", project, "--data-root", dataRoot, "--id", "x", "--to", "nope"}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			var out bytes.Buffer
-			var err error
-			switch {
-			case strings.HasPrefix(tc.name, "push"):
-				err = cmdInboxPush(tc.args, strings.NewReader("body"), &out)
-			case strings.HasPrefix(tc.name, "peek"):
-				err = cmdInboxPeek(tc.args, &out)
-			case strings.HasPrefix(tc.name, "ack"):
-				err = cmdInboxAck(tc.args, &out)
-			}
-			if err == nil {
-				t.Fatalf("expected error, got nil; out=%q", out.String())
-			}
-		})
+	for _, s := range []string{"a", "b"} {
+		var out bytes.Buffer
+		if err := cmdInboxPeek([]string{"--project", project, "--data-root", dataRoot, "--session", s}, &out); err != nil {
+			t.Fatalf("peek %s: %v", s, err)
+		}
+		var got struct {
+			Messages []struct {
+				ID string `json:"id"`
+			} `json:"messages"`
+		}
+		_ = json.Unmarshal(out.Bytes(), &got)
+		if len(got.Messages) != 1 || got.Messages[0].ID != "msg-"+s {
+			t.Errorf("session %q peek = %+v, want exactly [msg-%s]", s, got.Messages, s)
+		}
 	}
 }
