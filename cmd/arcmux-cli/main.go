@@ -82,7 +82,7 @@ func main() {
 		enc.Encode(map[string]any{"session_id": r.SessionId, "state": r.State, "pid": r.Pid})
 	case "send":
 		if len(os.Args) < 3 {
-			die(fmt.Errorf("send <session_id> (text on stdin)"))
+			die(fmt.Errorf("send <session_id> (text on stdin) — run `arcmux-cli list` to see session ids"))
 		}
 		b, _ := io.ReadAll(os.Stdin)
 		r, err := c.SendPrompt(ctx, &arcmuxv1.SendPromptRequest{
@@ -94,7 +94,7 @@ func main() {
 		enc.Encode(map[string]any{"delivered": r.Delivered, "state": r.State})
 	case "capture":
 		if len(os.Args) < 3 {
-			die(fmt.Errorf("capture <session_id>"))
+			die(fmt.Errorf("capture <session_id> — run `arcmux-cli list` to see session ids"))
 		}
 		r, err := c.Capture(ctx, &arcmuxv1.CaptureRequest{SessionId: os.Args[2], IncludeHistory: true})
 		if err != nil {
@@ -103,7 +103,25 @@ func main() {
 		enc.Encode(map[string]any{"output": r.Output, "state": r.State, "idle_since": r.IdleSince})
 	case "status":
 		if len(os.Args) < 3 {
-			die(fmt.Errorf("status <session_id>"))
+			// No session id supplied — fall through to listing everything.
+			// This is the common discovery path; `arcmux-cli status` with no
+			// args used to be a usage error, but listing is the natural answer.
+			r, err := c.ListSessions(ctx, &arcmuxv1.ListSessionsRequest{})
+			if err != nil {
+				die(err)
+			}
+			out := make([]map[string]any, 0, len(r.Sessions))
+			for _, s := range r.Sessions {
+				out = append(out, map[string]any{
+					"session_id": s.SessionId,
+					"name":       s.SessionName,
+					"agent":      s.Agent,
+					"state":      s.State,
+					"owner_id":   s.OwnerId,
+				})
+			}
+			enc.Encode(map[string]any{"sessions": out, "count": len(out), "hint": "pass <session_id> for per-session detail"})
+			return
 		}
 		r, err := c.Status(ctx, &arcmuxv1.StatusRequest{SessionId: os.Args[2]})
 		if err != nil {
@@ -141,7 +159,7 @@ func main() {
 		enc.Encode(map[string]any{"sessions": out, "count": len(out)})
 	case "kill":
 		if len(os.Args) < 3 {
-			die(fmt.Errorf("kill <session_id>"))
+			die(fmt.Errorf("kill <session_id> — run `arcmux-cli list` to see session ids"))
 		}
 		r, err := c.Kill(ctx, &arcmuxv1.KillRequest{SessionId: os.Args[2]})
 		if err != nil {
