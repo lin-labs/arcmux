@@ -50,7 +50,7 @@ func run(args []string) error {
 	scenarioFilter := fs.String("scenario", "", "comma-separated scenario names (default: all)")
 	reportDir := fs.String("report-dir", "", "override report directory")
 	bin := fs.String("bin", "", "path to arcmux binary (default: ./bin/arcmux)")
-	callBin := fs.String("call", "", "path to arcmux-call binary (default: ./bin/arcmux-call)")
+	callBin := fs.String("call", "", "path to arcmux-cli binary (default: ./bin/arcmux-cli)")
 	timeout := fs.Duration("timeout", 90*time.Second, "per-scenario timeout")
 	listOnly := fs.Bool("list", false, "list available scenarios and exit")
 	keep := fs.Bool("keep", false, "keep per-scenario temp dirs even on pass")
@@ -103,7 +103,7 @@ func run(args []string) error {
 		*bin = filepath.Join(repoRoot, "bin", "arcmux")
 	}
 	if *callBin == "" {
-		*callBin = filepath.Join(repoRoot, "bin", "arcmux-call")
+		*callBin = filepath.Join(repoRoot, "bin", "arcmux-cli")
 	}
 	if *reportDir == "" {
 		*reportDir = resolveReportDir(repoRoot)

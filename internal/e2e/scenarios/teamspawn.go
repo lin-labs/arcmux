@@ -18,7 +18,7 @@ import (
 
 // TeamSpawnPipeline exercises the full reactive team-spawn primitive
 // end-to-end against a real cmux daemon. The scenario calls
-// `arcmux-call team spawn` directly (bypassing Elon) so the substrate
+// `arcmux-cli team spawn` directly (bypassing Elon) so the substrate
 // surface itself is under test.
 //
 // ACT: spawn one team in a freshly scaffolded project.
@@ -68,7 +68,7 @@ func (TeamSpawnPipeline) Run(ctx context.Context, env *e2e.Env, log io.Writer) e
 		return fmt.Errorf("cmux not reachable (start cmux first): %w", err)
 	}
 
-	// ACT: invoke `arcmux-call team spawn`. Use --focus=false so the
+	// ACT: invoke `arcmux-cli team spawn`. Use --focus=false so the
 	// scenario doesn't steal the user's focused workspace.
 	out, err := env.RunCall(ctx,
 		"team", "spawn",

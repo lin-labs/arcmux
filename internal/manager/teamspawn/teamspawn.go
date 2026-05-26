@@ -6,7 +6,7 @@
 // persists the team record (state=active, HC=0), and appends an audit row.
 //
 // The launcher's in-process Start path does NOT call Spawn — team spawn is
-// reactive and out-of-process. cmd/arcmux-call/team.go is the canonical
+// reactive and out-of-process. cmd/arcmux-cli/team.go is the canonical
 // caller; Elon's pane invokes it when a routed order warrants a new team.
 package teamspawn
 
@@ -311,7 +311,7 @@ state: active
 
 ## Headcount
 
-Manager only at spawn (HC=0). ICs join via arcmux-call (Plan 5+).
+Manager only at spawn (HC=0). ICs join via arcmux-cli (Plan 5+).
 
 ## Active contracts
 
@@ -327,7 +327,7 @@ func initialManagerScratchpad(project, slug string, o Opts, startedAt time.Time,
 	vision := strings.TrimSpace(o.Vision)
 	focus := "Fresh team spawn — read charter + inbox, write turn-0 journal, decompose vision into IC contracts."
 	next := []string{
-		"arcmux-call inbox peek --to manager:" + slug + " --n 5 (read seeded vision)",
+		"arcmux-cli inbox peek --to manager:" + slug + " --n 5 (read seeded vision)",
 		"Read $ARCMUX_VAULT/Projects/" + project + "/teams/" + slug + "/charter.md",
 		"Append turn-0 entry to teams/" + slug + "/journal.md",
 		"Decompose vision into IC contracts (CLI surface lands in Plan 5+)",
@@ -336,7 +336,7 @@ func initialManagerScratchpad(project, slug string, o Opts, startedAt time.Time,
 		focus = "(no vision supplied) — solicit clarification from Elon before dispatching ICs."
 		next = []string{
 			"Re-read charter for any updates",
-			"arcmux-call inbox peek --to manager:" + slug + " --n 5 (poll for Elon clarification)",
+			"arcmux-cli inbox peek --to manager:" + slug + " --n 5 (poll for Elon clarification)",
 			"Until Elon clarifies, no spawn decisions to make",
 		}
 	}

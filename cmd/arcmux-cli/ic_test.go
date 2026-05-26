@@ -315,19 +315,19 @@ func TestCmdICGetRequiresFlags(t *testing.T) {
 }
 
 // TestICE2EBinaryReadback mirrors TestTeamE2EBinaryReadback: builds
-// bin/arcmux-call and uses it to read slots seeded in-process via
+// bin/arcmux-cli and uses it to read slots seeded in-process via
 // icspawn. The binary's spawn path itself isn't exercised end-to-end
 // because it needs a real cmux daemon; the readback shape (list/get JSON)
 // is what every spawned IC pane will see.
 func TestICE2EBinaryReadback(t *testing.T) {
 	if testing.Short() {
-		t.Skip("e2e — requires building arcmux-call binary")
+		t.Skip("e2e — requires building arcmux-cli binary")
 	}
-	bin := filepath.Join(t.TempDir(), "arcmux-call")
+	bin := filepath.Join(t.TempDir(), "arcmux-cli")
 	build := exec.Command("go", "build", "-o", bin, ".")
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
-		t.Fatalf("build arcmux-call: %v", err)
+		t.Fatalf("build arcmux-cli: %v", err)
 	}
 
 	dataRoot := t.TempDir()
@@ -495,7 +495,7 @@ func TestCmdICDissolveRejectsMissingSlot(t *testing.T) {
 	}
 }
 
-// TestICDissolveE2EBinary builds arcmux-call and exercises spawn→dissolve→
+// TestICDissolveE2EBinary builds arcmux-cli and exercises spawn→dissolve→
 // list end-to-end against a real bolt file. The spawn step uses icspawn
 // in-process (cmux daemon isn't available); the dissolve step goes
 // through the binary's dispatcher. We can't actually run the dissolve
@@ -504,9 +504,9 @@ func TestCmdICDissolveRejectsMissingSlot(t *testing.T) {
 // with state=dissolved).
 func TestICDissolveStateReadbackBinary(t *testing.T) {
 	if testing.Short() {
-		t.Skip("e2e — requires building arcmux-call binary")
+		t.Skip("e2e — requires building arcmux-cli binary")
 	}
-	bin := filepath.Join(t.TempDir(), "arcmux-call")
+	bin := filepath.Join(t.TempDir(), "arcmux-cli")
 	build := exec.Command("go", "build", "-o", bin, ".")
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {

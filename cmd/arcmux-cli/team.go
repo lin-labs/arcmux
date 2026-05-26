@@ -15,10 +15,10 @@ import (
 	"github.com/lin-labs/arcmux/internal/manager/teamspawn"
 )
 
-// cmdTeam dispatches `arcmux-call team <sub>`.
+// cmdTeam dispatches `arcmux-cli team <sub>`.
 func cmdTeam(args []string, stdout io.Writer) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: arcmux-call team spawn|list|get [flags]")
+		return fmt.Errorf("usage: arcmux-cli team spawn|list|get [flags]")
 	}
 	switch args[0] {
 	case "spawn":
@@ -32,7 +32,7 @@ func cmdTeam(args []string, stdout io.Writer) error {
 	}
 }
 
-// cmdTeamSpawn handles `arcmux-call team spawn`. The cmuxcli.Client is
+// cmdTeamSpawn handles `arcmux-cli team spawn`. The cmuxcli.Client is
 // injected so tests can supply a fakeRunner-backed client; production
 // callers go through cmdTeam → cmuxcli.New() above.
 func cmdTeamSpawn(args []string, stdout io.Writer, cli *cmuxcli.Client) error {

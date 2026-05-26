@@ -13,10 +13,10 @@ import (
 	"github.com/lin-labs/arcmux/internal/manager/store"
 )
 
-// cmdAudit dispatches `arcmux-call audit <sub>`.
+// cmdAudit dispatches `arcmux-cli audit <sub>`.
 func cmdAudit(args []string, stdout io.Writer) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: arcmux-call audit append|recent [flags]")
+		return fmt.Errorf("usage: arcmux-cli audit append|recent [flags]")
 	}
 	switch args[0] {
 	case "append":

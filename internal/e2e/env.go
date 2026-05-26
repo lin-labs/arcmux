@@ -25,7 +25,7 @@ import (
 //     name, http addr=127.0.0.1:0 — never collides with a real daemon)
 //   - a trace log capturing every command + assertion the scenario ran
 //
-// Scenarios use Env.Run* helpers to invoke arcmux/arcmux-call subprocesses
+// Scenarios use Env.Run* helpers to invoke arcmux/arcmux-cli subprocesses
 // inheriting the right ARCMUX_* env. Teardown is best-effort and idempotent.
 type Env struct {
 	Scenario        string
@@ -52,13 +52,13 @@ type Env struct {
 // NewEnv creates a fresh isolated Env. Caller must call Teardown.
 func NewEnv(scenario, arcmuxBin, callBin string, baseEnv []string) (*Env, error) {
 	if arcmuxBin == "" || callBin == "" {
-		return nil, fmt.Errorf("NewEnv: arcmux/arcmux-call bin paths required")
+		return nil, fmt.Errorf("NewEnv: arcmux/arcmux-cli bin paths required")
 	}
 	if _, err := os.Stat(arcmuxBin); err != nil {
 		return nil, fmt.Errorf("arcmux bin %q: %w", arcmuxBin, err)
 	}
 	if _, err := os.Stat(callBin); err != nil {
-		return nil, fmt.Errorf("arcmux-call bin %q: %w", callBin, err)
+		return nil, fmt.Errorf("arcmux-cli bin %q: %w", callBin, err)
 	}
 
 	ts := time.Now().UnixNano()
@@ -332,7 +332,7 @@ func (e *Env) envBase() []string {
 	return filtered
 }
 
-// RunCall invokes `arcmux-call <args...>` with our isolated env. Returns
+// RunCall invokes `arcmux-cli <args...>` with our isolated env. Returns
 // stdout, exit error (nil on success).
 func (e *Env) RunCall(ctx context.Context, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, e.CallBin, args...)
@@ -340,24 +340,24 @@ func (e *Env) RunCall(ctx context.Context, args ...string) ([]byte, error) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	e.tracef("$ arcmux-call %s", strings.Join(args, " "))
+	e.tracef("$ arcmux-cli %s", strings.Join(args, " "))
 	err := cmd.Run()
 	if err != nil {
 		e.tracef("  err: %v stderr=%q", err, stderr.String())
-		return stdout.Bytes(), fmt.Errorf("arcmux-call %v: %w (stderr=%s)", args, err, strings.TrimSpace(stderr.String()))
+		return stdout.Bytes(), fmt.Errorf("arcmux-cli %v: %w (stderr=%s)", args, err, strings.TrimSpace(stderr.String()))
 	}
 	e.tracef("  ok: %d bytes stdout", stdout.Len())
 	return stdout.Bytes(), nil
 }
 
-// RunCallJSON unmarshals arcmux-call stdout into v.
+// RunCallJSON unmarshals arcmux-cli stdout into v.
 func (e *Env) RunCallJSON(ctx context.Context, v any, args ...string) error {
 	out, err := e.RunCall(ctx, args...)
 	if err != nil {
 		return err
 	}
 	if err := json.Unmarshal(out, v); err != nil {
-		return fmt.Errorf("decode arcmux-call %v output: %w", args, err)
+		return fmt.Errorf("decode arcmux-cli %v output: %w", args, err)
 	}
 	return nil
 }

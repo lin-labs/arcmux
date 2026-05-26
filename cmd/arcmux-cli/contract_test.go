@@ -375,8 +375,8 @@ func TestSplitCSV(t *testing.T) {
 
 func TestDefaultActor(t *testing.T) {
 	t.Setenv("ARCMUX_ROLE", "")
-	if got := defaultActor(); got != "arcmux-call" {
-		t.Errorf("unset: got %q, want arcmux-call", got)
+	if got := defaultActor(); got != "arcmux-cli" {
+		t.Errorf("unset: got %q, want arcmux-cli", got)
 	}
 	t.Setenv("ARCMUX_ROLE", "elon")
 	if got := defaultActor(); got != "elon" {
@@ -384,19 +384,19 @@ func TestDefaultActor(t *testing.T) {
 	}
 }
 
-// TestContractE2EBinaryReadback builds bin/arcmux-call and exercises the
+// TestContractE2EBinaryReadback builds bin/arcmux-cli and exercises the
 // full contract lifecycle (create → list → get → transition → deps) as a
 // subprocess. Validates that the JSON envelope shape every spawned
 // role-holder sees is the same one in-process callers get.
 func TestContractE2EBinaryReadback(t *testing.T) {
 	if testing.Short() {
-		t.Skip("e2e — requires building arcmux-call binary")
+		t.Skip("e2e — requires building arcmux-cli binary")
 	}
-	bin := filepath.Join(t.TempDir(), "arcmux-call")
+	bin := filepath.Join(t.TempDir(), "arcmux-cli")
 	build := exec.Command("go", "build", "-o", bin, ".")
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
-		t.Fatalf("build arcmux-call: %v", err)
+		t.Fatalf("build arcmux-cli: %v", err)
 	}
 
 	dataRoot := t.TempDir()

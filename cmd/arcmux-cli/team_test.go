@@ -335,7 +335,7 @@ func TestCmdTeamGetRequiresFlags(t *testing.T) {
 	}
 }
 
-// TestTeamE2EBinaryReadback builds bin/arcmux-call and uses it to read the
+// TestTeamE2EBinaryReadback builds bin/arcmux-cli and uses it to read the
 // teams seeded in-process. `team spawn` itself is not exercised through the
 // binary because the spawn flow calls real cmux; faking cmux across a
 // subprocess boundary buys nothing the in-process tests don't already
@@ -343,13 +343,13 @@ func TestCmdTeamGetRequiresFlags(t *testing.T) {
 // which is what every spawned role-holder will actually see.
 func TestTeamE2EBinaryReadback(t *testing.T) {
 	if testing.Short() {
-		t.Skip("e2e — requires building arcmux-call binary")
+		t.Skip("e2e — requires building arcmux-cli binary")
 	}
-	bin := filepath.Join(t.TempDir(), "arcmux-call")
+	bin := filepath.Join(t.TempDir(), "arcmux-cli")
 	build := exec.Command("go", "build", "-o", bin, ".")
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
-		t.Fatalf("build arcmux-call: %v", err)
+		t.Fatalf("build arcmux-cli: %v", err)
 	}
 
 	dataRoot := t.TempDir()

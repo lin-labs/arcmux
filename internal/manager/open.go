@@ -20,7 +20,7 @@ type OpenOptions struct {
 }
 
 // Open attaches to an already-scaffolded project's bbolt store and cmux
-// client without creating an Elon workspace. Use this from arcmux-call
+// client without creating an Elon workspace. Use this from arcmux-cli
 // subcommands that need to read/write project state.
 //
 // The caller must Close the returned Project to release the bbolt handle.

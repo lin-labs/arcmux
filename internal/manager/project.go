@@ -210,7 +210,7 @@ func Start(ctx context.Context, o Options) (*Project, error) {
 		return nil, fmt.Errorf("persist project meta: %w", err)
 	}
 
-	// 9. Audit the start. Direct AppendAudit (not arcmux-call subprocess)
+	// 9. Audit the start. Direct AppendAudit (not arcmux-cli subprocess)
 	// because the launcher already holds the bbolt write lock — shelling
 	// out would block on bbolt's process-wide lock.
 	_ = db.AppendAudit(store.AuditEntry{
@@ -251,12 +251,12 @@ func initialFrontDeskScratchpad(slug string, o Options, startedAt time.Time, mis
 	mission := strings.TrimSpace(o.Mission)
 	focus := "Fresh substrate launch — peek inbox (mission delivered as 'add' message), then act."
 	next := []string{
-		"`arcmux-call inbox peek` to consume the mission order",
+		"`arcmux-cli inbox peek` to consume the mission order",
 	}
 	if mission == "" {
 		focus = "(no mission supplied) — awaiting first inbox push from user."
 		next = []string{
-			"Wait for `arcmux-call inbox push --verb add --from user` to arrive",
+			"Wait for `arcmux-cli inbox push --verb add --from user` to arrive",
 		}
 	}
 

@@ -30,10 +30,10 @@ import (
 // — no daemon restart needed.
 //
 // Lock model: bbolt is single-writer-per-file. While the supervisor holds
-// a project's state.bolt, direct `arcmux-call` invocations against that
+// a project's state.bolt, direct `arcmux-cli` invocations against that
 // project will block on the file lock. That's the explicit trade Boyan
 // is making with "one arcmux"; the planned next step is to route
-// arcmux-call through the daemon's gRPC instead of opening bolt directly.
+// arcmux-cli through the daemon's gRPC instead of opening bolt directly.
 type PulseSupervisor struct {
 	cfg    config.ParsedPulse
 	cmux   pulseCmux
@@ -252,7 +252,7 @@ func (s *PulseSupervisor) startProject(parent context.Context, slug string) erro
 	boltPath := s.boltPathFor(slug)
 	// Open BEFORE registering so a failed open doesn't leave a half-tracked
 	// entry. store.Open blocks on the bbolt file lock if another arcmux
-	// holds it — acceptable contention with `arcmux-call` until the planned
+	// holds it — acceptable contention with `arcmux-cli` until the planned
 	// gRPC routing lands.
 	db, err := store.Open(boltPath)
 	if err != nil {

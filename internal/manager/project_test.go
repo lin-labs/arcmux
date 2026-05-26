@@ -270,19 +270,19 @@ func TestStartEmptyMissionSkipsInboxPush(t *testing.T) {
 	}
 }
 
-// TestStartE2EArcmuxCallReadback builds bin/arcmux-call and uses it to peek
+// TestStartE2EArcmuxCallReadback builds bin/arcmux-cli and uses it to peek
 // the seeded inbox and read the seeded scratchpad. This is the honest
 // dogfood path — the same binary every spawned pane will run.
 func TestStartE2EArcmuxCallReadback(t *testing.T) {
 	if testing.Short() {
-		t.Skip("e2e dogfood — requires building arcmux-call binary")
+		t.Skip("e2e dogfood — requires building arcmux-cli binary")
 	}
 
-	bin := filepath.Join(t.TempDir(), "arcmux-call")
-	build := exec.Command("go", "build", "-o", bin, "../../cmd/arcmux-call")
+	bin := filepath.Join(t.TempDir(), "arcmux-cli")
+	build := exec.Command("go", "build", "-o", bin, "../../cmd/arcmux-cli")
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
-		t.Fatalf("build arcmux-call: %v", err)
+		t.Fatalf("build arcmux-cli: %v", err)
 	}
 
 	dataRoot := t.TempDir()
@@ -307,7 +307,7 @@ func TestStartE2EArcmuxCallReadback(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	// arcmux-call inbox peek — should see the mission message.
+	// arcmux-cli inbox peek — should see the mission message.
 	peek := exec.Command(bin, "inbox", "peek",
 		"--project", "e2e", "--data-root", dataRoot, "--n", "10")
 	peek.Stderr = os.Stderr
@@ -337,7 +337,7 @@ func TestStartE2EArcmuxCallReadback(t *testing.T) {
 		t.Errorf("peek msg id = %q, want %q", m.ID, p.MissionInboxID)
 	}
 
-	// arcmux-call scratchpad read — should see the seeded JSON.
+	// arcmux-cli scratchpad read — should see the seeded JSON.
 	read := exec.Command(bin, "scratchpad", "read",
 		"--project", "e2e", "--data-root", dataRoot, "--role", "elon")
 	read.Stderr = os.Stderr

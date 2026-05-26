@@ -10,7 +10,7 @@
 // audit row.
 //
 // The launcher's in-process Start path does NOT call Spawn — IC spawn is
-// reactive and out-of-process. cmd/arcmux-call/ic.go is the canonical
+// reactive and out-of-process. cmd/arcmux-cli/ic.go is the canonical
 // caller; a team's manager (or Elon for hand-spawned diagnostics) invokes
 // it when a routed contract warrants a real pane.
 package icspawn
@@ -131,7 +131,7 @@ func Spawn(ctx context.Context, o Opts) (*Result, error) {
 
 	// Contract must exist, belong to this team, and not be terminal. We do
 	// NOT auto-transition pending→ready — that is the manager's call via
-	// `arcmux-call contract transition`. ic spawn is pure plumbing.
+	// `arcmux-cli contract transition`. ic spawn is pure plumbing.
 	contractRec, err := o.DB.GetContract(contractID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -209,7 +209,7 @@ func Spawn(ctx context.Context, o Opts) (*Result, error) {
 	// 2. Render the IC bootstrap script with ARCMUX_TEAM + ARCMUX_CONTRACT
 	// + ARCMUX_SLOT. The slot id is the inbox addressing key (see
 	// store.PushICInbox) — exporting it lets an IC peek its own queue
-	// with the one-liner `arcmux-call inbox peek --to ic:$ARCMUX_SLOT`
+	// with the one-liner `arcmux-cli inbox peek --to ic:$ARCMUX_SLOT`
 	// without having to derive it from the composite ARCMUX_ROLE.
 	command := agentLaunchCommand(o.Agent, roleFile)
 	bootstrapPath, err := bootstrap.Render(bootstrap.Options{
@@ -353,7 +353,7 @@ type DissolveOpts struct {
 	DB   *store.DB       // open project store; caller owns Close
 	Cmux *cmuxcli.Client // cmux client; pane close is best-effort
 	Slot string          // slot id to dissolve (validated as slug)
-	By   string          // audit actor; defaults to "arcmux-call" when empty
+	By   string          // audit actor; defaults to "arcmux-cli" when empty
 }
 
 // DissolveResult returns the artifacts of a successful Dissolve.
@@ -395,7 +395,7 @@ func Dissolve(ctx context.Context, o DissolveOpts) (*DissolveResult, error) {
 	}
 	by := o.By
 	if by == "" {
-		by = "arcmux-call"
+		by = "arcmux-cli"
 	}
 
 	slot, err := o.DB.GetSlot(slotID)
@@ -511,9 +511,9 @@ func initialICScratchpad(project, team, slot, role, arcmuxRole string, c store.C
 	objective := strings.TrimSpace(c.Objective)
 	focus := fmt.Sprintf("Fresh IC spawn — read contract %s, write turn-0 to IC scratchpad, transition contract to working when ready to start.", c.ID)
 	next := []string{
-		"arcmux-call contract get --id $ARCMUX_CONTRACT (re-read the bound contract)",
+		"arcmux-cli contract get --id $ARCMUX_CONTRACT (re-read the bound contract)",
 		"Confirm acceptance_criteria are mechanically checkable; if not, ack the contract back to the manager with a clarification request",
-		"arcmux-call contract transition --id $ARCMUX_CONTRACT --to working --reason 'IC bootstrap done'",
+		"arcmux-cli contract transition --id $ARCMUX_CONTRACT --to working --reason 'IC bootstrap done'",
 		"Begin work inside boundaries; checkpoint scratchpad after every meaningful step",
 	}
 	sum := sha256.Sum256([]byte(c.Objective))

@@ -1,6 +1,6 @@
 // Package eval implements arcmux's agent-behavioral eval harness. Where
 // internal/e2e proves the substrate behaves correctly when poked via
-// arcmux-call, internal/eval proves that an agent (claude headless) — given
+// arcmux-cli, internal/eval proves that an agent (claude headless) — given
 // a mission, a fresh workdir, and a budget — can produce an artifact that
 // passes a per-scenario assertion script.
 //

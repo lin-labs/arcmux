@@ -11,10 +11,10 @@ import (
 	"github.com/lin-labs/arcmux/internal/manager/scratchpad"
 )
 
-// cmdScratchpad dispatches `arcmux-call scratchpad <sub>`.
+// cmdScratchpad dispatches `arcmux-cli scratchpad <sub>`.
 func cmdScratchpad(args []string, stdin io.Reader, stdout io.Writer) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: arcmux-call scratchpad read|write [flags]")
+		return fmt.Errorf("usage: arcmux-cli scratchpad read|write [flags]")
 	}
 	switch args[0] {
 	case "read":

@@ -3,7 +3,7 @@
 // $ARCMUX_DATA/arcmux/<project>/scratchpads/<role>.json, written atomically.
 //
 // Two callers consume this package:
-//   - cmd/arcmux-call (out-of-process callers — spawned role panes)
+//   - cmd/arcmux-cli (out-of-process callers — spawned role panes)
 //   - internal/manager (in-process launcher seeding Elon's initial state)
 //
 // Both paths share one implementation so the byte-level semantics (perms,

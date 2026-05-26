@@ -52,10 +52,10 @@ func parseQueue(s string) (queueRef, error) {
 	return queueRef{}, fmt.Errorf("--to: unknown queue %q (want 'elon', 'manager:<slug>', or 'ic:<slot-id>')", s)
 }
 
-// cmdInbox dispatches `arcmux-call inbox <sub>`.
+// cmdInbox dispatches `arcmux-cli inbox <sub>`.
 func cmdInbox(args []string, stdin io.Reader, stdout io.Writer) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: arcmux-call inbox push|peek|ack [flags]")
+		return fmt.Errorf("usage: arcmux-cli inbox push|peek|ack [flags]")
 	}
 	switch args[0] {
 	case "push":

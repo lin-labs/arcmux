@@ -13,14 +13,14 @@ LABS_REPO ?= ~/Projects/arcmux
 
 build:
 	go build -o bin/$(BINARY) ./cmd/arcmux
-	go build -o bin/$(BINARY)-call ./cmd/arcmux-call
+	go build -o bin/$(BINARY)-cli ./cmd/arcmux-cli
 	go build -o bin/$(BINARY)-e2e ./cmd/arcmux-e2e
 	go build -o bin/$(BINARY)-eval ./cmd/arcmux-eval
 
 install: build
 	mkdir -p $(INSTALL_DIR)
 	install -m 0755 bin/$(BINARY) $(BIN)
-	install -m 0755 bin/$(BINARY)-call $(INSTALL_DIR)/$(BINARY)-call
+	install -m 0755 bin/$(BINARY)-cli $(INSTALL_DIR)/$(BINARY)-cli
 
 proto:
 	protoc -I proto \

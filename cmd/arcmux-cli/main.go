@@ -1,4 +1,4 @@
-// cmd/arcmux-call/main.go
+// cmd/arcmux-cli/main.go
 package main
 
 import (
@@ -21,13 +21,13 @@ func socketPath() string {
 }
 
 func die(err error) {
-	fmt.Fprintln(os.Stderr, "arcmux-call:", err)
+	fmt.Fprintln(os.Stderr, "arcmux-cli:", err)
 	os.Exit(1)
 }
 
 func main() {
 	if len(os.Args) < 2 {
-		die(fmt.Errorf("usage: arcmux-call create|send|capture|status|audit|inbox|scratchpad|team|contract|ic [args]"))
+		die(fmt.Errorf("usage: arcmux-cli create|send|capture|status|audit|inbox|scratchpad|team|contract|ic [args]"))
 	}
 	cmd := os.Args[1]
 

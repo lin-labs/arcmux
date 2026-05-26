@@ -13,10 +13,10 @@ import (
 	"github.com/lin-labs/arcmux/internal/manager/store"
 )
 
-// cmdContract dispatches `arcmux-call contract <sub>`.
+// cmdContract dispatches `arcmux-cli contract <sub>`.
 func cmdContract(args []string, stdin io.Reader, stdout io.Writer) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: arcmux-call contract create|get|list|transition|deps [flags]")
+		return fmt.Errorf("usage: arcmux-cli contract create|get|list|transition|deps [flags]")
 	}
 	switch args[0] {
 	case "create":
@@ -249,7 +249,7 @@ func cmdContractTransition(args []string, stdout io.Writer) error {
 	id := fs.String("id", "", "contract id (required)")
 	to := fs.String("to", "", "target state (required)")
 	reason := fs.String("reason", "", "audit reason (optional)")
-	by := fs.String("by", defaultActor(), "actor recording the transition (default $ARCMUX_ROLE or 'arcmux-call')")
+	by := fs.String("by", defaultActor(), "actor recording the transition (default $ARCMUX_ROLE or 'arcmux-cli')")
 	project := fs.String("project", os.Getenv("ARCMUX_PROJECT"), "project slug (default $ARCMUX_PROJECT)")
 	dataRoot := fs.String("data-root", defaultDataRoot(), "ephemeral data root (default $ARCMUX_DATA or $HOME/data)")
 	if err := fs.Parse(args); err != nil {
@@ -348,11 +348,11 @@ func cmdContractDeps(args []string, stdout io.Writer) error {
 
 // defaultActor picks who an audit row should credit when --by is omitted.
 // In production manager-mode launches, $ARCMUX_ROLE is "elon" (or "manager").
-// Outside that context, fall back to "arcmux-call" so the audit log still
+// Outside that context, fall back to "arcmux-cli" so the audit log still
 // records *something* identifiable rather than an empty string.
 func defaultActor() string {
 	if v := os.Getenv("ARCMUX_ROLE"); v != "" {
 		return v
 	}
-	return "arcmux-call"
+	return "arcmux-cli"
 }

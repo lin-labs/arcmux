@@ -47,7 +47,7 @@ type Runner struct {
 	KeepArtifs  bool          // keep per-scenario temp dirs after pass (default: false)
 	NowFn       func() time.Time
 	ArcmuxBin   string   // path to arcmux binary (for daemon spawn). Required.
-	CallBin     string   // path to arcmux-call binary. Required.
+	CallBin     string   // path to arcmux-cli binary. Required.
 	RepoRoot    string   // arcmux repo root (for log breadcrumbs). Optional.
 	BootEnvBase []string // OS env to inherit into spawned daemons; nil = os.Environ()
 }

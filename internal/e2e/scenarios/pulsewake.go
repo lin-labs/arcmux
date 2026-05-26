@@ -25,7 +25,7 @@ import (
 // lock on every discovered project's state.bolt for its entire uptime.
 // A sibling reader would block on flock. We therefore stop the daemon
 // before reading the audit log — a deliberate, documented order of
-// operations until §F11 (route arcmux-call through the daemon's gRPC)
+// operations until §F11 (route arcmux-cli through the daemon's gRPC)
 // lands. Once §F11 is in, the assertion can poll live without restart.
 //
 // SETUP: scaffold + state.bolt + ProjectMeta + one Elon inbox message

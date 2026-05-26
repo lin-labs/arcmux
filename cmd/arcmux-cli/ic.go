@@ -15,13 +15,13 @@ import (
 	"github.com/lin-labs/arcmux/internal/manager/store"
 )
 
-// cmdIC dispatches `arcmux-call ic <sub>`. Mirrors cmdTeam's shape: the
+// cmdIC dispatches `arcmux-cli ic <sub>`. Mirrors cmdTeam's shape: the
 // `spawn` sub takes an injectable cmuxcli.Client so unit tests can supply
 // a fakeRunner-backed client; production callers thread through to
 // cmuxcli.New() here.
 func cmdIC(args []string, stdout io.Writer) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: arcmux-call ic spawn|list|get|dissolve [flags]")
+		return fmt.Errorf("usage: arcmux-cli ic spawn|list|get|dissolve [flags]")
 	}
 	switch args[0] {
 	case "spawn":
@@ -37,7 +37,7 @@ func cmdIC(args []string, stdout io.Writer) error {
 	}
 }
 
-// cmdICSpawn handles `arcmux-call ic spawn`.
+// cmdICSpawn handles `arcmux-cli ic spawn`.
 func cmdICSpawn(args []string, stdout io.Writer, cli *cmuxcli.Client) error {
 	fs := flag.NewFlagSet("ic spawn", flag.ContinueOnError)
 	team := fs.String("team", os.Getenv("ARCMUX_TEAM"), "owning team slug (required; default $ARCMUX_TEAM)")
@@ -194,13 +194,13 @@ func cmdICGet(args []string, stdout io.Writer) error {
 	return json.NewEncoder(stdout).Encode(map[string]any{"slot": got})
 }
 
-// cmdICDissolve handles `arcmux-call ic dissolve --slot <id>`. The cmux
+// cmdICDissolve handles `arcmux-cli ic dissolve --slot <id>`. The cmux
 // client is injectable for the same reason cmdICSpawn's is: unit tests
 // fake-runner-back the close-pane call, production threads cmuxcli.New().
 func cmdICDissolve(args []string, stdout io.Writer, cli *cmuxcli.Client) error {
 	fs := flag.NewFlagSet("ic dissolve", flag.ContinueOnError)
 	slot := fs.String("slot", "", "slot id to dissolve (required, validated as slug)")
-	by := fs.String("by", defaultActor(), "actor recording the dissolve (default $ARCMUX_ROLE or 'arcmux-call')")
+	by := fs.String("by", defaultActor(), "actor recording the dissolve (default $ARCMUX_ROLE or 'arcmux-cli')")
 	project := fs.String("project", os.Getenv("ARCMUX_PROJECT"), "project slug (default $ARCMUX_PROJECT)")
 	dataRoot := fs.String("data-root", defaultDataRoot(), "ephemeral data root (default $ARCMUX_DATA or $HOME/data)")
 	if err := fs.Parse(args); err != nil {
