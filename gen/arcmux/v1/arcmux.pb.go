@@ -1229,10 +1229,17 @@ func (x *Event) GetData() map[string]string {
 // This is the substrate primitive elonco (and future orchestrators) call
 // instead of choosing SendPrompt-vs-PushInbox themselves.
 type SendRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	SessionName   string                 `protobuf:"bytes,1,opt,name=session_name,json=sessionName,proto3" json:"session_name,omitempty"`
-	Body          string                 `protobuf:"bytes,2,opt,name=body,proto3" json:"body,omitempty"`
-	From          string                 `protobuf:"bytes,3,opt,name=from,proto3" json:"from,omitempty"` // optional: caller-supplied "actor" tag for the inbox entry
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	SessionName string                 `protobuf:"bytes,1,opt,name=session_name,json=sessionName,proto3" json:"session_name,omitempty"`
+	Body        string                 `protobuf:"bytes,2,opt,name=body,proto3" json:"body,omitempty"`
+	From        string                 `protobuf:"bytes,3,opt,name=from,proto3" json:"from,omitempty"` // optional: caller-supplied "actor" tag for the inbox entry
+	// force_direct skips the readiness predicate and always tries direct
+	// delivery via the SendPrompt path. Useful as an escape hatch when the
+	// readiness check mistargets (e.g. immediately after CreateSession,
+	// when the agent is alive but hasn't completed handshake yet). On
+	// failure, the body is queued like the normal not-ready path. Empty
+	// default preserves the original "queue when not idle" semantic.
+	ForceDirect   bool `protobuf:"varint,4,opt,name=force_direct,json=forceDirect,proto3" json:"force_direct,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1286,6 +1293,13 @@ func (x *SendRequest) GetFrom() string {
 		return x.From
 	}
 	return ""
+}
+
+func (x *SendRequest) GetForceDirect() bool {
+	if x != nil {
+		return x.ForceDirect
+	}
+	return false
 }
 
 type SendResponse struct {
@@ -2043,11 +2057,12 @@ const file_arcmux_v1_arcmux_proto_rawDesc = "" +
 	"\x04data\x18\x06 \x03(\v2\x1a.arcmux.v1.Event.DataEntryR\x04data\x1a7\n" +
 	"\tDataEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"X\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"{\n" +
 	"\vSendRequest\x12!\n" +
 	"\fsession_name\x18\x01 \x01(\tR\vsessionName\x12\x12\n" +
 	"\x04body\x18\x02 \x01(\tR\x04body\x12\x12\n" +
-	"\x04from\x18\x03 \x01(\tR\x04from\"[\n" +
+	"\x04from\x18\x03 \x01(\tR\x04from\x12!\n" +
+	"\fforce_direct\x18\x04 \x01(\bR\vforceDirect\"[\n" +
 	"\fSendResponse\x12\x15\n" +
 	"\x06msg_id\x18\x01 \x01(\tR\x05msgId\x12\x1c\n" +
 	"\tdelivered\x18\x02 \x01(\bR\tdelivered\x12\x16\n" +

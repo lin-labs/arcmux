@@ -121,6 +121,88 @@ printf '%s\n' '{"type":"assistant","session_id":"test-session","message":{"conte
 	}
 }
 
+// TestCreateSession_ExecPropagatesEnvToProcess regresses the env-drop
+// bug: arcmuxv1.CreateSessionRequest.Env flows through the gRPC handler
+// and Daemon.CreateSession, gets stored on session.Session, and MUST
+// land on the spawned process's environment. For the exec transport,
+// that means cmd.Env in buildExecRunConfig contains the entries.
+//
+// We don't actually run the agent here — that requires a full claude/codex
+// fake. Instead we drive sendExecPrompt indirectly via a script masked
+// onto $PATH that just `env | grep ARCMUX_FOO` and writes to a sentinel
+// file. If the env var made it through, the sentinel has the value.
+func TestCreateSession_ExecPropagatesEnvToProcess(t *testing.T) {
+	tmpDir := t.TempDir()
+	hookDir := filepath.Join(tmpDir, "hooks")
+	sentinel := filepath.Join(tmpDir, "env.out")
+	fakeClaude := filepath.Join(tmpDir, "claude")
+	// The exec driver invokes `claude -p ... --output-format stream-json ...`.
+	// Our stub ignores the args and just dumps the env vars we care about,
+	// then emits a structured assistant message so the parser is happy.
+	script := `#!/bin/sh
+env | grep -E '^(ARCMUX_|OBS_AGENTS=)' > "` + sentinel + `" || true
+printf '%s\n' '{"type":"assistant","session_id":"test-session","message":{"content":[{"type":"text","text":"OK"}]}}'
+`
+	if err := os.WriteFile(fakeClaude, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+	t.Setenv("PATH", tmpDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cfg := &config.Config{
+		Daemon: config.DaemonConfig{
+			Socket: filepath.Join(tmpDir, "arcmux.sock"),
+			LogDir: filepath.Join(tmpDir, "logs"),
+		},
+		Hooks: config.HooksConfig{
+			HookOutputDir: hookDir,
+		},
+		Agents: config.DefaultAgentProfiles(),
+	}
+	d := New(cfg, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	d.ctx = context.Background()
+
+	sess, err := d.CreateSession(context.Background(), CreateSessionRequest{
+		Agent: "claude_exec",
+		CWD:   tmpDir,
+		Name:  "env-test",
+		Env: map[string]string{
+			"ARCMUX_FOO":       "bar",
+			"ARCMUX_ROLE_FILE": "/elon/regions/region-a.md",
+			"OBS_AGENTS":       "/tmp/obs-agents",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	// Snapshot env survived all the way to the Session object.
+	gotEnv := sess.Snapshot().Env
+	if gotEnv["ARCMUX_FOO"] != "bar" {
+		t.Errorf("session env ARCMUX_FOO=%q, want bar (full env=%v)", gotEnv["ARCMUX_FOO"], gotEnv)
+	}
+
+	// Now actually drive sendExecPrompt — that's the codepath the
+	// subprocess inherits cmd.Env from.
+	if err := d.SendPrompt(context.Background(), sess.Snapshot().ID, "hello", true, true); err != nil {
+		t.Fatalf("SendPrompt: %v", err)
+	}
+
+	// The fake claude wrote the captured env to sentinel.
+	data, err := os.ReadFile(sentinel)
+	if err != nil {
+		t.Fatalf("read sentinel: %v", err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "ARCMUX_FOO=bar") {
+		t.Errorf("sentinel missing ARCMUX_FOO=bar; got:\n%s", got)
+	}
+	if !strings.Contains(got, "ARCMUX_ROLE_FILE=/elon/regions/region-a.md") {
+		t.Errorf("sentinel missing ARCMUX_ROLE_FILE; got:\n%s", got)
+	}
+	if !strings.Contains(got, "OBS_AGENTS=/tmp/obs-agents") {
+		t.Errorf("sentinel missing OBS_AGENTS; got:\n%s", got)
+	}
+}
+
 func TestCreateSessionPersistsExecSessionImmediately(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := &config.Config{

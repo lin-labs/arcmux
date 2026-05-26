@@ -420,8 +420,10 @@ func (d *Daemon) CreateSession(ctx context.Context, req CreateSessionRequest) (*
 		window = name
 	}
 
-	// Create tmux session or window
-	target, err := d.setupTmuxPane(ctx, tmuxSession, window, req.CWD)
+	// Create tmux session or window. Pass the caller-supplied env through
+	// so ARCMUX_PROJECT / ARCMUX_ROLE_FILE / OBS_AGENTS / ... are visible
+	// to the spawned shell — every elon role file relies on this contract.
+	target, err := d.setupTmuxPane(ctx, tmuxSession, window, req.CWD, req.Env)
 	if err != nil {
 		sess.SetState(session.StateFailed)
 		return nil, fmt.Errorf("setup tmux pane: %w", err)
@@ -495,6 +497,7 @@ func (d *Daemon) startAgentLifecycle(id string, sess *session.Session, prof prof
 			})
 			return
 		}
+		sess.SetCurrentCommand(truncatePreview(prompt, 200))
 		sess.SetState(session.StateWorking)
 		sess.ResetNudge()
 		d.emitStateChanged(id, session.StateWorking, "prompt delivered")
@@ -557,6 +560,12 @@ func (d *Daemon) SendPrompt(ctx context.Context, sessionID, text string, confirm
 		return err
 	}
 
+	// Track the last prompt as the session's current_command so the
+	// persisted sessions.json reflects what the agent is working on,
+	// and arcmux-cli capture / list responses show it without scraping
+	// the pane. Mirrors what the exec transport already sets for
+	// subprocess commands.
+	sess.SetCurrentCommand(truncatePreview(text, 200))
 	sess.SetState(session.StateWorking)
 	sess.ResetNudge()
 	d.emitStateChanged(sessionID, session.StateWorking, "prompt delivered")
@@ -701,6 +710,74 @@ func (d *Daemon) emitStateChanged(sessionID string, state session.State, message
 		Message:   message,
 		Timestamp: time.Now(),
 	})
+	// On every transition INTO idle, opportunistically drain the
+	// session_inbox so queued messages don't sit forever waiting on a
+	// caller to poll Ready + reissue Send. Closes the "first Send after
+	// CreateSession queued, then never re-delivered" gap and the wider
+	// "messages sit forever if the agent doesn't poll" hole.
+	//
+	// Best-effort + fire-and-forget — a slow drain must NOT block the
+	// state machine. drainInboxOnIdle re-checks state inside the
+	// goroutine, ignores empty/missing inboxes, and short-circuits if
+	// the session has already moved away from idle.
+	if state == session.StateIdle {
+		go d.drainInboxOnIdle(sessionID)
+	}
+}
+
+// drainInboxOnIdle is the state-transition hook for inbox draining. Runs
+// once per idle transition, delivers at most one queued message, then
+// returns. SendPrompt itself will flip the session back to Working, which
+// produces another idle transition when the prompt completes — that next
+// transition picks up the next queued message. This avoids any recursive
+// loop while still making forward progress one message at a time.
+func (d *Daemon) drainInboxOnIdle(sessionID string) {
+	sess, ok := d.GetSession(sessionID)
+	if !ok {
+		return
+	}
+	if !sessionReady(sess) {
+		return
+	}
+	snap := sess.Snapshot()
+	if snap.Name == "" {
+		// Inbox is keyed by session name (not the opaque session_id).
+		// Sessions without a stable name are out of scope for the C1
+		// substrate; nothing to drain.
+		return
+	}
+	st := d.State()
+	if st == nil {
+		return
+	}
+	msgs, err := st.PeekSessionInbox(snap.Name, 1)
+	if err != nil || len(msgs) == 0 {
+		return
+	}
+	msg := msgs[0]
+	// Deliver via the normal SendPrompt path so all the usual side
+	// effects (state→Working, prompt_delivered event, audit row) fire.
+	if err := d.SendPrompt(d.ctx, snap.ID, msg.Body, true, false); err != nil {
+		d.logger.Warn("inbox drain: SendPrompt failed; leaving message queued",
+			"session_id", snap.ID, "name", snap.Name, "msg_id", msg.ID, "error", err)
+		return
+	}
+	// Ack — message left the queue and is now in the agent.
+	if err := st.AckSessionInbox(snap.Name, msg.ID); err != nil {
+		d.logger.Warn("inbox drain: ack failed (msg already delivered)",
+			"session_id", snap.ID, "name", snap.Name, "msg_id", msg.ID, "error", err)
+	}
+	d.auditSessionEvent("inbox.drain.delivered", sess, map[string]any{
+		"msg_id": msg.ID,
+		"from":   msg.From,
+	})
+	d.logger.Info("session.send.drained",
+		"session_id", snap.ID,
+		"name", snap.Name,
+		"msg_id", msg.ID,
+		"from", msg.From,
+		"bytes", len(msg.Body),
+	)
 }
 
 func (d *Daemon) relayHealthEvents() {
@@ -721,19 +798,22 @@ func (d *Daemon) relayHealthEvents() {
 	}
 }
 
-func (d *Daemon) setupTmuxPane(ctx context.Context, tmuxSession, window, cwd string) (string, error) {
-	// Try creating a new session first
-	err := d.tmux.NewSession(ctx, tmuxSession, window, cwd)
+func (d *Daemon) setupTmuxPane(ctx context.Context, tmuxSession, window, cwd string, env map[string]string) (string, error) {
+	// Try creating a new session first. tmux exports the supplied env vars
+	// into the spawned shell via repeated `-e KEY=VAL` flags.
+	err := d.tmux.NewSessionWithEnv(ctx, tmuxSession, window, cwd, env)
 	if err == nil {
 		return fmt.Sprintf("%s:%s", tmuxSession, window), nil
 	}
 
-	// Session exists, create a new window
-	paneID, err := d.tmux.NewWindow(ctx, tmuxSession, window, cwd)
+	// Session exists, create a new window. NewWindowCanonical returns the
+	// canonical `<session>:<window-name>` form so downstream code never
+	// has to reconcile between %pane_id, :idx, and :name shapes.
+	target, err := d.tmux.NewWindowCanonical(ctx, tmuxSession, window, cwd, env)
 	if err != nil {
 		return "", fmt.Errorf("create window: %w", err)
 	}
-	return paneID, nil
+	return target, nil
 }
 
 // --- Persistence ---

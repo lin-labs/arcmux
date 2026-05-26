@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 )
@@ -29,8 +30,35 @@ func (c *Client) EnsureServer(ctx context.Context) error {
 	return err
 }
 
+// envFlags converts a map of env vars into repeated `-e KEY=VAL` flags,
+// sorted for stable behavior. Empty values are still passed (tmux treats
+// `-e KEY=` as setting the variable to the empty string in the new env).
+func envFlags(env map[string]string) []string {
+	if len(env) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	flags := make([]string, 0, len(env)*2)
+	for _, k := range keys {
+		flags = append(flags, "-e", k+"="+env[k])
+	}
+	return flags
+}
+
 // NewSession creates a new tmux session.
 func (c *Client) NewSession(ctx context.Context, name, window, cwd string) error {
+	return c.NewSessionWithEnv(ctx, name, window, cwd, nil)
+}
+
+// NewSessionWithEnv creates a new tmux session, exporting the supplied env
+// vars into the new pane's shell via repeated `-e KEY=VAL` flags. Use this
+// when callers (e.g. arcmux CreateSession) need to inject ARCMUX_PROJECT,
+// ARCMUX_ROLE_FILE, OBS_AGENTS, etc. into the spawned agent process.
+func (c *Client) NewSessionWithEnv(ctx context.Context, name, window, cwd string, env map[string]string) error {
 	args := []string{"new-session", "-d", "-s", name}
 	if window != "" {
 		args = append(args, "-n", window)
@@ -38,11 +66,18 @@ func (c *Client) NewSession(ctx context.Context, name, window, cwd string) error
 	if cwd != "" {
 		args = append(args, "-c", cwd)
 	}
+	args = append(args, envFlags(env)...)
 	_, err := c.run(ctx, args...)
 	return err
 }
 
-// NewWindow creates a new window in an existing session.
+// NewWindow creates a new window in an existing session and returns the
+// `%pane_id` of the created pane. Preserved for backends (notably
+// internal/mux/tmuxbackend) that pair NewWindow with ListPanes and expect
+// the same shape on both sides.
+//
+// New callers should prefer NewWindowCanonical, which returns the stable
+// `<session>:<window-name>` target shape used elsewhere in arcmux.
 func (c *Client) NewWindow(ctx context.Context, session, name, cwd string) (string, error) {
 	args := []string{"new-window", "-t", session, "-P", "-F", "#{pane_id}"}
 	if name != "" {
@@ -56,6 +91,44 @@ func (c *Client) NewWindow(ctx context.Context, session, name, cwd string) (stri
 		return "", err
 	}
 	return strings.TrimSpace(out), nil
+}
+
+// NewWindowCanonical creates a new window and returns the canonical
+// `<session>:<window-name>` target. Exports the supplied env vars into the
+// pane's shell via repeated `-e KEY=VAL` flags.
+//
+// When name is empty (tmux auto-generates one), falls back to
+// `<session>:<window-index>` from the new-window -P -F result.
+//
+// Use this — not NewWindow — for arcmux daemon session targets so the
+// SessionSummary.TmuxTarget shape is consistent across all sessions.
+func (c *Client) NewWindowCanonical(ctx context.Context, session, name, cwd string, env map[string]string) (string, error) {
+	// Ask tmux for both the index and the (possibly auto-generated) name
+	// so the returned target is stable across renames and never depends on
+	// the volatile `%pane_id`. Format separator is tab; tmux preserves it.
+	format := "#{window_index}\t#{window_name}"
+	args := []string{"new-window", "-t", session, "-P", "-F", format}
+	if name != "" {
+		args = append(args, "-n", name)
+	}
+	if cwd != "" {
+		args = append(args, "-c", cwd)
+	}
+	args = append(args, envFlags(env)...)
+	out, err := c.run(ctx, args...)
+	if err != nil {
+		return "", err
+	}
+	line := strings.TrimSpace(out)
+	parts := strings.SplitN(line, "\t", 2)
+	switch {
+	case len(parts) == 2 && parts[1] != "":
+		return fmt.Sprintf("%s:%s", session, parts[1]), nil
+	case len(parts) >= 1 && parts[0] != "":
+		return fmt.Sprintf("%s:%s", session, parts[0]), nil
+	default:
+		return "", fmt.Errorf("tmux new-window: unexpected output %q", line)
+	}
 }
 
 // SendKeys sends text to a target pane.

@@ -78,6 +78,11 @@ func cmdInboxPush(args []string, stdin io.Reader, stdout io.Writer) error {
 	fs := flag.NewFlagSet("inbox push", flag.ContinueOnError)
 	from := fs.String("from", "", "sender identifier (optional but recommended)")
 	body := fs.String("body", "", "message body (if empty, reads from stdin)")
+	// --force skips the daemon's readiness predicate and asks for direct
+	// delivery via SendPrompt regardless of state. Escape hatch when the
+	// readiness check mistargets (e.g. immediately after CreateSession
+	// the agent is alive but the state machine still says StateStarting).
+	force := fs.Bool("force", false, "skip readiness check; deliver directly even if state != idle")
 	var sf sessionFlag
 	sf.attach(fs)
 	sock := fs.String("socket", socketPath(), "daemon socket path")
@@ -122,6 +127,7 @@ func cmdInboxPush(args []string, stdin io.Reader, stdout io.Writer) error {
 		SessionName: sessionName,
 		Body:        bodyStr,
 		From:        *from,
+		ForceDirect: *force,
 	})
 	if err != nil {
 		return fmt.Errorf("inbox push: %w", err)

@@ -184,6 +184,13 @@ message SendRequest {
   string session_name = 1;
   string body = 2;
   string from = 3;            // optional: caller-supplied "actor" tag for the inbox entry
+  // force_direct skips the readiness predicate and always tries direct
+  // delivery via the SendPrompt path. Useful as an escape hatch when the
+  // readiness check mistargets (e.g. immediately after CreateSession,
+  // when the agent is alive but hasn't completed handshake yet). On
+  // failure, the body is queued like the normal not-ready path. Empty
+  // default preserves the original "queue when not idle" semantic.
+  bool force_direct = 4;
 }
 
 message SendResponse {

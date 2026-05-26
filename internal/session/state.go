@@ -23,13 +23,23 @@ const (
 type Session struct {
 	mu sync.RWMutex
 
-	ID               string
-	Name             string
-	Agent            string
-	CWD              string
-	Transport        string
-	TmuxTarget       string // e.g. "agents:myapp.%42"
-	CurrentCommand   string
+	ID         string
+	Name       string
+	Agent      string
+	CWD        string
+	Transport  string
+	TmuxTarget string // canonical "<tmux-session>:<window-name>", e.g. "agents:myapp"
+	// CurrentCommand is the most recent prompt sent (truncated to ~200
+	// runes), set by SendPrompt/sendExecPrompt. The Capture RPC may
+	// override this with the live `tmux display-message #{pane_current_command}`
+	// for tmux sessions when the pane is alive.
+	CurrentCommand string
+	// BackendSessionID is the underlying agent-native session/thread id
+	// (e.g. claude `--session-id` UUID, codex `thread_id`). Only the exec
+	// transport's structured-output parsers populate this; for the tmux
+	// transport it stays empty because there's no machine-readable handle
+	// to scrape from a pane. Persisted so exec-transport sessions can
+	// resume their backend session across daemon restarts.
 	BackendSessionID string
 	PID              int
 	State            State

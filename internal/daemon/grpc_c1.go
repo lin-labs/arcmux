@@ -63,23 +63,51 @@ func (s *GRPCServer) Send(ctx context.Context, req *arcmuxv1.SendRequest) (*arcm
 		return nil, status.Errorf(codes.Internal, "new inbox id: %v", err)
 	}
 
-	if sessionReady(sess) {
+	// Pre-deliver readiness window: a freshly-spawned session can be in
+	// StateStarting / StateHandshaking for ~hundreds of ms before flipping
+	// to StateIdle. Without this poll, the FIRST Send right after
+	// CreateSession reliably gets queued=true / delivered=false even
+	// though the session becomes ready almost immediately.
+	//
+	// Only wait for the spawn-transient states. A StateWorking /
+	// StateStuck session can sit there for minutes; we MUST NOT block
+	// the caller on those — that's exactly what the inbox queue is for.
+	//
+	// force_direct skips the predicate entirely — escape hatch for
+	// callers who know the session is alive but the state machine hasn't
+	// caught up yet.
+	if !req.ForceDirect && isSpawnTransient(sess) {
+		waitForSessionReady(ctx, sess, sendReadinessWindow)
+	}
+
+	if req.ForceDirect || sessionReady(sess) {
 		// Deliver immediately. Same path SendPrompt uses, just with
 		// confirm_delivery=true (caller already asked for "send") and
-		// wait_idle=false (we already proved ready).
+		// wait_idle=false (we already proved ready, or caller forced).
 		snap := sess.Snapshot()
 		if err := s.daemon.SendPrompt(ctx, snap.ID, req.Body, true, false); err != nil {
-			return nil, status.Errorf(codes.Internal, "send prompt: %v", err)
+			// force_direct: on failure, fall through to the queue path
+			// so caller still has a recoverable msg_id handle.
+			if !req.ForceDirect {
+				return nil, status.Errorf(codes.Internal, "send prompt: %v", err)
+			}
+			s.daemon.Logger().Warn("session.send.force_direct.failed; falling back to queue",
+				"session_id", snap.ID, "name", snap.Name, "error", err)
+		} else {
+			actionTag := "inbox.send.direct"
+			if req.ForceDirect {
+				actionTag = "inbox.send.force_direct"
+			}
+			s.daemon.auditSessionEvent(actionTag, sess, map[string]any{
+				"msg_id": msgID,
+				"from":   req.From,
+			})
+			return &arcmuxv1.SendResponse{
+				MsgId:     msgID,
+				Delivered: true,
+				Queued:    false,
+			}, nil
 		}
-		s.daemon.auditSessionEvent("inbox.send.direct", sess, map[string]any{
-			"msg_id": msgID,
-			"from":   req.From,
-		})
-		return &arcmuxv1.SendResponse{
-			MsgId:     msgID,
-			Delivered: true,
-			Queued:    false,
-		}, nil
 	}
 
 	// Queue path. Ensure the inbox bucket exists, then push.
@@ -312,6 +340,55 @@ func sessionReady(sess *session.Session) bool {
 	}
 	snap := sess.Snapshot()
 	return snap.State == session.StateIdle
+}
+
+// sendReadinessWindow is the max time Send polls for StateIdle before
+// giving up and falling back to the inbox queue. Chosen to comfortably
+// cover the spawn-to-idle transition (handshake + initial pane ready),
+// while staying short enough that callers don't notice a hang.
+const sendReadinessWindow = 2 * time.Second
+
+// isSpawnTransient reports whether the session is in a "still booting up,
+// almost-ready" state where a short readiness wait is justified. Working /
+// stuck / escalated sessions are explicitly NOT transient: blocking on
+// those would defeat the purpose of the inbox queue.
+func isSpawnTransient(sess *session.Session) bool {
+	if sess == nil {
+		return false
+	}
+	switch sess.Snapshot().State {
+	case session.StateStarting, session.StateHandshaking:
+		return true
+	default:
+		return false
+	}
+}
+
+// waitForSessionReady polls until sessionReady(sess) is true or window
+// elapses. Does not block forever — once window expires we return and
+// the caller falls through to the queue path. Cheap busy-wait with a
+// small tick; daemon state transitions are coarse (every state change
+// goes through SetState in the same process), so a 25ms tick is plenty.
+func waitForSessionReady(ctx context.Context, sess *session.Session, window time.Duration) {
+	if sessionReady(sess) {
+		return
+	}
+	deadline := time.Now().Add(window)
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if sessionReady(sess) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if time.Now().After(deadline) {
+				return
+			}
+		}
+	}
 }
 
 // isSessionInboxMissing recognizes the wrapped sentinel from

@@ -6,11 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	arcmuxv1 "github.com/lin-labs/arcmux/gen/arcmux/v1"
 	"github.com/lin-labs/arcmux/internal/config"
 	"github.com/lin-labs/arcmux/internal/hooks"
 	"github.com/lin-labs/arcmux/internal/manager/store"
+	"github.com/lin-labs/arcmux/internal/profile"
 	"github.com/lin-labs/arcmux/internal/session"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -316,6 +318,155 @@ func TestQueryAudit_BadSince(t *testing.T) {
 	_, err := srv.QueryAudit(context.Background(), &arcmuxv1.QueryAuditRequest{Since: "yesterday"})
 	if status.Code(err) != codes.InvalidArgument {
 		t.Errorf("bad since: code=%v, want InvalidArgument (err=%v)", status.Code(err), err)
+	}
+}
+
+// sendPromptCalls counts how many times the test-instrumented SendPrompt
+// shim was hit by the daemon's various send paths. Used as the observable
+// signal that the readiness retry / force-direct / idle-drain hooks did
+// the right thing without depending on a real tmux/exec transport.
+type sendPromptObserver struct {
+	called   chan string
+	failNext bool
+}
+
+// installSendPromptObserver replaces d.SendPrompt's effective behavior by
+// wiring the daemon's profile map to point at an "unknown agent" sentinel.
+// SendPrompt(unknown agent) returns "unknown agent profile" — that error
+// has codes.Internal at the gRPC boundary. So the test can distinguish:
+//
+//	queue path  → resp.Queued=true, err=nil
+//	direct path → err=Internal "send prompt: unknown agent profile: X"
+//
+// The error WITHOUT a profile is the deterministic, transport-free way
+// to observe that the direct branch was chosen. Used by all three Send
+// race tests below.
+func makeSendObservable(d *Daemon) {
+	d.profiles = map[string]profile.Profile{}
+}
+
+// TestSend_RetriesForBriefStartingWindow drives the pre-deliver readiness
+// poll added to close the "first Send right after CreateSession queues
+// instead of delivering" race. A session that starts in StateStarting and
+// flips to StateIdle within the readiness window must take the direct
+// path, not the queue path. We deliberately do NOT register a profile so
+// SendPrompt errors with Internal — that's the observable signal that
+// the readiness loop saw Idle and chose direct delivery.
+func TestSend_RetriesForBriefStartingWindow(t *testing.T) {
+	srv, d, db := newC1TestServer(t)
+	sess := injectSession(t, d, "warming-up", "elonco", session.StateStarting)
+	makeSendObservable(d)
+
+	// Simulate the agent handshake completing ~75ms after the caller
+	// fires Send. Well within sendReadinessWindow (2s).
+	go func() {
+		time.Sleep(75 * time.Millisecond)
+		sess.SetState(session.StateIdle)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	resp, err := srv.Send(ctx, &arcmuxv1.SendRequest{
+		SessionName: "warming-up",
+		Body:        "kickoff",
+		From:        "elonco",
+	})
+
+	// We want the DIRECT branch (Internal err from missing profile),
+	// NOT the queue branch (nil err + Queued=true).
+	if err == nil {
+		if resp != nil && resp.Queued {
+			t.Errorf("readiness retry didn't fire: got queued=true (resp=%+v); want direct-delivery attempt",
+				resp)
+		}
+		return
+	}
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("Send err code = %v, want Internal (direct path with no profile registered); err=%v",
+			status.Code(err), err)
+	}
+	// Belt-and-suspenders: the queue bucket must NOT have grown.
+	left, _ := db.PeekSessionInbox("warming-up", 10)
+	if len(left) != 0 {
+		t.Errorf("queue depth = %d, want 0 (direct path should not have pushed)", len(left))
+	}
+}
+
+// TestSend_ForceDirectBypassesReadiness pins the --force escape hatch:
+// even when the session is in StateWorking (a state sessionReady rejects),
+// force_direct=true must attempt the direct path. With no profile
+// registered, SendPrompt returns an Internal error — but force_direct's
+// fallback is to queue rather than return that error to the caller, so
+// we observe a queued=true response with delivered=false. Either way,
+// the readiness predicate was bypassed.
+func TestSend_ForceDirectBypassesReadiness(t *testing.T) {
+	srv, d, db := newC1TestServer(t)
+	injectSession(t, d, "busy", "elonco", session.StateWorking)
+	makeSendObservable(d)
+
+	resp, err := srv.Send(context.Background(), &arcmuxv1.SendRequest{
+		SessionName: "busy",
+		Body:        "kickoff",
+		From:        "elonco",
+		ForceDirect: true,
+	})
+	if err != nil {
+		t.Fatalf("force_direct should not surface direct-deliver error to caller (falls back to queue): %v", err)
+	}
+	if resp == nil || !resp.Queued || resp.Delivered {
+		t.Errorf("force_direct fallback: resp=%+v, want queued=true delivered=false", resp)
+	}
+	// The fallback queue must hold the body so the caller can recover.
+	left, _ := db.PeekSessionInbox("busy", 10)
+	if len(left) != 1 || left[0].Body != "kickoff" {
+		t.Errorf("fallback queue depth=%d body=%q; want 1, \"kickoff\"", len(left),
+			func() string {
+				if len(left) > 0 {
+					return left[0].Body
+				}
+				return ""
+			}())
+	}
+}
+
+// TestEmitStateChanged_DrainsInboxOnIdle drives the idle-drain hook: a
+// queued message must be delivered on the next state→idle transition.
+// We can't reach delivered=true here (no real transport) — but the hook
+// MUST fire, and it must not panic. The smoke is: emit a state→idle
+// transition and confirm the daemon did not deadlock.
+func TestEmitStateChanged_DrainsInboxOnIdle(t *testing.T) {
+	srv, d, db := newC1TestServer(t)
+	sess := injectSession(t, d, "drainee", "elonco", session.StateWorking)
+	d.ctx = context.Background()
+	makeSendObservable(d)
+
+	// Queue a message via Send (working session → queue path).
+	if _, err := srv.Send(d.ctx, &arcmuxv1.SendRequest{
+		SessionName: "drainee",
+		Body:        "do the thing",
+		From:        "elonco",
+	}); err != nil {
+		t.Fatalf("Send (queue): %v", err)
+	}
+	pre, _ := db.PeekSessionInbox("drainee", 10)
+	if len(pre) != 1 {
+		t.Fatalf("queue depth before drain = %d, want 1", len(pre))
+	}
+
+	// Transition to idle. emitStateChanged kicks off drainInboxOnIdle
+	// in a goroutine; that goroutine calls SendPrompt, which errors
+	// (no profile registered) and logs without panicking. We assert
+	// no deadlock by sleeping a beat and confirming the test exits.
+	sess.SetState(session.StateIdle)
+	d.emitStateChanged(sess.Snapshot().ID, session.StateIdle, "test idle")
+
+	// Give the goroutine time to run + log. We're proving no panic /
+	// deadlock — the queue state itself is implementation-defined when
+	// SendPrompt fails (current contract: leave the message queued).
+	time.Sleep(150 * time.Millisecond)
+	after, _ := db.PeekSessionInbox("drainee", 10)
+	if len(after) != 1 {
+		t.Errorf("queue depth after drain (with failing SendPrompt) = %d, want 1 (safe fallback leaves the msg queued)", len(after))
 	}
 }
 

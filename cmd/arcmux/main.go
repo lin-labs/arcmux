@@ -38,6 +38,8 @@ func run(args []string) error {
 		return fmt.Errorf("'arcmux manager' was removed in the pure-substrate refactor; use elonco's launcher (it calls arcmux's RegisterSession directly)")
 	case "pulse":
 		return cmdPulse(args[1:])
+	case "info", "status":
+		return cmdInfo(args[1:], os.Stdout)
 	case "version":
 		fmt.Printf("arcmux %s\n", version)
 		return nil
@@ -94,6 +96,7 @@ func printUsage() {
 
 Usage:
   arcmux start [--config path]                            Start the daemon (default command — also runs the pulse supervisor)
+  arcmux info [--config path] [--json]                    Print daemon-process introspection (PID, socket, bolt path, session count, uptime)
   arcmux pulse --project <slug> [--interval 10s] [--once] Debug-only: pulse one project (the daemon does this for all projects)
   arcmux version                                          Print version
   arcmux help                                             Show this help

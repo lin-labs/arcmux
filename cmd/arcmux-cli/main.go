@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	arcmuxv1 "github.com/lin-labs/arcmux/gen/arcmux/v1"
@@ -70,11 +71,27 @@ func main() {
 	case "create":
 		h, _ := os.UserHomeDir()
 		fs := map[string]string{"--agent": "codex", "--name": "gmail-codex", "--cwd": h}
+		envMap := map[string]string{}
+		// Two-pass argv walk: `--env KEY=VAL` (repeatable) is special-
+		// cased so multiple env vars can be passed without collapsing
+		// into the scalar map. Everything else uses the simple
+		// flag/value pattern the other subcommands rely on.
 		for i := 2; i+1 < len(os.Args); i += 2 {
-			fs[os.Args[i]] = os.Args[i+1]
+			flag := os.Args[i]
+			val := os.Args[i+1]
+			if flag == "--env" {
+				if eq := strings.IndexByte(val, '='); eq > 0 {
+					envMap[val[:eq]] = val[eq+1:]
+				} else {
+					die(fmt.Errorf("--env requires KEY=VAL, got %q", val))
+				}
+				continue
+			}
+			fs[flag] = val
 		}
 		r, err := c.CreateSession(ctx, &arcmuxv1.CreateSessionRequest{
 			Agent: fs["--agent"], Cwd: fs["--cwd"], SessionName: fs["--name"],
+			Env: envMap,
 		})
 		if err != nil {
 			die(err)

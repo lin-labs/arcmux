@@ -221,6 +221,62 @@ func TestPulse_DisableLeavesOtherFieldsParseable(t *testing.T) {
 	}
 }
 
+// TestLoad_TildeExpansion is the regression for the "~/" directory created
+// in the daemon's cwd. A literal "~/.claude" in TOML must resolve to an
+// absolute path under $HOME; downstream code (especially hook installers)
+// asserts IsAbs and would refuse otherwise.
+func TestLoad_TildeExpansion(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir: %v", err)
+	}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.toml")
+	content := `
+[daemon]
+socket = "~/.config/arcmux/arcmux.sock"
+log_dir = "~/arcmux-logs"
+
+[hooks]
+claude_hook_dir = "~/.claude"
+hook_output_dir = "~/.claude/hooks"
+
+[pulse]
+data_root = "~/data"
+
+[agents.claude]
+hook_dir = "~/.claude"
+`
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	cases := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"daemon.socket", cfg.Daemon.Socket, filepath.Join(home, ".config/arcmux/arcmux.sock")},
+		{"daemon.log_dir", cfg.Daemon.LogDir, filepath.Join(home, "arcmux-logs")},
+		{"hooks.claude_hook_dir", cfg.Hooks.ClaudeHookDir, filepath.Join(home, ".claude")},
+		{"hooks.hook_output_dir", cfg.Hooks.HookOutputDir, filepath.Join(home, ".claude/hooks")},
+		{"pulse.data_root", cfg.Pulse.DataRoot, filepath.Join(home, "data")},
+		{"agents.claude.hook_dir", cfg.Agents["claude"].HookDir, filepath.Join(home, ".claude")},
+	}
+	for _, c := range cases {
+		if c.got != c.want {
+			t.Errorf("%s = %q, want %q (must be absolute under $HOME, not a literal tilde)",
+				c.name, c.got, c.want)
+		}
+		if !filepath.IsAbs(c.got) {
+			t.Errorf("%s = %q, must be absolute after Load", c.name, c.got)
+		}
+	}
+}
+
 func TestLoad_MuxBackend(t *testing.T) {
 	t.Run("explicit tmux", func(t *testing.T) {
 		dir := t.TempDir()

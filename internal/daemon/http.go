@@ -109,7 +109,7 @@ func (h *HTTPServer) handleSessionNew(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tmuxSession := h.daemon.cfg.Tmux.DefaultSession
-	target, err := h.daemon.setupTmuxPane(ctx, tmuxSession, name, cwd)
+	target, err := h.daemon.setupTmuxPane(ctx, tmuxSession, name, cwd, nil)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{
 			Error: fmt.Sprintf("setup tmux pane: %v", err),
