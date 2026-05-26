@@ -1,6 +1,10 @@
-// Package paths resolves the canonical filesystem locations arcmux's
-// manager mode uses, separating machine-local ephemeral state from
-// vault-backed durable artifacts.
+// Package paths resolves the canonical filesystem locations arcmux uses for
+// per-project ephemeral state.
+//
+// Vault-side concerns (role libraries, project subtrees like elon/, teams/,
+// retros/, principles/) are no longer arcmux's responsibility — those are
+// elonco-managed. arcmux is the substrate librarian and only knows about
+// ~/data/arcmux/<project>/.
 package paths
 
 import (
@@ -9,7 +13,7 @@ import (
 	"regexp"
 )
 
-// Project bundles every path a manager-mode project needs.
+// Project bundles every path a per-project ephemeral substrate needs.
 type Project struct {
 	Project       string
 	EphemeralRoot string // ~/data/arcmux/<project>/
@@ -18,13 +22,10 @@ type Project struct {
 	ConsultInbox  string // ~/data/arcmux/<project>/consult_inboxes/
 	Heartbeats    string // ~/data/arcmux/<project>/heartbeats/
 
-	VaultRoot     string // <vault>/Projects/<project>/
-	ArcmuxDir     string // <vault>/Projects/<project>/arcmux/
-	PrinciplesDir string // <vault>/Projects/<project>/arcmux/principles/
-	DeliverDir    string // <vault>/Projects/<project>/arcmux/deliverables/
-	ElonDir       string // <vault>/Projects/<project>/elon/
-	TeamsDir      string // <vault>/Projects/<project>/teams/
-	RetrosDir     string // <vault>/Projects/<project>/retros/
+	// VaultRoot is kept as a derived path because callers may want to
+	// resolve vault-side artifacts they own (e.g. elonco resolving a role
+	// file). arcmux itself does not write under VaultRoot anymore.
+	VaultRoot string // <vault>/Projects/<project>/
 }
 
 // ForProject computes every path given the ephemeral data root, vault root,
@@ -40,18 +41,7 @@ func ForProject(dataRoot, vaultRoot, project string) Project {
 		ConsultInbox:  filepath.Join(eph, "consult_inboxes"),
 		Heartbeats:    filepath.Join(eph, "heartbeats"),
 		VaultRoot:     v,
-		ArcmuxDir:     filepath.Join(v, "arcmux"),
-		PrinciplesDir: filepath.Join(v, "arcmux", "principles"),
-		DeliverDir:    filepath.Join(v, "arcmux", "deliverables"),
-		ElonDir:       filepath.Join(v, "elon"),
-		TeamsDir:      filepath.Join(v, "teams"),
-		RetrosDir:     filepath.Join(v, "retros"),
 	}
-}
-
-// GlobalRolesDir returns the cross-project role library path.
-func GlobalRolesDir(vaultRoot string) string {
-	return filepath.Join(vaultRoot, "0Prompts", "roles")
 }
 
 var projectSlug = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)

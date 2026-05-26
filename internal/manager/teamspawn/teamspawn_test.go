@@ -497,7 +497,7 @@ func TestSpawnPaths(t *testing.T) {
 	}
 
 	pp := paths.ForProject(dataRoot, vault, "p")
-	wantCharter := filepath.Join(pp.TeamsDir, "checkpaths", "charter.md")
+	wantCharter := filepath.Join(pp.VaultRoot, "teams", "checkpaths", "charter.md")
 	if r.CharterPath != wantCharter {
 		t.Errorf("CharterPath = %q, want %q", r.CharterPath, wantCharter)
 	}

@@ -46,6 +46,7 @@ func TestStartCreatesWorkspaceAndPane(t *testing.T) {
 		Agent:     "claude",
 		Project:   "demo",
 		Mission:   "do the demo",
+		Command:   "claude --some-flag",
 		DataRoot:  dataRoot,
 		VaultRoot: vault,
 		Cmux:      cli,
@@ -86,11 +87,17 @@ func TestStartCreatesWorkspaceAndPane(t *testing.T) {
 	if !sawList {
 		t.Error("expected list-panes call")
 	}
-	if !strings.Contains(wsCall, "bootstrap-elon.sh") {
+	if !strings.Contains(wsCall, "bootstrap.sh") {
 		t.Errorf("new-workspace missing bootstrap script: %q", wsCall)
 	}
-	if !strings.Contains(wsCall, vault) {
-		t.Errorf("new-workspace missing vault cwd %q: %q", vault, wsCall)
+
+	// The bootstrap script body exec's the caller-supplied command verbatim.
+	body, err := os.ReadFile(p.BootstrapPath)
+	if err != nil {
+		t.Fatalf("read bootstrap: %v", err)
+	}
+	if !strings.Contains(string(body), "exec claude --some-flag") {
+		t.Errorf("bootstrap missing caller command:\n%s", string(body))
 	}
 
 	entries, err := p.DB.RecentAudit(10)
@@ -116,6 +123,7 @@ func TestStartSeedsMissionInboxAndScratchpad(t *testing.T) {
 		Agent:     "claude",
 		Project:   "seed",
 		Mission:   mission,
+		Command:   "claude",
 		DataRoot:  dataRoot,
 		VaultRoot: vault,
 		Cmux:      cmuxcli.NewWithRunnerForTest(okCmux()),
@@ -161,11 +169,9 @@ func TestStartSeedsMissionInboxAndScratchpad(t *testing.T) {
 		t.Fatalf("read scratchpad: %v", err)
 	}
 	var pad struct {
-		Turn         int    `json:"turn"`
-		CurrentFocus string `json:"current_focus"`
-		Bootstrap    struct {
+		Turn      int `json:"turn"`
+		Bootstrap struct {
 			Project        string `json:"project"`
-			Role           string `json:"role"`
 			Agent          string `json:"agent"`
 			MissionSeeded  bool   `json:"mission_seeded"`
 			MissionInboxID string `json:"mission_inbox_id"`
@@ -178,7 +184,7 @@ func TestStartSeedsMissionInboxAndScratchpad(t *testing.T) {
 	if pad.Turn != 0 {
 		t.Errorf("scratchpad.turn = %d, want 0", pad.Turn)
 	}
-	if pad.Bootstrap.Project != "seed" || pad.Bootstrap.Role != "elon" || pad.Bootstrap.Agent != "claude" {
+	if pad.Bootstrap.Project != "seed" || pad.Bootstrap.Agent != "claude" {
 		t.Errorf("scratchpad bootstrap header off: %+v", pad.Bootstrap)
 	}
 	if !pad.Bootstrap.MissionSeeded {
@@ -226,6 +232,7 @@ func TestStartEmptyMissionSkipsInboxPush(t *testing.T) {
 				Agent:     "claude",
 				Project:   "empty",
 				Mission:   mission,
+				Command:   "claude",
 				DataRoot:  dataRoot,
 				VaultRoot: vault,
 				Cmux:      cmuxcli.NewWithRunnerForTest(okCmux()),
@@ -286,6 +293,7 @@ func TestStartE2EArcmuxCallReadback(t *testing.T) {
 		Agent:     "claude",
 		Project:   "e2e",
 		Mission:   mission,
+		Command:   "claude",
 		DataRoot:  dataRoot,
 		VaultRoot: vault,
 		Cmux:      cmuxcli.NewWithRunnerForTest(okCmux()),
@@ -359,19 +367,6 @@ func TestStartE2EArcmuxCallReadback(t *testing.T) {
 	}
 }
 
-func TestStartRejectsBadAgent(t *testing.T) {
-	_, err := Start(context.Background(), Options{
-		Agent:     "bash",
-		Project:   "demo",
-		DataRoot:  t.TempDir(),
-		VaultRoot: t.TempDir(),
-		Cmux:      cmuxcli.NewWithRunnerForTest(&fakeRunner{}),
-	})
-	if err == nil {
-		t.Error("expected error for unsupported agent")
-	}
-}
-
 func TestStartRejectsBadProject(t *testing.T) {
 	_, err := Start(context.Background(), Options{
 		Agent:     "claude",
@@ -394,5 +389,17 @@ func TestStartRequiresVault(t *testing.T) {
 	})
 	if err == nil {
 		t.Error("expected error when VaultRoot is empty")
+	}
+}
+
+func TestStartRequiresAgent(t *testing.T) {
+	_, err := Start(context.Background(), Options{
+		Project:   "demo",
+		DataRoot:  t.TempDir(),
+		VaultRoot: t.TempDir(),
+		Cmux:      cmuxcli.NewWithRunnerForTest(&fakeRunner{}),
+	})
+	if err == nil {
+		t.Error("expected error when Agent is empty")
 	}
 }

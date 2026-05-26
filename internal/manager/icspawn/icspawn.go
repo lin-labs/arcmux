@@ -173,7 +173,12 @@ func Spawn(ctx context.Context, o Opts) (*Result, error) {
 	// Resolve the role file. Must exist on disk so the bootstrap's
 	// --append-system-prompt-file points at something real. v0 doesn't
 	// compose ic-base + specialization; one role file, period.
-	roleFile := filepath.Join(paths.GlobalRolesDir(o.VaultRoot), role+".md")
+	//
+	// arcmux's bootstrap renderer is prompt-agnostic — this caller owns
+	// constructing the agent launch command. The role-file path lives in
+	// the vault-side 0Prompts/roles/ library (caller-managed) until C3
+	// moves IC ownership out of arcmux entirely.
+	roleFile := filepath.Join(o.VaultRoot, "0Prompts", "roles", role+".md")
 	if _, err := os.Stat(roleFile); err != nil {
 		return nil, fmt.Errorf("role file: %w (looked at %s)", err, roleFile)
 	}
@@ -206,18 +211,21 @@ func Spawn(ctx context.Context, o Opts) (*Result, error) {
 	// store.PushICInbox) — exporting it lets an IC peek its own queue
 	// with the one-liner `arcmux-call inbox peek --to ic:$ARCMUX_SLOT`
 	// without having to derive it from the composite ARCMUX_ROLE.
+	command := agentLaunchCommand(o.Agent, roleFile)
 	bootstrapPath, err := bootstrap.Render(bootstrap.Options{
 		Agent:      o.Agent,
 		Project:    o.Project,
-		Role:       arcmuxRole,
-		Team:       team,
-		Slot:       slot,
-		Contract:   contractID,
-		ScriptName: fmt.Sprintf("bootstrap-%s.sh", arcmuxRole),
 		EphemRoot:  pp.EphemeralRoot,
 		VaultRoot:  o.VaultRoot,
 		DataRoot:   o.DataRoot,
-		RoleFile:   roleFile,
+		Command:    command,
+		ScriptName: fmt.Sprintf("bootstrap-%s.sh", arcmuxRole),
+		Env: map[string]string{
+			"ROLE":     arcmuxRole,
+			"TEAM":     team,
+			"SLOT":     slot,
+			"CONTRACT": contractID,
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("bootstrap render: %w", err)
@@ -547,4 +555,24 @@ func firstLine(s string) string {
 		return s[:i]
 	}
 	return s
+}
+
+// agentLaunchCommand builds the `exec`-able command string for the given
+// agent + role file. arcmux's bootstrap renderer is prompt-agnostic, so
+// icspawn constructs this directly. Mirrors teamspawn's helper of the same
+// name; both go away when C3 moves team/IC out of arcmux.
+func agentLaunchCommand(agent, roleFile string) string {
+	quoted := shellQuote(roleFile)
+	switch agent {
+	case "claude":
+		return "claude --dangerously-skip-permissions --append-system-prompt-file " + quoted
+	case "codex":
+		return "codex -c instructions=\"$(cat " + quoted + ")\""
+	default:
+		return agent
+	}
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }

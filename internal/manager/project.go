@@ -1,9 +1,11 @@
-// Package manager is arcmux's three-tier orchestration runtime. It boots a
-// per-project Elon pane in cmux, scaffolds durable + ephemeral storage, and
-// owns the lifecycle of teams, contracts, and notifications.
+// Package manager is arcmux's per-project substrate runtime. It boots a
+// per-project front-desk pane in cmux, scaffolds the ephemeral storage
+// layout, and seeds the substrate primitives (inbox, scratchpad, audit)
+// that downstream callers (elonco, etc.) drive.
 //
-// This file is the top-level Project struct; sub-packages own the substrate
-// primitives (store, cmuxcli, scaffold, paths, roles, bootstrap, scratchpad).
+// arcmux is prompt-agnostic post-C2: the caller supplies the exact launch
+// command for the agent. arcmux does not know what role, system prompt, or
+// identity the agent runs with — those are caller concerns.
 package manager
 
 import (
@@ -27,17 +29,34 @@ import (
 
 // Options configure Start.
 type Options struct {
-	Agent        string // "claude" | "codex"
-	Project      string // slug
-	Mission      string // free-text mission statement (initial)
-	DataRoot     string // typically ~/data
-	VaultRoot    string // typically $OBS_AGENTS
-	Cmux         *cmuxcli.Client
-	Focus        bool           // focus the new workspace after creation
-	ScaffoldOpts []scaffold.Opt // optional flags forwarded to scaffold.Project
+	// Agent is an informational tag (e.g. "claude", "codex", "shell") for
+	// the substrate's records and the bootstrap script's ARCMUX_AGENT
+	// export. It does NOT determine the launch command — that is Command.
+	Agent string
+	// Project is the project slug.
+	Project string
+	// Mission is the free-text initial mission. When non-empty it is
+	// pushed as the first inbox message (verb=add, from=user) so the
+	// agent's first activation finds work in the same primitive as every
+	// subsequent order.
+	Mission string
+	// Command is the exact shell command to `exec` after env exports. The
+	// caller (elonco) builds this — e.g.
+	//   `claude --dangerously-skip-permissions --append-system-prompt-file /path/to/elon.md`
+	// If empty, Start defaults to running the bare Agent name so a manual
+	// dispatch still produces a working pane (without any prompt priming).
+	Command string
+	// DataRoot is typically ~/data.
+	DataRoot string
+	// VaultRoot is typically $OBS_AGENTS.
+	VaultRoot string
+	// Cmux is the cmux client; one is created lazily when nil.
+	Cmux *cmuxcli.Client
+	// Focus focuses the new workspace after creation.
+	Focus bool
 }
 
-// Project is a running manager-mode project.
+// Project is a running per-project substrate instance.
 type Project struct {
 	Opts           Options
 	Paths          paths.Project
@@ -45,25 +64,23 @@ type Project struct {
 	Workspace      cmuxcli.Workspace
 	ElonPane       cmuxcli.Pane
 	BootstrapPath  string
-	ScratchpadPath string // path to the seeded Elon scratchpad
+	ScratchpadPath string // path to the seeded front-desk scratchpad
 	MissionInboxID string // empty when no mission was supplied
 }
 
-// Start scaffolds, opens the store, seeds Elon's runtime substrate (initial
-// scratchpad + mission inbox push), creates the cmux workspace with the
-// generated bootstrap script as its initial command, and locates the Elon
-// pane. The bootstrap script primes the agent's identity (role file via
-// --append-system-prompt-file), exports ARCMUX_* env vars, and exec's the
-// agent. After Start returns, the Elon pane is a fully-primed Elon agent
-// whose first activation will find a populated inbox and scratchpad — no
-// mission is delivered as ambient context.
+// Start scaffolds the ephemeral layout, opens the substrate store, seeds the
+// front-desk inbox + scratchpad, creates the cmux workspace with the
+// generated bootstrap script as its initial command, and locates the
+// front-desk pane. arcmux does not prime an identity — the bootstrap
+// script execs the caller-supplied Command verbatim after exporting the
+// ARCMUX_* env.
 func Start(ctx context.Context, o Options) (*Project, error) {
 	slug, err := paths.Validate(o.Project)
 	if err != nil {
 		return nil, err
 	}
-	if o.Agent != "claude" && o.Agent != "codex" {
-		return nil, fmt.Errorf("unsupported agent %q (want claude or codex)", o.Agent)
+	if o.Agent == "" {
+		return nil, fmt.Errorf("Agent required (informational tag)")
 	}
 	if o.DataRoot == "" {
 		o.DataRoot = filepath.Join(os.Getenv("HOME"), "data")
@@ -74,11 +91,18 @@ func Start(ctx context.Context, o Options) (*Project, error) {
 	if o.Cmux == nil {
 		o.Cmux = cmuxcli.New()
 	}
+	command := strings.TrimSpace(o.Command)
+	if command == "" {
+		// Fallback: bare agent name. The caller didn't supply a launch
+		// command, so the pane just runs the agent without prompt priming.
+		command = o.Agent
+	}
 
 	p := &Project{Opts: o, Paths: paths.ForProject(o.DataRoot, o.VaultRoot, slug)}
 
-	// 1. Scaffold durable + ephemeral dirs + role seeds.
-	if err := scaffold.Project(p.Paths, o.VaultRoot, o.Mission, o.ScaffoldOpts...); err != nil {
+	// 1. Scaffold ephemeral dirs. Vault-side scaffolding is the caller's
+	// responsibility (elonco mkdirs Projects/<slug>/... as needed).
+	if err := scaffold.Project(p.Paths); err != nil {
 		return nil, fmt.Errorf("scaffold: %w", err)
 	}
 
@@ -89,8 +113,8 @@ func Start(ctx context.Context, o Options) (*Project, error) {
 	}
 	p.DB = db
 
-	// 3. Seed Elon's runtime substrate. Mission (when non-empty) lands as an
-	// inbox message rather than ambient context so Elon's first activation
+	// 3. Seed the front-desk inbox. Mission (when non-empty) lands as an
+	// inbox message rather than ambient context so the first activation
 	// finds its work in the same primitive that all subsequent orders use.
 	startedAt := time.Now()
 	mission := strings.TrimSpace(o.Mission)
@@ -113,14 +137,14 @@ func Start(ctx context.Context, o Options) (*Project, error) {
 		p.MissionInboxID = msgID
 	}
 
-	// 4. Seed Elon's initial scratchpad. Written even when mission is empty
-	// so a respawned Elon always has a non-zero "as_of" state to read.
+	// 4. Seed the front-desk scratchpad. Written even when mission is empty
+	// so a respawn always has a non-zero "as_of" state to read.
 	scratchPath, err := scratchpad.Path(o.DataRoot, slug, "elon")
 	if err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("scratchpad path: %w", err)
 	}
-	pad := initialElonScratchpad(slug, o, startedAt, p.MissionInboxID)
+	pad := initialFrontDeskScratchpad(slug, o, startedAt, p.MissionInboxID)
 	padBody, err := json.MarshalIndent(pad, "", "  ")
 	if err != nil {
 		_ = db.Close()
@@ -132,16 +156,15 @@ func Start(ctx context.Context, o Options) (*Project, error) {
 	}
 	p.ScratchpadPath = scratchPath
 
-	// 5. Render the per-launch bootstrap script that cmux will run.
-	roleFile := filepath.Join(paths.GlobalRolesDir(o.VaultRoot), "elon.md")
+	// 5. Render the per-launch bootstrap script. Prompt-agnostic: arcmux
+	// only exports env + exec's whatever Command the caller supplied.
 	bootstrapPath, err := bootstrap.Render(bootstrap.Options{
 		Agent:     o.Agent,
 		Project:   slug,
-		Role:      "elon",
 		EphemRoot: p.Paths.EphemeralRoot,
 		VaultRoot: o.VaultRoot,
 		DataRoot:  o.DataRoot,
-		RoleFile:  roleFile,
+		Command:   command,
 	})
 	if err != nil {
 		_ = db.Close()
@@ -150,10 +173,10 @@ func Start(ctx context.Context, o Options) (*Project, error) {
 	p.BootstrapPath = bootstrapPath
 
 	// 6. Create cmux workspace with the bootstrap script as initial command.
-	wsName := "elon: " + slug
+	wsName := slug
 	ws, err := o.Cmux.NewWorkspace(ctx, cmuxcli.NewWorkspaceOptions{
 		Name:        wsName,
-		Description: "arcmux manager mode — Elon front desk for project " + slug,
+		Description: "arcmux substrate — front-desk pane for project " + slug,
 		CWD:         p.Paths.VaultRoot,
 		Command:     bootstrapPath,
 		Focus:       o.Focus,
@@ -177,9 +200,7 @@ func Start(ctx context.Context, o Options) (*Project, error) {
 	p.ElonPane = panes[0]
 
 	// 8. Persist project meta so post-launch substrate (pulse, future
-	// heartbeats) can locate Elon without grepping the audit log. The Elon
-	// pane is project-singleton — managers + ICs are looked up via teams /
-	// slots, but Elon lives outside those tables.
+	// heartbeats) can locate the front-desk without grepping the audit log.
 	if err := db.PutProjectMeta(store.ProjectMeta{
 		ElonPaneRef:      p.ElonPane.Ref,
 		ElonSurfaceRef:   p.ElonPane.SelectedSurf,
@@ -190,9 +211,8 @@ func Start(ctx context.Context, o Options) (*Project, error) {
 	}
 
 	// 9. Audit the start. Direct AppendAudit (not arcmux-call subprocess)
-	// because the launcher already holds the bbolt write lock — shelling out
-	// would block on bbolt's process-wide lock. Out-of-process callers
-	// (spawned panes) use arcmux-call audit instead.
+	// because the launcher already holds the bbolt write lock — shelling
+	// out would block on bbolt's process-wide lock.
 	_ = db.AppendAudit(store.AuditEntry{
 		Action:    "manager-mode-started",
 		Actor:     "arcmux",
@@ -203,7 +223,7 @@ func Start(ctx context.Context, o Options) (*Project, error) {
 			"workspace_ref":    ws.Ref,
 			"pane_ref":         p.ElonPane.Ref,
 			"bootstrap_path":   bootstrapPath,
-			"role_file":        roleFile,
+			"command":          command,
 			"scratchpad_path":  scratchPath,
 			"mission_seeded":   mission != "",
 			"mission_inbox_id": p.MissionInboxID,
@@ -222,23 +242,21 @@ func (p *Project) Close() error {
 	return nil
 }
 
-// initialElonScratchpad returns the JSON blob written to
-// scratchpads/elon.json on launch. The shape mirrors the live scratchpad
-// Elon maintains across turns so a respawn reads a familiar structure with
-// turn=0 and an empty decisions/goals set.
-func initialElonScratchpad(slug string, o Options, startedAt time.Time, missionInboxID string) map[string]any {
+// initialFrontDeskScratchpad returns the JSON blob written to
+// scratchpads/elon.json on launch. The shape is intentionally generic —
+// arcmux doesn't prescribe an Elon-flavored field set anymore. Callers
+// (elonco) can overwrite the file with their own richer shape on the next
+// turn.
+func initialFrontDeskScratchpad(slug string, o Options, startedAt time.Time, missionInboxID string) map[string]any {
 	mission := strings.TrimSpace(o.Mission)
-	focus := "Fresh manager-mode launch — peek inbox (mission delivered as 'add' message), then act."
+	focus := "Fresh substrate launch — peek inbox (mission delivered as 'add' message), then act."
 	next := []string{
-		"Read $ARCMUX_VAULT/Projects/" + slug + "/arcmux/mission.md",
 		"`arcmux-call inbox peek` to consume the mission order",
-		"Append turn-1 entry to elon/journal.md before any spawn",
 	}
 	if mission == "" {
 		focus = "(no mission supplied) — awaiting first inbox push from user."
 		next = []string{
 			"Wait for `arcmux-call inbox push --verb add --from user` to arrive",
-			"Until then, no spawn decisions to make",
 		}
 	}
 

@@ -103,7 +103,7 @@ func TestCmdTeamSpawnHappy(t *testing.T) {
 
 	// Charter under vault.
 	pp := paths.ForProject(dataRoot, vault, "cliproj")
-	wantCharter := filepath.Join(pp.TeamsDir, "ux-pass", "charter.md")
+	wantCharter := filepath.Join(pp.VaultRoot, "teams", "ux-pass", "charter.md")
 	if ack.CharterPath != wantCharter {
 		t.Errorf("charter path = %q, want %q", ack.CharterPath, wantCharter)
 	}

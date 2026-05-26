@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/lin-labs/arcmux/internal/manager/cmuxcli"
-	"github.com/lin-labs/arcmux/internal/manager/paths"
 	"github.com/lin-labs/arcmux/internal/manager/store"
 	"github.com/lin-labs/arcmux/internal/manager/teamspawn"
 )
@@ -68,7 +67,7 @@ func openTestDB(t *testing.T) *store.DB {
 // --append-system-prompt-file points there.
 func writeRoleFile(t *testing.T, vaultRoot, name, body string) string {
 	t.Helper()
-	dir := paths.GlobalRolesDir(vaultRoot)
+	dir := filepath.Join(vaultRoot, "0Prompts", "roles")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir roles: %v", err)
 	}

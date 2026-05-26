@@ -54,11 +54,3 @@ func TestValidate(t *testing.T) {
 		}
 	})
 }
-
-func TestGlobalRolesDir(t *testing.T) {
-	got := GlobalRolesDir("/tmp/vault")
-	want := "/tmp/vault/0Prompts/roles"
-	if got != want {
-		t.Errorf("GlobalRolesDir = %q, want %q", got, want)
-	}
-}

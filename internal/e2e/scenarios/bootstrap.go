@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -19,12 +18,15 @@ import (
 	"github.com/lin-labs/arcmux/internal/manager/store"
 )
 
-// Bootstrap proves the project scaffolding + mission-delivery sequence
-// works end-to-end. ACT uses the substrate primitives the same way
-// `arcmux manager` does, but without going through cmux — that's covered
-// by the team-spawn-pipeline scenario, where cmux is the system under
-// test. Keeping Bootstrap cmux-free keeps it fast (<2s) and independent
-// of whether cmux is running on the test box.
+// Bootstrap proves the substrate-only invariants of project scaffolding +
+// mission-delivery work end-to-end. ACT uses the substrate primitives the
+// same way `manager.Start` does, but without going through cmux.
+//
+// Post-C2 the assertions are substrate-only: state.bolt opens, mission
+// goes to the inbox, the bootstrap script is generated (prompt-agnostic),
+// and ProjectMeta singleton roundtrips. Vault-tree scaffolding and the
+// role-file library are no longer arcmux's responsibility — those moved
+// to elonco.
 type Bootstrap struct{}
 
 func (Bootstrap) Name() string { return "bootstrap" }
@@ -32,9 +34,9 @@ func (Bootstrap) Name() string { return "bootstrap" }
 func (Bootstrap) Run(ctx context.Context, env *e2e.Env, log io.Writer) error {
 	mission := "e2e bootstrap mission — verify substrate scaffolding"
 
-	// ACT 1: scaffold durable + ephemeral dirs + seed role files.
+	// ACT 1: scaffold ephemeral dirs only.
 	pp := paths.ForProject(env.DataRoot, env.VaultRoot, env.ProjectSlug)
-	if err := scaffold.Project(pp, env.VaultRoot, mission); err != nil {
+	if err := scaffold.Project(pp); err != nil {
 		return fmt.Errorf("scaffold: %w", err)
 	}
 
@@ -60,25 +62,26 @@ func (Bootstrap) Run(ctx context.Context, env *e2e.Env, log io.Writer) error {
 		return fmt.Errorf("push mission: %w", err)
 	}
 
-	// ACT 3: render Elon bootstrap script (the artifact cmux would have
-	// run as the workspace's initial command).
-	roleFile := filepath.Join(paths.GlobalRolesDir(env.VaultRoot), "elon.md")
+	// ACT 3: render a bootstrap script. arcmux is prompt-agnostic — the
+	// caller supplies the exact launch command. Here we use a placeholder
+	// to prove the renderer wires env exports + exec line correctly.
+	command := "claude --dangerously-skip-permissions --append-system-prompt-file /tmp/placeholder.md"
 	scriptPath, err := bootstrap.Render(bootstrap.Options{
 		Agent:     "claude",
 		Project:   env.ProjectSlug,
-		Role:      "elon",
 		EphemRoot: pp.EphemeralRoot,
 		VaultRoot: env.VaultRoot,
 		DataRoot:  env.DataRoot,
-		RoleFile:  roleFile,
+		Command:   command,
+		Env:       map[string]string{"ROLE": "elon"},
 	})
 	if err != nil {
 		return fmt.Errorf("render bootstrap: %w", err)
 	}
 
-	// ACT 4: persist project meta — pulses + future heartbeats locate
-	// Elon through this singleton. Use a placeholder pane ref since we
-	// aren't going through cmux in this scenario.
+	// ACT 4: persist project meta — pulses + future heartbeats locate the
+	// front-desk through this singleton. Use a placeholder pane ref since
+	// we aren't going through cmux in this scenario.
 	fakePane := e2e.FormatPaneRef(0)
 	if err := db.PutProjectMeta(store.ProjectMeta{
 		ElonPaneRef:      fakePane,
@@ -88,8 +91,7 @@ func (Bootstrap) Run(ctx context.Context, env *e2e.Env, log io.Writer) error {
 		return fmt.Errorf("put project meta: %w", err)
 	}
 
-	// ASSERT: every observable side effect that a human running
-	// `arcmux manager claude <project>` would expect to find on disk.
+	// ASSERT: substrate-only invariants.
 	if _, err := os.Stat(pp.StateBolt); err != nil {
 		return fmt.Errorf("assert: state.bolt missing at %s: %w", pp.StateBolt, err)
 	}
@@ -118,15 +120,6 @@ func (Bootstrap) Run(ctx context.Context, env *e2e.Env, log io.Writer) error {
 		return fmt.Errorf("assert: mission body lost: %q", found.Body)
 	}
 
-	missionFile := filepath.Join(pp.ArcmuxDir, "mission.md")
-	mb, err := os.ReadFile(missionFile)
-	if err != nil {
-		return fmt.Errorf("assert: read mission.md: %w", err)
-	}
-	if !strings.Contains(string(mb), "bootstrap mission") {
-		return fmt.Errorf("assert: mission.md missing seeded text:\n%s", string(mb))
-	}
-
 	si, err := os.Stat(scriptPath)
 	if err != nil {
 		return fmt.Errorf("assert: bootstrap script missing: %w", err)
@@ -141,26 +134,14 @@ func (Bootstrap) Run(ctx context.Context, env *e2e.Env, log io.Writer) error {
 	for _, must := range []string{
 		"ARCMUX_PROJECT=",
 		env.ProjectSlug,
-		"ARCMUX_ROLE=",
+		"ARCMUX_AGENT='claude'",
 		"ARCMUX_VAULT=",
 		"ARCMUX_DATA=",
-		"--append-system-prompt-file",
-		roleFile,
+		"ARCMUX_ROLE='elon'",
+		"exec " + command,
 	} {
 		if !strings.Contains(string(scriptBody), must) {
 			return fmt.Errorf("assert: bootstrap script missing %q:\n%s", must, string(scriptBody))
-		}
-	}
-
-	// Role files seeded on first run. The scaffolder embeds five today.
-	for _, role := range []string{"elon", "manager", "ic-base", "validator", "coach"} {
-		rf := filepath.Join(paths.GlobalRolesDir(env.VaultRoot), role+".md")
-		fi, err := os.Stat(rf)
-		if err != nil {
-			return fmt.Errorf("assert: role file %s missing: %w", rf, err)
-		}
-		if fi.Size() < 100 {
-			return fmt.Errorf("assert: role file %s suspiciously small (%d bytes)", rf, fi.Size())
 		}
 	}
 

@@ -130,8 +130,11 @@ func Spawn(ctx context.Context, o Opts) (*Result, error) {
 	}
 
 	// 2. Materialize teams/<slug>/charter.md. The manager pane reads this
-	// on bootstrap (see roles/files/manager.md §Bootstrap protocol).
-	teamDir := filepath.Join(pp.TeamsDir, slug)
+	// on bootstrap. The vault tree (Projects/<p>/teams/) is not created by
+	// arcmux's scaffolder anymore — teamspawn brings up its own subtree
+	// here on first spawn.
+	teamsDir := filepath.Join(pp.VaultRoot, "teams")
+	teamDir := filepath.Join(teamsDir, slug)
 	if err := os.MkdirAll(teamDir, 0o755); err != nil {
 		return nil, fmt.Errorf("ensure team dir: %w", err)
 	}
@@ -144,17 +147,26 @@ func Spawn(ctx context.Context, o Opts) (*Result, error) {
 	// 3. Render the manager bootstrap script. ScriptName disambiguates
 	// per-team scripts inside one project's ephemeral dir; ARCMUX_TEAM is
 	// exported so the manager pane knows its identity from $env alone.
-	roleFile := filepath.Join(paths.GlobalRolesDir(o.VaultRoot), "manager.md")
+	//
+	// arcmux's bootstrap renderer is now prompt-agnostic — this caller is
+	// responsible for constructing the full launch command. The role-file
+	// path lives in the vault under the caller-managed 0Prompts/roles/
+	// library; this code continues to wire it for back-compat until C3
+	// moves team/IC ownership out of arcmux entirely.
+	roleFile := filepath.Join(o.VaultRoot, "0Prompts", "roles", "manager.md")
+	command := agentLaunchCommand(o.Agent, roleFile)
 	bootstrapPath, err := bootstrap.Render(bootstrap.Options{
 		Agent:      o.Agent,
 		Project:    o.Project,
-		Role:       "manager",
-		Team:       slug,
-		ScriptName: fmt.Sprintf("bootstrap-manager-%s.sh", slug),
 		EphemRoot:  pp.EphemeralRoot,
 		VaultRoot:  o.VaultRoot,
 		DataRoot:   o.DataRoot,
-		RoleFile:   roleFile,
+		Command:    command,
+		ScriptName: fmt.Sprintf("bootstrap-manager-%s.sh", slug),
+		Env: map[string]string{
+			"ROLE": "manager",
+			"TEAM": slug,
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("bootstrap render: %w", err)
@@ -255,6 +267,28 @@ func Spawn(ctx context.Context, o Opts) (*Result, error) {
 		CharterPath:    charterPath,
 		VisionInboxID:  visionInboxID,
 	}, nil
+}
+
+// agentLaunchCommand builds the `exec`-able command string for the given
+// agent + role file. This logic used to live in bootstrap.go but moved out
+// when arcmux's bootstrap renderer became prompt-agnostic (C2). teamspawn
+// and icspawn carry it until C3 moves them out of arcmux entirely.
+func agentLaunchCommand(agent, roleFile string) string {
+	quoted := shellQuote(roleFile)
+	switch agent {
+	case "claude":
+		return "claude --dangerously-skip-permissions --append-system-prompt-file " + quoted
+	case "codex":
+		return "codex -c instructions=\"$(cat " + quoted + ")\""
+	default:
+		// Fallback: just exec the agent name. v0 only ever sees claude/codex
+		// because Spawn rejects everything else.
+		return agent
+	}
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
 func renderCharter(project, slug, vision string, startedAt time.Time) string {

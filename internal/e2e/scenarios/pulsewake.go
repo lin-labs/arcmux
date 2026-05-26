@@ -45,7 +45,7 @@ func (PulseWake) Name() string { return "pulse-wake" }
 func (PulseWake) Run(ctx context.Context, env *e2e.Env, log io.Writer) error {
 	pp := paths.ForProject(env.DataRoot, env.VaultRoot, env.ProjectSlug)
 
-	if err := scaffold.Project(pp, env.VaultRoot, "e2e pulse-wake mission"); err != nil {
+	if err := scaffold.Project(pp); err != nil {
 		return fmt.Errorf("scaffold: %w", err)
 	}
 

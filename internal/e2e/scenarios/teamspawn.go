@@ -50,7 +50,7 @@ func (TeamSpawnPipeline) Name() string { return "team-spawn-pipeline" }
 
 func (TeamSpawnPipeline) Run(ctx context.Context, env *e2e.Env, log io.Writer) error {
 	pp := paths.ForProject(env.DataRoot, env.VaultRoot, env.ProjectSlug)
-	if err := scaffold.Project(pp, env.VaultRoot, "e2e team-spawn-pipeline mission"); err != nil {
+	if err := scaffold.Project(pp); err != nil {
 		return fmt.Errorf("scaffold: %w", err)
 	}
 
@@ -136,7 +136,8 @@ func (TeamSpawnPipeline) Run(ctx context.Context, env *e2e.Env, log io.Writer) e
 	}
 
 	// ASSERT (c) charter.md materialized + contains the vision.
-	charterPath := filepath.Join(pp.TeamsDir, teamSlug, "charter.md")
+	// teamspawn brings up its own teams/ subtree in the vault now.
+	charterPath := filepath.Join(pp.VaultRoot, "teams", teamSlug, "charter.md")
 	if charterPath != spawnResult.CharterPath {
 		return fmt.Errorf("assert: charter path %q != spawn output %q",
 			charterPath, spawnResult.CharterPath)

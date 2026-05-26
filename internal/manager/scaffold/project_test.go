@@ -2,48 +2,49 @@ package scaffold
 
 import (
 	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/lin-labs/arcmux/internal/manager/paths"
 )
 
-func TestScaffoldCreatesDirs(t *testing.T) {
+func TestScaffoldCreatesEphemeralDirs(t *testing.T) {
 	dataRoot := t.TempDir()
 	vault := t.TempDir()
 
 	p := paths.ForProject(dataRoot, vault, "demo")
-	if err := Project(p, vault, "Build the demo by Friday"); err != nil {
+	if err := Project(p); err != nil {
 		t.Fatalf("Project scaffold: %v", err)
 	}
 
 	for _, d := range []string{
 		p.EphemeralRoot, p.Scratchpads, p.ConsultInbox, p.Heartbeats,
-		p.VaultRoot, p.ArcmuxDir, p.PrinciplesDir, p.DeliverDir, p.ElonDir, p.TeamsDir, p.RetrosDir,
-		paths.GlobalRolesDir(vault),
 	} {
 		if _, err := os.Stat(d); err != nil {
 			t.Errorf("expected dir %q: %v", d, err)
 		}
 	}
+}
 
-	if _, err := os.Stat(filepath.Join(p.ArcmuxDir, "README.md")); err != nil {
-		t.Errorf("README missing: %v", err)
+func TestScaffoldDoesNotTouchVault(t *testing.T) {
+	dataRoot := t.TempDir()
+	vault := t.TempDir()
+
+	p := paths.ForProject(dataRoot, vault, "demo")
+	if err := Project(p); err != nil {
+		t.Fatalf("Project scaffold: %v", err)
 	}
-	missionPath := filepath.Join(p.ArcmuxDir, "mission.md")
-	body, err := os.ReadFile(missionPath)
+
+	// arcmux must not write anywhere under the vault — that's elonco's job.
+	entries, err := os.ReadDir(vault)
 	if err != nil {
-		t.Fatalf("mission.md missing: %v", err)
+		t.Fatalf("read vault: %v", err)
 	}
-	if !strings.Contains(string(body), "Build the demo by Friday") {
-		t.Errorf("mission.md missing seed content; got: %s", body)
-	}
-
-	for _, role := range []string{"elon.md", "manager.md", "ic-base.md"} {
-		if _, err := os.Stat(filepath.Join(paths.GlobalRolesDir(vault), role)); err != nil {
-			t.Errorf("role seed %q missing: %v", role, err)
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
 		}
+		t.Errorf("scaffold should not write into vault; got entries: %v", names)
 	}
 }
 
@@ -53,59 +54,14 @@ func TestScaffoldIdempotent(t *testing.T) {
 	p := paths.ForProject(dataRoot, vault, "demo")
 
 	for i := 0; i < 3; i++ {
-		if err := Project(p, vault, "mission"); err != nil {
+		if err := Project(p); err != nil {
 			t.Fatalf("Project iter %d: %v", i, err)
 		}
 	}
 }
 
-func TestScaffoldUpdateRolesOverwrites(t *testing.T) {
-	dataRoot := t.TempDir()
-	vault := t.TempDir()
-	p := paths.ForProject(dataRoot, vault, "demo")
-
-	rolesDir := paths.GlobalRolesDir(vault)
-	if err := os.MkdirAll(rolesDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	custom := filepath.Join(rolesDir, "elon.md")
-	if err := os.WriteFile(custom, []byte("OLD_VERSION"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := Project(p, vault, "mission", WithUpdateRoles()); err != nil {
-		t.Fatalf("Project: %v", err)
-	}
-
-	body, _ := os.ReadFile(custom)
-	if string(body) == "OLD_VERSION" {
-		t.Error("elon.md should have been overwritten by --update-roles")
-	}
-	if !strings.Contains(string(body), "role: elon") {
-		t.Errorf("elon.md missing fresh content: %s", body)
-	}
-}
-
-func TestScaffoldDoesNotOverwriteExistingRoles(t *testing.T) {
-	dataRoot := t.TempDir()
-	vault := t.TempDir()
-	p := paths.ForProject(dataRoot, vault, "demo")
-
-	rolesDir := paths.GlobalRolesDir(vault)
-	if err := os.MkdirAll(rolesDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	custom := filepath.Join(rolesDir, "elon.md")
-	if err := os.WriteFile(custom, []byte("USER_EDITED"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := Project(p, vault, "mission"); err != nil {
-		t.Fatalf("Project: %v", err)
-	}
-
-	body, _ := os.ReadFile(custom)
-	if string(body) != "USER_EDITED" {
-		t.Errorf("elon.md was overwritten; got %q", body)
+func TestScaffoldRejectsEmptySlug(t *testing.T) {
+	if err := Project(paths.Project{}); err == nil {
+		t.Error("expected error for empty Project slug")
 	}
 }

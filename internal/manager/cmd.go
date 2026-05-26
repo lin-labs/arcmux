@@ -7,20 +7,24 @@ import (
 	"io"
 	"os"
 	"strings"
-
-	"github.com/lin-labs/arcmux/internal/manager/scaffold"
 )
 
 // CmdManager parses args and runs the manager-mode launcher.
 //
 // Usage: arcmux manager <agent> <project> [flags...]
 // Flags may appear before or after the positional args.
+//
+// Post-C2 this subcommand is a thin shim over manager.Start. arcmux is
+// prompt-agnostic — the caller must supply the exact launch command via
+// --command (e.g. `claude --append-system-prompt-file /path/to/role.md`).
+// The subcommand is slated for removal in C4; new callers should use
+// elonco's launcher instead.
 func CmdManager(ctx context.Context, args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("manager", flag.ContinueOnError)
 	mission := fs.String("mission", "", "initial mission statement (free text)")
 	dataRoot := fs.String("data-root", os.Getenv("ARCMUX_DATA"), "override data root (default $ARCMUX_DATA, then $HOME/data)")
 	vaultRoot := fs.String("vault-root", os.Getenv("OBS_AGENTS"), "override vault root (default $OBS_AGENTS)")
-	updateRoles := fs.Bool("update-roles", false, "overwrite global role-file seeds with the binary's embedded versions")
+	command := fs.String("command", "", "exact shell command to exec after env exports (e.g. 'claude --append-system-prompt-file /path/to/elon.md'); defaults to the bare agent name")
 	focus := fs.Bool("focus", true, "focus the new cmux workspace after creation")
 
 	// Pre-split positionals from flags so users can write them in either order.
@@ -30,41 +34,35 @@ func CmdManager(ctx context.Context, args []string, stdout io.Writer) error {
 		return err
 	}
 	if len(positional) < 2 {
-		return fmt.Errorf("usage: arcmux manager <agent> <project> [--mission \"...\"] [--update-roles] [--focus=false]")
+		return fmt.Errorf("usage: arcmux manager <agent> <project> [--mission \"...\"] [--command \"...\"] [--focus=false]")
 	}
 	agent, project := positional[0], positional[1]
 
-	var scaffoldOpts []scaffold.Opt
-	if *updateRoles {
-		scaffoldOpts = append(scaffoldOpts, scaffold.WithUpdateRoles())
-	}
-
 	p, err := Start(ctx, Options{
-		Agent:        agent,
-		Project:      project,
-		Mission:      *mission,
-		DataRoot:     *dataRoot,
-		VaultRoot:    *vaultRoot,
-		Focus:        *focus,
-		ScaffoldOpts: scaffoldOpts,
+		Agent:     agent,
+		Project:   project,
+		Mission:   *mission,
+		Command:   *command,
+		DataRoot:  *dataRoot,
+		VaultRoot: *vaultRoot,
+		Focus:     *focus,
 	})
 	if err != nil {
 		return err
 	}
 	defer p.Close()
 
-	fmt.Fprintf(stdout, "manager mode started: project=%s agent=%s workspace=%s elon-pane=%s\n",
+	fmt.Fprintf(stdout, "manager mode started: project=%s agent=%s workspace=%s pane=%s\n",
 		p.Paths.Project, p.Opts.Agent, p.Workspace.Ref, p.ElonPane.Ref)
 	fmt.Fprintf(stdout, "bootstrap script: %s\n", p.BootstrapPath)
-	fmt.Fprintf(stdout, "journal:          %s\n", p.Paths.ElonDir+"/journal.md")
-	fmt.Fprintf(stdout, "decisions:        %s\n", p.Paths.ElonDir+"/decisions.md")
+	fmt.Fprintf(stdout, "scratchpad:       %s\n", p.ScratchpadPath)
 	return nil
 }
 
 // splitFlagsAndPositionals separates a mixed args slice into flag args
 // (recognized by the given FlagSet) and positionals. Lets the user mix
-// orderings — `arcmux manager claude foo --update-roles` and
-// `arcmux manager --update-roles claude foo` both work.
+// orderings — `arcmux manager claude foo --focus=false` and
+// `arcmux manager --focus=false claude foo` both work.
 //
 // Recognized flag forms: --flag, --flag=value, --flag value (for non-bool
 // flags), and the single-dash equivalents.

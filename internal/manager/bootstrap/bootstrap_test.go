@@ -7,26 +7,21 @@ import (
 	"testing"
 )
 
-func TestRenderClaude(t *testing.T) {
+func TestRenderBasic(t *testing.T) {
 	dir := t.TempDir()
-	roleFile := filepath.Join(t.TempDir(), "elon.md")
-	if err := os.WriteFile(roleFile, []byte("# Elon"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 
 	path, err := Render(Options{
-		Agent:     "claude",
 		Project:   "demo",
-		Role:      "elon",
 		EphemRoot: dir,
 		VaultRoot: "/vault",
 		DataRoot:  "/data",
-		RoleFile:  roleFile,
+		Agent:     "claude",
+		Command:   "claude --dangerously-skip-permissions --append-system-prompt-file /tmp/elon.md",
 	})
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
-	wantPath := filepath.Join(dir, "bootstrap-elon.sh")
+	wantPath := filepath.Join(dir, "bootstrap.sh")
 	if path != wantPath {
 		t.Errorf("path = %q, want %q", path, wantPath)
 	}
@@ -44,12 +39,11 @@ func TestRenderClaude(t *testing.T) {
 	for _, want := range []string{
 		"#!/usr/bin/env bash",
 		"export ARCMUX_PROJECT='demo'",
-		"export ARCMUX_ROLE='elon'",
 		"export ARCMUX_AGENT='claude'",
 		"export ARCMUX_VAULT='/vault'",
 		"export ARCMUX_DATA='/data'",
-		"exec claude --dangerously-skip-permissions --append-system-prompt-file",
-		roleFile,
+		"export ARCMUX_EPHEMERAL='" + dir + "'",
+		"exec claude --dangerously-skip-permissions --append-system-prompt-file /tmp/elon.md",
 	} {
 		if !strings.Contains(bs, want) {
 			t.Errorf("script missing %q\n---\n%s", want, bs)
@@ -57,61 +51,36 @@ func TestRenderClaude(t *testing.T) {
 	}
 }
 
-func TestRenderCodex(t *testing.T) {
+func TestRenderEnvTags(t *testing.T) {
 	dir := t.TempDir()
-	roleFile := filepath.Join(t.TempDir(), "elon.md")
-	if err := os.WriteFile(roleFile, []byte("# Elon"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
 	path, err := Render(Options{
-		Agent:     "codex",
-		Project:   "demo",
-		Role:      "elon",
-		EphemRoot: dir,
-		VaultRoot: "/vault",
-		DataRoot:  "/data",
-		RoleFile:  roleFile,
-	})
-	if err != nil {
-		t.Fatalf("Render: %v", err)
-	}
-	body, _ := os.ReadFile(path)
-	if !strings.Contains(string(body), "exec codex") {
-		t.Errorf("codex bootstrap missing exec codex; got: %s", body)
-	}
-}
-
-func TestRenderExportsTeamAndContract(t *testing.T) {
-	dir := t.TempDir()
-	roleFile := filepath.Join(t.TempDir(), "ic-base.md")
-	if err := os.WriteFile(roleFile, []byte("# IC"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	path, err := Render(Options{
-		Agent:      "claude",
 		Project:    "demo",
-		Role:       "ic-team-a-linus-1",
-		Team:       "team-a",
-		Slot:       "linus-1",
-		Contract:   "design-auth",
-		ScriptName: "bootstrap-ic-team-a-linus-1.sh",
 		EphemRoot:  dir,
-		VaultRoot:  "/vault",
-		DataRoot:   "/data",
-		RoleFile:   roleFile,
+		VaultRoot:  "/v",
+		DataRoot:   "/d",
+		Agent:      "claude",
+		Command:    "claude --dangerously-skip-permissions --append-system-prompt-file /tmp/ic.md",
+		ScriptName: "bootstrap-ic-team-a-linus-1.sh",
+		Env: map[string]string{
+			"ROLE":     "ic-team-a-linus-1",
+			"TEAM":     "team-a",
+			"SLOT":     "linus-1",
+			"CONTRACT": "design-auth",
+		},
 	})
 	if err != nil {
 		t.Fatalf("Render: %v", err)
+	}
+	if filepath.Base(path) != "bootstrap-ic-team-a-linus-1.sh" {
+		t.Errorf("ScriptName not respected: %q", path)
 	}
 	body, _ := os.ReadFile(path)
 	bs := string(body)
 	for _, want := range []string{
+		"export ARCMUX_ROLE='ic-team-a-linus-1'",
 		"export ARCMUX_TEAM='team-a'",
 		"export ARCMUX_SLOT='linus-1'",
 		"export ARCMUX_CONTRACT='design-auth'",
-		"export ARCMUX_ROLE='ic-team-a-linus-1'",
 	} {
 		if !strings.Contains(bs, want) {
 			t.Errorf("script missing %q\n---\n%s", want, bs)
@@ -119,61 +88,47 @@ func TestRenderExportsTeamAndContract(t *testing.T) {
 	}
 }
 
-// TestRenderOmitsSlotWhenEmpty pins the invariant that a manager bootstrap
-// (Slot empty) does not get ARCMUX_SLOT — only IC bootstraps do. The
-// per-IC inbox addresses by slot id; exporting an empty/wrong ARCMUX_SLOT
-// for a manager would mislead a peek-loop.
-func TestRenderOmitsSlotWhenEmpty(t *testing.T) {
+// TestRenderOmitsEmptyTags pins the invariant that an empty-string tag value
+// is dropped — callers can pass a partially populated Env map without
+// emitting `export ARCMUX_X=”` lines that would mislead readers.
+func TestRenderOmitsEmptyTags(t *testing.T) {
 	dir := t.TempDir()
-	roleFile := filepath.Join(t.TempDir(), "manager.md")
-	_ = os.WriteFile(roleFile, []byte("# M"), 0o644)
 	path, err := Render(Options{
-		Agent: "claude", Project: "demo", Role: "manager", Team: "team-a",
-		EphemRoot: dir, VaultRoot: "/v", DataRoot: "/d", RoleFile: roleFile,
+		Project:   "demo",
+		EphemRoot: dir,
+		Command:   "claude",
+		Env: map[string]string{
+			"ROLE": "manager",
+			"SLOT": "",
+		},
 	})
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
 	body, _ := os.ReadFile(path)
 	if strings.Contains(string(body), "ARCMUX_SLOT") {
-		t.Errorf("manager bootstrap should not export ARCMUX_SLOT; got: %s", body)
+		t.Errorf("empty SLOT tag should not be emitted; got: %s", body)
 	}
-}
-
-func TestRenderOmitsContractWhenEmpty(t *testing.T) {
-	dir := t.TempDir()
-	roleFile := filepath.Join(t.TempDir(), "manager.md")
-	_ = os.WriteFile(roleFile, []byte("# M"), 0o644)
-	path, err := Render(Options{
-		Agent: "claude", Project: "demo", Role: "manager", Team: "team-a",
-		EphemRoot: dir, VaultRoot: "/v", DataRoot: "/d", RoleFile: roleFile,
-	})
-	if err != nil {
-		t.Fatalf("Render: %v", err)
-	}
-	body, _ := os.ReadFile(path)
-	if strings.Contains(string(body), "ARCMUX_CONTRACT") {
-		t.Errorf("manager bootstrap should not export ARCMUX_CONTRACT; got: %s", body)
-	}
-}
-
-func TestRenderRejectsBadAgent(t *testing.T) {
-	dir := t.TempDir()
-	roleFile := filepath.Join(t.TempDir(), "r.md")
-	_ = os.WriteFile(roleFile, []byte("x"), 0o644)
-	_, err := Render(Options{
-		Agent: "bash", Project: "demo", Role: "elon",
-		EphemRoot: dir, VaultRoot: "/v", DataRoot: "/d", RoleFile: roleFile,
-	})
-	if err == nil {
-		t.Error("expected error on unsupported agent")
+	if !strings.Contains(string(body), "export ARCMUX_ROLE='manager'") {
+		t.Errorf("expected ARCMUX_ROLE='manager'; got: %s", body)
 	}
 }
 
 func TestRenderRequiresFields(t *testing.T) {
-	_, err := Render(Options{Agent: "claude"})
-	if err == nil {
-		t.Error("expected error when required fields missing")
+	cases := []struct {
+		name string
+		opts Options
+	}{
+		{"missing project", Options{EphemRoot: "/tmp", Command: "claude"}},
+		{"missing ephem", Options{Project: "demo", Command: "claude"}},
+		{"missing command", Options{Project: "demo", EphemRoot: "/tmp"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := Render(tc.opts); err == nil {
+				t.Error("expected error")
+			}
+		})
 	}
 }
 

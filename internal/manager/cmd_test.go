@@ -11,7 +11,7 @@ func makeTestFlagSet() *flag.FlagSet {
 	fs.String("mission", "", "")
 	fs.String("data-root", "", "")
 	fs.String("vault-root", "", "")
-	fs.Bool("update-roles", false, "")
+	fs.String("command", "", "")
 	fs.Bool("focus", true, "")
 	return fs
 }
@@ -25,32 +25,32 @@ func TestSplitFlagsAndPositionals(t *testing.T) {
 	}{
 		{
 			"all flags before positionals",
-			[]string{"--update-roles", "--focus=false", "--mission", "do X", "claude", "arcmux"},
-			[]string{"--update-roles", "--focus=false", "--mission", "do X"},
+			[]string{"--focus=false", "--mission", "do X", "claude", "arcmux"},
+			[]string{"--focus=false", "--mission", "do X"},
 			[]string{"claude", "arcmux"},
 		},
 		{
 			"all positionals before flags",
-			[]string{"claude", "arcmux", "--update-roles", "--focus=false", "--mission", "do X"},
-			[]string{"--update-roles", "--focus=false", "--mission", "do X"},
+			[]string{"claude", "arcmux", "--focus=false", "--mission", "do X"},
+			[]string{"--focus=false", "--mission", "do X"},
 			[]string{"claude", "arcmux"},
 		},
 		{
 			"mixed",
-			[]string{"--mission", "do X", "claude", "--update-roles", "arcmux"},
-			[]string{"--mission", "do X", "--update-roles"},
+			[]string{"--mission", "do X", "claude", "--focus=false", "arcmux"},
+			[]string{"--mission", "do X", "--focus=false"},
 			[]string{"claude", "arcmux"},
 		},
 		{
-			"bool flag without value",
-			[]string{"--update-roles", "claude", "arcmux"},
-			[]string{"--update-roles"},
+			"--command takes a value",
+			[]string{"--command", "claude --append-system-prompt-file /tmp/r.md", "claude", "arcmux"},
+			[]string{"--command", "claude --append-system-prompt-file /tmp/r.md"},
 			[]string{"claude", "arcmux"},
 		},
 		{
 			"-- separator passes through to positionals",
-			[]string{"--update-roles", "--", "claude", "--this-is-positional"},
-			[]string{"--update-roles"},
+			[]string{"--focus=false", "--", "claude", "--this-is-positional"},
+			[]string{"--focus=false"},
 			[]string{"claude", "--this-is-positional"},
 		},
 	}

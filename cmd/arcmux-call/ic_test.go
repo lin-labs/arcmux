@@ -12,7 +12,6 @@ import (
 
 	"github.com/lin-labs/arcmux/internal/manager/cmuxcli"
 	"github.com/lin-labs/arcmux/internal/manager/icspawn"
-	"github.com/lin-labs/arcmux/internal/manager/paths"
 	"github.com/lin-labs/arcmux/internal/manager/store"
 	"github.com/lin-labs/arcmux/internal/manager/teamspawn"
 )
@@ -51,7 +50,7 @@ func newICCmux() *cmuxcli.Client {
 // test would fail at the role-file-exists check.
 func writeICRoleFile(t *testing.T, vault, name string) {
 	t.Helper()
-	dir := paths.GlobalRolesDir(vault)
+	dir := filepath.Join(vault, "0Prompts", "roles")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir roles: %v", err)
 	}
