@@ -94,6 +94,15 @@ func (s *GRPCServer) Send(ctx context.Context, req *arcmuxv1.SendRequest) (*arcm
 	}); err != nil {
 		return nil, status.Errorf(codes.Internal, "push inbox: %v", err)
 	}
+	snap := sess.Snapshot()
+	s.daemon.Logger().Info("session.send.queued",
+		"session_id", snap.ID,
+		"name", snap.Name,
+		"msg_id", msgID,
+		"from", req.From,
+		"bytes", len(req.Body),
+		"preview", truncatePreview(req.Body, 50),
+	)
 	s.daemon.auditSessionEvent("inbox.send.queued", sess, map[string]any{
 		"msg_id": msgID,
 		"from":   req.From,

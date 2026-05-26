@@ -284,6 +284,13 @@ func (d *Daemon) State() *store.DB {
 	return d.state
 }
 
+// Logger exposes the daemon's structured logger for sibling packages
+// (e.g. C1 RPC handlers in grpc_c1.go) that want to emit at the same
+// level + with the same handler chain as core daemon logs.
+func (d *Daemon) Logger() *slog.Logger {
+	return d.logger
+}
+
 // SetState lets tests inject a pre-opened bbolt store. Mirrors the
 // pulse_supervisor_test injection pattern so we can exercise the C1
 // RPCs without going through Start().
@@ -375,10 +382,13 @@ func (d *Daemon) CreateSession(ctx context.Context, req CreateSessionRequest) (*
 		"name":  name,
 	})
 
-	d.logger.Info("creating session",
+	d.logger.Info("session.create",
 		"session_id", id,
+		"name", name,
 		"agent", req.Agent,
 		"cwd", req.CWD,
+		"owner_id", req.OwnerID,
+		"transport", string(prof.Transport),
 	)
 
 	if prof.Transport == profile.TransportExec {
@@ -523,6 +533,13 @@ func (d *Daemon) SendPrompt(ctx context.Context, sessionID, text string, confirm
 		return fmt.Errorf("unknown agent profile: %s", snap.Agent)
 	}
 
+	d.logger.Info("session.send",
+		"session_id", sessionID,
+		"name", snap.Name,
+		"bytes", len(text),
+		"preview", truncatePreview(text, 50),
+	)
+
 	if prof.Transport == profile.TransportExec {
 		return d.sendExecPrompt(ctx, sess, prof, text, confirmDelivery, waitIdle)
 	}
@@ -592,6 +609,14 @@ func (d *Daemon) Kill(ctx context.Context, sessionID string, graceful bool, time
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 	snap := sess.Snapshot()
+
+	d.logger.Info("session.close",
+		"session_id", sessionID,
+		"name", snap.Name,
+		"agent", snap.Agent,
+		"graceful", graceful,
+		"final_state", string(snap.State),
+	)
 
 	if snap.Transport == profile.TransportExec {
 		return d.killExecSession(ctx, sess, graceful, timeout)
@@ -893,4 +918,32 @@ type CreateSessionRequest struct {
 
 func generateSessionID() string {
 	return fmt.Sprintf("s-%d", time.Now().UnixNano())
+}
+
+// truncatePreview returns up to n runes of s, with newlines collapsed to a
+// single space so a log line stays single-line, and "…" appended when
+// truncated. Used by session.send logging so we don't dump entire prompts
+// into INFO output but still get a useful glimpse for debugging.
+func truncatePreview(s string, n int) string {
+	// Collapse whitespace runs to single space first.
+	flat := make([]rune, 0, len(s))
+	prevSpace := false
+	for _, r := range s {
+		if r == '\n' || r == '\r' || r == '\t' {
+			r = ' '
+		}
+		if r == ' ' {
+			if prevSpace {
+				continue
+			}
+			prevSpace = true
+		} else {
+			prevSpace = false
+		}
+		flat = append(flat, r)
+	}
+	if len(flat) <= n {
+		return string(flat)
+	}
+	return string(flat[:n]) + "…"
 }
