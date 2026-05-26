@@ -1,6 +1,23 @@
 package profile
 
-import "time"
+import (
+	"os"
+	"path/filepath"
+	"time"
+)
+
+// defaultClaudeHookDir returns an absolute path to the user's ~/.claude
+// directory. Built once so the default Profile values never carry a
+// literal "~" — filepath.Join doesn't expand tildes, and a literal "~"
+// flowing into os.MkdirAll silently creates a "~" subdirectory under the
+// caller's cwd (which has happened in the wild — see git history).
+func defaultClaudeHookDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".claude"
+	}
+	return filepath.Join(home, ".claude")
+}
 
 const (
 	TransportTmux = "tmux"
@@ -58,7 +75,7 @@ func DefaultProfiles() map[string]Profile {
 			NudgeCommand:      "Enter",
 			MaxNudgeRetries:   3,
 			HookType:          "claude_hooks",
-			HookDir:           "~/.claude",
+			HookDir:           defaultClaudeHookDir(),
 		},
 		"codex_exec": {
 			Transport:       TransportExec,

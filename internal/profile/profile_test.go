@@ -1,6 +1,10 @@
 package profile
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestDefaultProfiles(t *testing.T) {
 	profiles := DefaultProfiles()
@@ -49,8 +53,16 @@ func TestDefaultProfiles_Claude(t *testing.T) {
 	if p.HookType != "claude_hooks" {
 		t.Errorf("HookType = %q, want %q", p.HookType, "claude_hooks")
 	}
-	if p.HookDir != "~/.claude" {
-		t.Errorf("HookDir = %q, want %q", p.HookDir, "~/.claude")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir: %v", err)
+	}
+	want := filepath.Join(home, ".claude")
+	if p.HookDir != want {
+		t.Errorf("HookDir = %q, want %q", p.HookDir, want)
+	}
+	if !filepath.IsAbs(p.HookDir) {
+		t.Errorf("HookDir = %q, must be absolute (no literal ~)", p.HookDir)
 	}
 }
 

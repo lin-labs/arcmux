@@ -66,6 +66,20 @@ func TestInstaller_Install_Claude(t *testing.T) {
 	}
 }
 
+func TestInstaller_Install_Claude_RejectsRelativeHookDir(t *testing.T) {
+	// Regression: a literal "~/.claude" (or any non-absolute string) used
+	// to flow through and silently create a "~/.claude/hooks/..." tree
+	// under the daemon's cwd. Now it must error out.
+	installer := NewInstaller(t.TempDir())
+
+	for _, hookDir := range []string{"~/.claude", "relative/path", "."} {
+		_, err := installer.Install("s-test", "claude", hookDir)
+		if err == nil {
+			t.Errorf("Install with hookDir=%q expected error, got nil", hookDir)
+		}
+	}
+}
+
 func TestInstaller_Install_Codex(t *testing.T) {
 	tmpDir := t.TempDir()
 	installer := NewInstaller(tmpDir)
@@ -94,6 +108,37 @@ func TestInstaller_Cleanup(t *testing.T) {
 
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Error("file should be removed after cleanup")
+	}
+}
+
+func TestInstaller_Cleanup_RemovesClaudeScript(t *testing.T) {
+	// Install a full Claude session, then Cleanup must remove both the
+	// jsonl output and the generated per-session hook script.
+	tmpDir := t.TempDir()
+	hookDir := filepath.Join(tmpDir, "claude")
+	installer := NewInstaller(tmpDir)
+
+	jsonlPath, err := installer.Install("s-test", "claude", hookDir)
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	// Materialize the jsonl file so Cleanup has both artifacts to remove.
+	if err := os.WriteFile(jsonlPath, []byte(""), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	scriptPath := filepath.Join(hookDir, "hooks", "arcmux-s-test.sh")
+	if _, err := os.Stat(scriptPath); err != nil {
+		t.Fatalf("script not created: %v", err)
+	}
+
+	if err := installer.Cleanup("s-test"); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	if _, err := os.Stat(jsonlPath); !os.IsNotExist(err) {
+		t.Error("jsonl should be removed after cleanup")
+	}
+	if _, err := os.Stat(scriptPath); !os.IsNotExist(err) {
+		t.Error("hook script should be removed after cleanup")
 	}
 }
 

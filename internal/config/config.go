@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -121,7 +122,7 @@ func Load(path string) (*Config, error) {
 			StuckTimeout:    "5m",
 		},
 		Hooks: HooksConfig{
-			ClaudeHookDir: "~/.claude",
+			ClaudeHookDir: defaultClaudeHookDir(),
 			HookOutputDir: "/tmp/arcmux-hooks",
 			AutoInstall:   true,
 		},
@@ -161,6 +162,13 @@ func Load(path string) (*Config, error) {
 	cfg.Agents = mergeAgentProfiles(defaultAgents, cfg.Agents)
 	cfg.Pulse = mergePulseConfig(pulseDefaults, cfg.Pulse)
 
+	// Resolve any "~/..." paths the user wrote in TOML to absolute form
+	// once, here at the boundary. Downstream code can then assume every
+	// path is absolute and never has to guess again. (Go does NOT expand
+	// "~" — filepath.Join("~", "x") yields the literal directory "~", and
+	// os.MkdirAll happily creates it under the daemon's cwd.)
+	expandConfigPaths(cfg)
+
 	if cfg.Mux.Backend == "" {
 		cfg.Mux.Backend = "cmux"
 	}
@@ -169,6 +177,53 @@ func Load(path string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// expandTilde turns "~", "~/..." into an absolute path under the user's
+// home directory. Any other input — including already-absolute paths and
+// relative paths — is returned unchanged. The only path-form normalized
+// here is the leading tilde; we explicitly do not expand "~user/...".
+func expandTilde(p string) string {
+	if p == "" || p[0] != '~' {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return p
+	}
+	if p == "~" {
+		return home
+	}
+	if strings.HasPrefix(p, "~/") {
+		return filepath.Join(home, p[2:])
+	}
+	return p
+}
+
+// expandConfigPaths normalizes every user-supplied filesystem path on the
+// config struct after TOML load. Add new path fields here so the "all
+// paths absolute after Load" invariant holds everywhere.
+func expandConfigPaths(cfg *Config) {
+	cfg.Daemon.Socket = expandTilde(cfg.Daemon.Socket)
+	cfg.Daemon.LogDir = expandTilde(cfg.Daemon.LogDir)
+	cfg.Hooks.ClaudeHookDir = expandTilde(cfg.Hooks.ClaudeHookDir)
+	cfg.Hooks.HookOutputDir = expandTilde(cfg.Hooks.HookOutputDir)
+	cfg.Pulse.DataRoot = expandTilde(cfg.Pulse.DataRoot)
+	for name, prof := range cfg.Agents {
+		prof.HookDir = expandTilde(prof.HookDir)
+		cfg.Agents[name] = prof
+	}
+}
+
+// defaultClaudeHookDir returns the absolute path to ~/.claude. Mirrors
+// profile.defaultClaudeHookDir — duplicated to avoid a config -> profile
+// dependency for one helper.
+func defaultClaudeHookDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".claude"
+	}
+	return filepath.Join(home, ".claude")
 }
 
 // ParsePulse converts the user-facing string durations to time.Duration. It
