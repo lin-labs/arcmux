@@ -50,13 +50,13 @@ func TestEnvFlags_Empty(t *testing.T) {
 	}
 }
 
-func TestPromptDeliveryPlan_UsesLiteralBodyThenCarriageReturn(t *testing.T) {
+func TestPromptDeliveryPlan_UsesLiteralBodyThenEnter(t *testing.T) {
 	plan := newPromptDeliveryPlan("hello Enter C-m")
 
 	if want := []string{"-l", "hello Enter C-m"}; !reflect.DeepEqual(plan.bodyKeys, want) {
 		t.Fatalf("body keys = %v, want %v", plan.bodyKeys, want)
 	}
-	if want := []string{"C-m"}; !reflect.DeepEqual(plan.submitKeys, want) {
+	if want := []string{"Enter"}; !reflect.DeepEqual(plan.submitKeys, want) {
 		t.Fatalf("submit keys = %v, want %v", plan.submitKeys, want)
 	}
 	if plan.wait != promptSubmitDelay {
@@ -70,7 +70,7 @@ func TestPromptDeliveryResult_TypedOnlyUntilSubmitSucceeds(t *testing.T) {
 		BodySent:  true,
 		Submitted: false,
 		BodyMode:  "literal",
-		SubmitKey: "C-m",
+		SubmitKey: "Enter",
 		Wait:      promptSubmitDelay,
 	}
 

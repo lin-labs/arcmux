@@ -39,7 +39,7 @@ type promptDeliveryPlan struct {
 func newPromptDeliveryPlan(text string) promptDeliveryPlan {
 	return promptDeliveryPlan{
 		bodyKeys:   []string{"-l", text},
-		submitKeys: []string{"C-m"},
+		submitKeys: []string{"Enter"},
 		wait:       promptSubmitDelay,
 	}
 }
@@ -237,7 +237,7 @@ func (c *Client) SendPrompt(ctx context.Context, target, text string) (PromptDel
 	result := PromptDeliveryResult{
 		Status:    PromptDeliveryTypedOnly,
 		BodyMode:  "literal",
-		SubmitKey: "C-m",
+		SubmitKey: "Enter",
 		Wait:      plan.wait,
 	}
 
