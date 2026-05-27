@@ -470,7 +470,7 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 		d.emitStateChanged(id, session.StateIdle, "session ready")
 		if prompt := req.Prompt; prompt != "" {
 			go func() {
-				if err := d.SendPrompt(d.ctx, id, prompt, true, false); err != nil {
+				if err := d.SendPrompt(d.ctx, id, prompt, false, false); err != nil {
 					sess.SetState(session.StateStuck)
 					d.emitStateChanged(id, session.StateStuck, "prompt delivery failed")
 					d.logger.Error("initial exec prompt failed", "session_id", id, "error", err)
@@ -573,7 +573,7 @@ func (d *Daemon) startAgentLifecycle(id string, sess *session.Session, prof prof
 
 	// Deliver initial prompt if provided
 	if prompt != "" {
-		if err := d.deliverPrompt(ctx, sess, prof, prompt, true); err != nil {
+		if err := d.deliverPrompt(ctx, sess, prof, prompt, false); err != nil {
 			sess.SetState(session.StateStuck)
 			d.emitStateChanged(id, session.StateStuck, "prompt delivery failed")
 			d.logger.Error("initial prompt delivery failed", "session_id", id, "error", err)
@@ -854,7 +854,7 @@ func (d *Daemon) drainInboxOnIdle(sessionID string) {
 	msg := msgs[0]
 	// Deliver via the normal SendPrompt path so all the usual side
 	// effects (state→Working, prompt_delivered event, audit row) fire.
-	if err := d.SendPrompt(d.ctx, snap.ID, msg.Body, true, false); err != nil {
+	if err := d.SendPrompt(d.ctx, snap.ID, msg.Body, false, false); err != nil {
 		d.logger.Warn("inbox drain: SendPrompt failed; leaving message queued",
 			"session_id", snap.ID, "name", snap.Name, "msg_id", msg.ID, "error", err)
 		return

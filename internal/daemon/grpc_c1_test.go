@@ -92,6 +92,14 @@ func (s *sendPromptSpy) lastConfirm() bool {
 	return s.confirmHistory[len(s.confirmHistory)-1]
 }
 
+func (s *sendPromptSpy) confirms() []bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]bool, len(s.confirmHistory))
+	copy(out, s.confirmHistory)
+	return out
+}
+
 // installSendPromptSpy wires a profile-less daemon and records every
 // SendPrompt confirmDelivery argument by replacing the daemon's
 // sendPromptHook. The hook is consulted by SendPrompt at the very top
@@ -557,6 +565,41 @@ func TestEmitStateChanged_DrainsInboxOnIdle(t *testing.T) {
 	}
 }
 
+func TestEmitStateChanged_DrainUsesFireAndForget(t *testing.T) {
+	srv, d, db := newC1TestServer(t)
+	sess := injectSession(t, d, "drain-fire", "elonco", session.StateWorking)
+	d.ctx = context.Background()
+	spy := installSendPromptSpy(d)
+
+	if _, err := srv.Send(d.ctx, &arcmuxv1.SendRequest{
+		SessionName: "drain-fire",
+		Body:        "opening prompt",
+		From:        "elonco",
+	}); err != nil {
+		t.Fatalf("Send (queue): %v", err)
+	}
+
+	sess.SetState(session.StateIdle)
+	d.emitStateChanged(sess.Snapshot().ID, session.StateIdle, "test idle")
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		confirms := spy.confirms()
+		if len(confirms) > 0 {
+			if confirms[0] != false {
+				t.Fatalf("drain confirmDelivery = %v, want false", confirms[0])
+			}
+			left, _ := db.PeekSessionInbox("drain-fire", 10)
+			if len(left) != 0 {
+				t.Fatalf("queue depth after successful drain = %d, want 0", len(left))
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("drain did not call SendPrompt; confirms=%v", spy.confirms())
+}
+
 // TestC1_StateUnavailable ensures all five RPCs return Unavailable
 // (not a panic) when the daemon-level state.bolt isn't open. This is
 // the contract the daemon Start() falls back on when bbolt open fails.
@@ -805,4 +848,33 @@ func TestCreateSession_LegacyNoOwnerSkipsIdempotency(t *testing.T) {
 		t.Errorf("legacy callers: returned same session_id (%q); want distinct sessions",
 			s1.Snapshot().ID)
 	}
+}
+
+func TestCreateSession_InitialExecPromptUsesFireAndForget(t *testing.T) {
+	d, cleanup := newCreateSessionTestDaemon(t)
+	defer cleanup()
+	spy := installSendPromptSpy(d)
+
+	_, _, err := d.createSessionWithIdempotency(context.Background(), CreateSessionRequest{
+		Agent:  "claude_exec",
+		CWD:    t.TempDir(),
+		Name:   "fresh-opening-prompt",
+		Prompt: "start the work",
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		confirms := spy.confirms()
+		if len(confirms) > 0 {
+			if confirms[0] != false {
+				t.Fatalf("initial prompt confirmDelivery = %v, want false", confirms[0])
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("initial prompt was not sent; confirms=%v", spy.confirms())
 }

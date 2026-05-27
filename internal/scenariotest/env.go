@@ -143,6 +143,7 @@ func (e *Env) WriteDaemonConfig() error {
 socket = %q
 log_dir = %q
 http_addr = %q
+profile_name = "scenariotest"
 
 [tmux]
 socket_name = %q
