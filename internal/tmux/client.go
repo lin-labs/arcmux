@@ -11,6 +11,39 @@ import (
 
 const defaultSocket = "arcmux"
 
+const promptSubmitDelay = 200 * time.Millisecond
+
+type PromptDeliveryStatus string
+
+const (
+	PromptDeliveryTypedOnly  PromptDeliveryStatus = "typed_only"
+	PromptDeliverySubmitted  PromptDeliveryStatus = "submitted"
+	PromptDeliveryBodyFailed PromptDeliveryStatus = "body_failed"
+)
+
+type PromptDeliveryResult struct {
+	Status    PromptDeliveryStatus
+	BodySent  bool
+	Submitted bool
+	BodyMode  string
+	SubmitKey string
+	Wait      time.Duration
+}
+
+type promptDeliveryPlan struct {
+	bodyKeys   []string
+	submitKeys []string
+	wait       time.Duration
+}
+
+func newPromptDeliveryPlan(text string) promptDeliveryPlan {
+	return promptDeliveryPlan{
+		bodyKeys:   []string{"-l", text},
+		submitKeys: []string{"C-m"},
+		wait:       promptSubmitDelay,
+	}
+}
+
 // Client wraps tmux CLI commands, always targeting the isolated arcmux.socket.
 type Client struct {
 	socket string
@@ -199,6 +232,34 @@ func (c *Client) SendKeys(ctx context.Context, target string, keys ...string) er
 	return err
 }
 
+func (c *Client) SendPrompt(ctx context.Context, target, text string) (PromptDeliveryResult, error) {
+	plan := newPromptDeliveryPlan(text)
+	result := PromptDeliveryResult{
+		Status:    PromptDeliveryTypedOnly,
+		BodyMode:  "literal",
+		SubmitKey: "C-m",
+		Wait:      plan.wait,
+	}
+
+	if err := c.SendKeys(ctx, target, plan.bodyKeys...); err != nil {
+		result.Status = PromptDeliveryBodyFailed
+		return result, err
+	}
+	result.BodySent = true
+
+	if err := sleepWithContext(ctx, plan.wait); err != nil {
+		return result, err
+	}
+
+	if err := c.SendKeys(ctx, target, plan.submitKeys...); err != nil {
+		return result, err
+	}
+
+	result.Submitted = true
+	result.Status = PromptDeliverySubmitted
+	return result, nil
+}
+
 // CapturePaneVisible captures the visible screen content of a pane.
 func (c *Client) CapturePaneVisible(ctx context.Context, target string) (string, error) {
 	return c.run(ctx, "capture-pane", "-t", target, "-p")
@@ -330,6 +391,18 @@ func (c *Client) WaitIdle(ctx context.Context, target string, timeout, settle ti
 			return ctx.Err()
 		case <-time.After(200 * time.Millisecond):
 		}
+	}
+}
+
+func sleepWithContext(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 

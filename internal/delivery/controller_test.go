@@ -96,6 +96,35 @@ func TestControllerFailsAfterTimeout(t *testing.T) {
 	}
 }
 
+func TestControllerDoesNotAcceptTypedPromptAsDelivered(t *testing.T) {
+	t.Parallel()
+
+	controller := NewController(HeuristicJudge{}, ControllerConfig{
+		IngestionTimeout:  10 * time.Millisecond,
+		RetryInterval:     time.Millisecond,
+		MaxSubmitAttempts: 1,
+		MinConfidence:     0.7,
+	})
+	runtime := &fakeRuntime{
+		outputs: []string{
+			"› Do the implementation work now.\n\ngpt-5.5 medium · ~/Projects/test6",
+		},
+	}
+
+	assessment, err := controller.EnsureIngested(context.Background(), Evidence{
+		Prompt: "Do the implementation work now.",
+	}, runtime)
+	if err == nil {
+		t.Fatal("expected typed-only prompt to fail delivery confirmation")
+	}
+	if assessment.State != StatePendingSubmit {
+		t.Fatalf("state = %s, want %s", assessment.State, StatePendingSubmit)
+	}
+	if runtime.submitCount != 1 {
+		t.Fatalf("submit count = %d, want 1", runtime.submitCount)
+	}
+}
+
 func TestIsIngested_SoftPassPath(t *testing.T) {
 	t.Parallel()
 	c := NewController(HeuristicJudge{}, ControllerConfig{MinConfidence: 0.7})

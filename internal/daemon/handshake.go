@@ -173,10 +173,38 @@ func (d *Daemon) deliverPrompt(ctx context.Context, sess *session.Session, prof 
 		beforeOutput = ""
 	}
 
-	// Send the prompt text + Enter
-	if err := d.tmux.SendKeys(ctx, target, text, "Enter"); err != nil {
-		return fmt.Errorf("send prompt: %w", err)
+	result, err := d.tmux.SendPrompt(ctx, target, text)
+	if err != nil {
+		d.emitEvent(Event{
+			SessionID: snap.ID,
+			Type:      "prompt_delivery_submit_failed",
+			Message:   err.Error(),
+			Timestamp: time.Now(),
+			Data: map[string]string{
+				"delivery_status": string(result.Status),
+				"body_sent":       fmt.Sprintf("%t", result.BodySent),
+				"submitted":       fmt.Sprintf("%t", result.Submitted),
+				"body_mode":       result.BodyMode,
+				"submit_key":      result.SubmitKey,
+				"submit_wait":     result.Wait.String(),
+			},
+		})
+		return fmt.Errorf("send prompt: status=%s body_sent=%t submitted=%t: %w",
+			result.Status, result.BodySent, result.Submitted, err)
 	}
+	d.emitEvent(Event{
+		SessionID: snap.ID,
+		Type:      "prompt_submitted",
+		Timestamp: time.Now(),
+		Data: map[string]string{
+			"delivery_status": string(result.Status),
+			"body_sent":       fmt.Sprintf("%t", result.BodySent),
+			"submitted":       fmt.Sprintf("%t", result.Submitted),
+			"body_mode":       result.BodyMode,
+			"submit_key":      result.SubmitKey,
+			"submit_wait":     result.Wait.String(),
+		},
+	})
 
 	return d.ensurePromptIngested(ctx, sess, prof, text, beforeOutput)
 }

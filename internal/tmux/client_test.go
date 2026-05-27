@@ -50,6 +50,38 @@ func TestEnvFlags_Empty(t *testing.T) {
 	}
 }
 
+func TestPromptDeliveryPlan_UsesLiteralBodyThenCarriageReturn(t *testing.T) {
+	plan := newPromptDeliveryPlan("hello Enter C-m")
+
+	if want := []string{"-l", "hello Enter C-m"}; !reflect.DeepEqual(plan.bodyKeys, want) {
+		t.Fatalf("body keys = %v, want %v", plan.bodyKeys, want)
+	}
+	if want := []string{"C-m"}; !reflect.DeepEqual(plan.submitKeys, want) {
+		t.Fatalf("submit keys = %v, want %v", plan.submitKeys, want)
+	}
+	if plan.wait != promptSubmitDelay {
+		t.Fatalf("wait = %s, want %s", plan.wait, promptSubmitDelay)
+	}
+}
+
+func TestPromptDeliveryResult_TypedOnlyUntilSubmitSucceeds(t *testing.T) {
+	result := PromptDeliveryResult{
+		Status:    PromptDeliveryTypedOnly,
+		BodySent:  true,
+		Submitted: false,
+		BodyMode:  "literal",
+		SubmitKey: "C-m",
+		Wait:      promptSubmitDelay,
+	}
+
+	if result.Status == PromptDeliverySubmitted {
+		t.Fatal("typed-only result must not report submitted")
+	}
+	if !result.BodySent || result.Submitted {
+		t.Fatalf("result = %+v, want body sent but not submitted", result)
+	}
+}
+
 // TestIntegration_NewSessionWithEnv proves that caller-supplied env vars
 // reach the spawned pane's shell. Regression for the silent-drop bug
 // where CreateSession.Env was wired through every layer except tmux
