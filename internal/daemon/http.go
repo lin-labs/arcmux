@@ -25,6 +25,9 @@ func NewHTTPServer(d *Daemon, addr string) *HTTPServer {
 	mux.HandleFunc("/session/new", h.handleSessionNew)
 	mux.HandleFunc("/session/close", h.handleSessionClose)
 	mux.HandleFunc("/sessions", h.handleSessionsList)
+	mux.HandleFunc("/profiles", h.handleProfilesList)
+	mux.HandleFunc("/profiles/create", h.handleProfilesCreate)
+	mux.HandleFunc("/profiles/remove", h.handleProfilesRemove)
 	h.srv = &http.Server{Addr: addr, Handler: mux}
 	return h
 }
@@ -198,6 +201,10 @@ type sessionsListResponse struct {
 	Sessions []sessionSummary `json:"sessions"`
 }
 
+type profilesResponse struct {
+	Profiles []ProfileRecord `json:"profiles"`
+}
+
 func (h *HTTPServer) handleSessionsList(w http.ResponseWriter, r *http.Request) {
 	sessions := h.daemon.ListSessions()
 	out := sessionsListResponse{Sessions: make([]sessionSummary, 0, len(sessions))}
@@ -214,6 +221,51 @@ func (h *HTTPServer) handleSessionsList(w http.ResponseWriter, r *http.Request) 
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func (h *HTTPServer) handleProfilesList(w http.ResponseWriter, r *http.Request) {
+	if h.daemon.profileManager == nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "profile manager unavailable on profile daemon"})
+		return
+	}
+	writeJSON(w, http.StatusOK, profilesResponse{Profiles: h.daemon.profileManager.List()})
+}
+
+func (h *HTTPServer) handleProfilesCreate(w http.ResponseWriter, r *http.Request) {
+	if h.daemon.profileManager == nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "profile manager unavailable on profile daemon"})
+		return
+	}
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "missing name"})
+		return
+	}
+	rec, err := h.daemon.profileManager.Create(r.Context(), name)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, rec)
+}
+
+func (h *HTTPServer) handleProfilesRemove(w http.ResponseWriter, r *http.Request) {
+	if h.daemon.profileManager == nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "profile manager unavailable on profile daemon"})
+		return
+	}
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "missing name"})
+		return
+	}
+	purge := r.URL.Query().Get("purge") == "1" || r.URL.Query().Get("purge") == "true"
+	rec, err := h.daemon.profileManager.Remove(r.Context(), name, purge)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, rec)
 }
 
 func (h *HTTPServer) findByName(name string) *session.Session {

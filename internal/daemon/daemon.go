@@ -53,6 +53,8 @@ type Daemon struct {
 
 	pulse *PulseSupervisor
 
+	profileManager *ProfileManager
+
 	// sendPromptHook, when non-nil, replaces the production SendPrompt
 	// transport dispatch. Test-only hook so unit tests can observe the
 	// arguments the C1 Send RPC passes through to daemon.SendPrompt
@@ -169,6 +171,17 @@ func (d *Daemon) Start(ctx context.Context) error {
 		d.logger.Info("pulse supervisor disabled (config.pulse.enabled=false)")
 	}
 
+	if d.cfg.Daemon.ProfileName == "" && d.cfg.Daemon.HTTPAddr != "" {
+		pm, err := NewProfileManager(d)
+		if err != nil {
+			return fmt.Errorf("profile manager: %w", err)
+		}
+		d.profileManager = pm
+		if err := pm.Start(d.ctx); err != nil {
+			return fmt.Errorf("start profile manager: %w", err)
+		}
+	}
+
 	// Start gRPC server (blocking in goroutine)
 	go func() {
 		if err := d.server.Serve(listener); err != nil {
@@ -225,6 +238,10 @@ func (d *Daemon) Stop() {
 		d.cancel()
 	}
 
+	if d.profileManager != nil {
+		d.profileManager.Stop()
+	}
+
 	// Wait for pulse supervisor to drain so every bolt handle is closed
 	// before the daemon process exits — leftover locks would block the
 	// next `arcmux start`.
@@ -268,11 +285,15 @@ func (d *Daemon) openState() error {
 		}
 		root = filepath.Join(home, "data")
 	}
-	dir := filepath.Join(root, "arcmux", "_daemon")
+	path := d.cfg.Daemon.StatePath
+	if path == "" {
+		dir := filepath.Join(root, "arcmux", "_daemon")
+		path = filepath.Join(dir, "state.bolt")
+	}
+	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", dir, err)
 	}
-	path := filepath.Join(dir, "state.bolt")
 	db, err := store.Open(path)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", path, err)

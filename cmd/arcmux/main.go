@@ -2,8 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -38,6 +42,8 @@ func run(args []string) error {
 		return fmt.Errorf("'arcmux manager' was removed in the pure-substrate refactor; use elonco's launcher (it calls arcmux's RegisterSession directly)")
 	case "pulse":
 		return cmdPulse(args[1:])
+	case "profiles":
+		return cmdProfiles(args[1:], os.Stdout)
 	case "info", "status":
 		return cmdInfo(args[1:], os.Stdout)
 	case "version":
@@ -53,15 +59,22 @@ func run(args []string) error {
 
 func cmdStart(args []string) error {
 	configPath := ""
+	socketPath := ""
 	for i := 0; i < len(args)-1; i++ {
 		if args[i] == "--config" || args[i] == "-c" {
 			configPath = args[i+1]
+		}
+		if args[i] == "--socket-path" {
+			socketPath = args[i+1]
 		}
 	}
 
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
+	}
+	if socketPath != "" {
+		cfg.Daemon.Socket = socketPath
 	}
 
 	// Set up structured logging
@@ -95,7 +108,11 @@ func printUsage() {
 	fmt.Print(`arcmux — Agent Tmux Runtime Service (pure substrate)
 
 Usage:
-  arcmux start [--config path]                            Start the daemon (default command — also runs the pulse supervisor)
+  arcmux start [--config path] [--socket-path path]        Start the daemon (default command — also runs the pulse supervisor)
+  arcmux profiles list                                    List profile registry entries
+  arcmux profiles create <name>                           Register a profile and ask the daemon to listen on its socket
+  arcmux profiles remove <name> [--purge]                 Stop listening and remove the profile registry entry
+  arcmux profiles purge <name>                            Stop listening, remove registry entry, and delete profile state
   arcmux info [--config path] [--json]                    Print daemon-process introspection (PID, socket, bolt path, session count, uptime)
   arcmux pulse --project <slug> [--interval 10s] [--once] Debug-only: pulse one project (the daemon does this for all projects)
   arcmux version                                          Print version
@@ -120,4 +137,85 @@ Observe agent panes:
   tmux -L arcmux attach
 
 `)
+}
+
+func cmdProfiles(args []string, stdout io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: arcmux profiles list|create|remove|purge")
+	}
+	cfg, err := config.Load("")
+	if err != nil {
+		return err
+	}
+	switch args[0] {
+	case "list":
+		return profileHTTPJSON(cfg, "/profiles", stdout, true)
+	case "create":
+		if len(args) < 2 {
+			return fmt.Errorf("profiles create <name>")
+		}
+		return profileHTTPJSON(cfg, "/profiles/create?name="+url.QueryEscape(args[1]), stdout, false)
+	case "remove":
+		if len(args) < 2 {
+			return fmt.Errorf("profiles remove <name> [--purge]")
+		}
+		purge := ""
+		if len(args) > 2 && args[2] == "--purge" {
+			purge = "&purge=1"
+		}
+		return profileHTTPJSON(cfg, "/profiles/remove?name="+url.QueryEscape(args[1])+purge, stdout, false)
+	case "purge":
+		if len(args) < 2 {
+			return fmt.Errorf("profiles purge <name>")
+		}
+		return profileHTTPJSON(cfg, "/profiles/remove?name="+url.QueryEscape(args[1])+"&purge=1", stdout, false)
+	default:
+		return fmt.Errorf("unknown profiles subcommand %q", args[0])
+	}
+}
+
+func profileHTTPJSON(cfg *config.Config, path string, stdout io.Writer, allowOfflineList bool) error {
+	if cfg.Daemon.HTTPAddr == "" {
+		return fmt.Errorf("daemon http_addr is disabled")
+	}
+	var resp *http.Response
+	var err error
+	if path == "/profiles" {
+		resp, err = http.Get("http://" + cfg.Daemon.HTTPAddr + path)
+	} else {
+		resp, err = http.Post("http://"+cfg.Daemon.HTTPAddr+path, "application/json", nil)
+	}
+	if err != nil {
+		if allowOfflineList {
+			return printProfileRegistryFile(stdout)
+		}
+		return fmt.Errorf("daemon profile API unavailable at %s: %w", cfg.Daemon.HTTPAddr, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("profile API %s: %s", resp.Status, string(body))
+	}
+	_, err = stdout.Write(body)
+	return err
+}
+
+func printProfileRegistryFile(stdout io.Writer) error {
+	path, err := daemon.DefaultProfileRegistryPath()
+	if err != nil {
+		return err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			data = []byte(`{"profiles":{}}` + "\n")
+		} else {
+			return err
+		}
+	}
+	var v any
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err
+	}
+	return json.NewEncoder(stdout).Encode(v)
 }

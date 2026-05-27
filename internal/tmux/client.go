@@ -255,6 +255,12 @@ func (c *Client) KillSession(ctx context.Context, session string) error {
 	return err
 }
 
+// KillServer terminates the tmux server for this client's socket.
+func (c *Client) KillServer(ctx context.Context) error {
+	_, err := c.run(ctx, "kill-server")
+	return err
+}
+
 // ShowEnvironment returns tmux's session-scoped environment value for key.
 // This intentionally reads tmux session state, not a pane shell's process env.
 func (c *Client) ShowEnvironment(ctx context.Context, session, key string) (string, error) {

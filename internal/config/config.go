@@ -65,9 +65,11 @@ type PulseCadenceConfig struct {
 }
 
 type DaemonConfig struct {
-	Socket   string `toml:"socket"`
-	LogDir   string `toml:"log_dir"`
-	HTTPAddr string `toml:"http_addr"`
+	Socket      string `toml:"socket"`
+	LogDir      string `toml:"log_dir"`
+	HTTPAddr    string `toml:"http_addr"`
+	ProfileName string `toml:"profile_name"`
+	StatePath   string `toml:"state_path"`
 }
 
 type TmuxConfig struct {
@@ -206,6 +208,7 @@ func expandTilde(p string) string {
 func expandConfigPaths(cfg *Config) {
 	cfg.Daemon.Socket = expandTilde(cfg.Daemon.Socket)
 	cfg.Daemon.LogDir = expandTilde(cfg.Daemon.LogDir)
+	cfg.Daemon.StatePath = expandTilde(cfg.Daemon.StatePath)
 	cfg.Hooks.ClaudeHookDir = expandTilde(cfg.Hooks.ClaudeHookDir)
 	cfg.Hooks.HookOutputDir = expandTilde(cfg.Hooks.HookOutputDir)
 	cfg.Pulse.DataRoot = expandTilde(cfg.Pulse.DataRoot)
