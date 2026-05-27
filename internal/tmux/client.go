@@ -12,6 +12,7 @@ import (
 const defaultSocket = "arcmux"
 
 const promptSubmitDelay = 200 * time.Millisecond
+const promptSubmitKey = "C-m"
 
 type PromptDeliveryStatus string
 
@@ -39,7 +40,7 @@ type promptDeliveryPlan struct {
 func newPromptDeliveryPlan(text string) promptDeliveryPlan {
 	return promptDeliveryPlan{
 		bodyKeys:   []string{"-l", text},
-		submitKeys: []string{"Enter"},
+		submitKeys: []string{promptSubmitKey},
 		wait:       promptSubmitDelay,
 	}
 }
@@ -237,7 +238,7 @@ func (c *Client) SendPrompt(ctx context.Context, target, text string) (PromptDel
 	result := PromptDeliveryResult{
 		Status:    PromptDeliveryTypedOnly,
 		BodyMode:  "literal",
-		SubmitKey: "Enter",
+		SubmitKey: promptSubmitKey,
 		Wait:      plan.wait,
 	}
 

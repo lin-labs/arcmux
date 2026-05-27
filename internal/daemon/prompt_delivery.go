@@ -67,17 +67,17 @@ func (r *promptDeliveryRuntime) Capture(ctx context.Context) (string, error) {
 }
 
 func (r *promptDeliveryRuntime) Submit(ctx context.Context) error {
-	if err := r.daemon.tmux.SendKeys(ctx, r.target, "Enter"); err != nil {
+	if err := r.daemon.tmux.SendKeys(ctx, r.target, "C-m"); err != nil {
 		return err
 	}
 	r.daemon.emitEvent(Event{
 		SessionID: r.sessionID,
 		Type:      "prompt_redelivery",
-		Message:   "sent Enter to advance prompt delivery",
+		Message:   "sent C-m to advance prompt delivery",
 		Timestamp: time.Now(),
 		Data: map[string]string{
 			"delivery_status": "submitted",
-			"submit_key":      "Enter",
+			"submit_key":      "C-m",
 		},
 	})
 	return nil
