@@ -58,6 +58,10 @@ staticcheck ./... 2>/dev/null    # if installed
 
 - `make start` is idempotent via the systemd-or-pgrep gate; if a stale process
   exists, prefer `make restart`.
+- For tmux environment bugs, verify tmux session scope directly:
+  `tmux -L arcmux show-environment -t <agent-session> | grep ARCMUX`. Do not
+  rely only on a pane shell's `env`; shared-session inheritance can mask missing
+  per-agent env plumbing.
 
 ## Highest fidelity rung available
 

@@ -27,7 +27,10 @@ codified checks live in `.agents/validate.md`.
 
 ## Recurring failure modes (codified)
 
-(none yet — promote from "Project-specific signals" once a pattern repeats)
+- Env bugs can hide behind tmux inheritance. When diagnosing ARCMUX_* values,
+  inspect tmux session scope (`show-environment -t <agent-session>`) as well as
+  the pane shell; shell-only probes can miss stale or accidentally inherited
+  session env.
 
 ## Successful patterns worth reinforcing
 
