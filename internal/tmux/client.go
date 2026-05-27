@@ -255,6 +255,21 @@ func (c *Client) KillSession(ctx context.Context, session string) error {
 	return err
 }
 
+// ShowEnvironment returns tmux's session-scoped environment value for key.
+// This intentionally reads tmux session state, not a pane shell's process env.
+func (c *Client) ShowEnvironment(ctx context.Context, session, key string) (string, error) {
+	out, err := c.run(ctx, "show-environment", "-t", session, key)
+	if err != nil {
+		return "", err
+	}
+	line := strings.TrimSpace(out)
+	prefix := key + "="
+	if !strings.HasPrefix(line, prefix) {
+		return "", fmt.Errorf("tmux show-environment %s: unexpected output %q", key, line)
+	}
+	return strings.TrimPrefix(line, prefix), nil
+}
+
 // SelectPane brings target to the foreground.
 func (c *Client) SelectPane(ctx context.Context, target string) error {
 	_, err := c.run(ctx, "select-pane", "-t", target)

@@ -107,7 +107,7 @@ func TestIntegration_DaemonLifecycle(t *testing.T) {
 	d.tmux.KillPane(ctx, snap.TmuxTarget)
 }
 
-// TestIntegration_TmuxMultiSessionPromptRoutingByPaneID is the daemon-level
+// TestIntegration_TmuxPerAgentSessionsRouteByPaneID is the daemon-level
 // regression for Bug 1: rapid CreateSession calls each pasting an
 // initial prompt MUST route each prompt into its own pane, not into
 // some other pane that happens to share the window name.
@@ -118,9 +118,12 @@ func TestIntegration_DaemonLifecycle(t *testing.T) {
 // setupTmuxPane + SendKeys directly through the daemon's tmux client,
 // then assert each pane contains its own marker and not the others.
 //
-// This pins the contract that sess.TmuxTarget is a pane_id (starts with
-// %) and that SendKeys against that target hits exactly one pane.
-func TestIntegration_TmuxMultiSessionPromptRoutingByPaneID(t *testing.T) {
+// This pins two contracts:
+//   - each agent owns a dedicated tmux session, so session-scoped env cannot
+//     leak from an older agent window in a shared tmux session.
+//   - sess.TmuxTarget is a pane_id (starts with %) and SendKeys against that
+//     target hits exactly one pane.
+func TestIntegration_TmuxPerAgentSessionsRouteByPaneID(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not available")
 	}
@@ -153,26 +156,38 @@ func TestIntegration_TmuxMultiSessionPromptRoutingByPaneID(t *testing.T) {
 	if err := d.tmux.EnsureServer(d.ctx); err != nil {
 		t.Fatalf("EnsureServer: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = d.tmux.KillSession(context.Background(), defaultSession)
-	})
-
-	// Create three "windows", all sharing the same window name. This is
-	// the exact configuration that broke elonco: rapid spawns where
-	// every window got the same name and prompts routed by name
-	// resolved to whichever pane tmux's index-resolver picked.
+	// Create three agent sessions, all sharing the same initial window name.
+	// Older code placed these as windows under one tmux session; the new
+	// contract gives each agent a dedicated tmux session.
 	const sharedName = "elonco-spawn"
 	targets := make([]string, 0, 3)
+	sessions := make([]string, 0, 3)
 	for i := 0; i < 3; i++ {
-		target, err := d.setupTmuxPane(d.ctx, defaultSession, sharedName, tmpDir, nil)
+		tmuxSession := fmt.Sprintf("%s-%d", defaultSession, i)
+		env := map[string]string{"ARCMUX_PROJECT": fmt.Sprintf("project-%d", i)}
+		target, err := d.setupTmuxPane(d.ctx, tmuxSession, sharedName, tmpDir, env)
 		if err != nil {
 			t.Fatalf("setupTmuxPane %d: %v", i, err)
 		}
 		if !strings.HasPrefix(target, "%") {
 			t.Fatalf("setupTmuxPane %d returned %q; want pane_id starting with %%", i, target)
 		}
+		gotProject, err := d.tmux.ShowEnvironment(d.ctx, tmuxSession, "ARCMUX_PROJECT")
+		if err != nil {
+			t.Fatalf("ShowEnvironment %s: %v", tmuxSession, err)
+		}
+		wantProject := fmt.Sprintf("project-%d", i)
+		if gotProject != wantProject {
+			t.Fatalf("tmux session env %s ARCMUX_PROJECT=%q, want %q", tmuxSession, gotProject, wantProject)
+		}
+		sessions = append(sessions, tmuxSession)
 		targets = append(targets, target)
 	}
+	t.Cleanup(func() {
+		for _, name := range sessions {
+			_ = d.tmux.KillSession(context.Background(), name)
+		}
+	})
 
 	// All three targets must be distinct.
 	seen := map[string]bool{}

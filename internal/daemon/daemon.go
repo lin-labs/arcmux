@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -458,17 +459,13 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 		return sess, true, nil
 	}
 
-	// Determine tmux target
-	tmuxSession := d.cfg.Tmux.DefaultSession
-	if req.TmuxSession != "" {
-		tmuxSession = req.TmuxSession
-	}
 	window := req.TmuxWindow
 	if window == "" {
 		window = name
 	}
+	tmuxSession := d.agentTmuxSessionName(req.TmuxSession, name, req.OwnerID, id)
 
-	// Create tmux session or window. Pass the caller-supplied env through
+	// Create a dedicated tmux session for this agent. Pass caller-supplied env through
 	// so ARCMUX_PROJECT / ARCMUX_ROLE_FILE / OBS_AGENTS / ... are visible
 	// to the spawned shell — every elon role file relies on this contract.
 	target, err := d.setupTmuxPane(ctx, tmuxSession, window, req.CWD, req.Env)
@@ -476,6 +473,7 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 		sess.SetState(session.StateFailed)
 		return nil, false, fmt.Errorf("setup tmux pane: %w", err)
 	}
+	sess.TmuxSessionName = tmuxSession
 	sess.TmuxTarget = target
 
 	// Install hooks
@@ -722,8 +720,11 @@ func (d *Daemon) Kill(ctx context.Context, sessionID string, graceful bool, time
 		_ = d.tmux.WaitIdle(waitCtx, snap.TmuxTarget, timeout, 1*time.Second)
 	}
 
-	// Kill the pane
-	if err := d.tmux.KillPane(ctx, snap.TmuxTarget); err != nil {
+	if snap.TmuxSessionName != "" {
+		if err := d.tmux.KillSession(ctx, snap.TmuxSessionName); err != nil {
+			d.logger.Warn("kill tmux session failed", "session", snap.TmuxSessionName, "error", err)
+		}
+	} else if err := d.tmux.KillPane(ctx, snap.TmuxTarget); err != nil {
 		d.logger.Warn("kill pane failed", "error", err)
 	}
 
@@ -874,8 +875,11 @@ func (d *Daemon) relayHealthEvents() {
 }
 
 func (d *Daemon) setupTmuxPane(ctx context.Context, tmuxSession, window, cwd string, env map[string]string) (string, error) {
-	// Try creating a new session first. tmux exports the supplied env vars
-	// into the spawned shell via repeated `-e KEY=VAL` flags.
+	// Create exactly one tmux session per agent. tmux stores environment at
+	// session scope; creating sibling agents as new windows under a shared
+	// session leaves `show-environment -t <session>` pinned to whichever
+	// profile created the session first. A fresh session per agent gives each
+	// launch its own session-scoped env while keeping the daemon on one socket.
 	//
 	// Crucially, we return the freshly-created pane's `%pane_id`, NOT the
 	// canonical `<session>:<window-name>` form. Window names are mutable
@@ -893,13 +897,54 @@ func (d *Daemon) setupTmuxPane(ctx context.Context, tmuxSession, window, cwd str
 	if err == nil {
 		return pid, nil
 	}
+	return "", fmt.Errorf("create tmux session %q: %w", tmuxSession, err)
+}
 
-	// Session exists, create a new window inside it.
-	target, err := d.tmux.NewWindowPaneID(ctx, tmuxSession, window, cwd, env)
-	if err != nil {
-		return "", fmt.Errorf("create window: %w", err)
+func (d *Daemon) agentTmuxSessionName(requested, name, ownerID, sessionID string) string {
+	if requested != "" {
+		return safeTmuxSessionName(requested, "")
 	}
-	return target, nil
+	parts := []string{name}
+	suffix := sessionID
+	if ownerID != "" {
+		parts = []string{ownerID, name}
+		suffix = ""
+	}
+	return safeTmuxSessionName(strings.Join(parts, "-"), suffix)
+}
+
+func safeTmuxSessionName(raw, sessionID string) string {
+	var b strings.Builder
+	lastDash := false
+	for _, r := range strings.ToLower(strings.TrimSpace(raw)) {
+		ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-'
+		if ok {
+			b.WriteRune(r)
+			lastDash = r == '-'
+			continue
+		}
+		if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	name := strings.Trim(b.String(), "-")
+	if name == "" {
+		name = "agent"
+	}
+	if len(name) > 80 {
+		name = strings.TrimRight(name[:80], "-")
+	}
+	if sessionID != "" {
+		suffix := sessionID
+		if len(suffix) > 10 {
+			suffix = suffix[:10]
+		}
+		if !strings.Contains(name, suffix) {
+			name = name + "-" + suffix
+		}
+	}
+	return name
 }
 
 // --- Persistence ---
@@ -910,6 +955,7 @@ type persistedSession struct {
 	Agent            string        `json:"agent"`
 	CWD              string        `json:"cwd"`
 	Transport        string        `json:"transport"`
+	TmuxSessionName  string        `json:"tmux_session_name,omitempty"`
 	TmuxTarget       string        `json:"tmux_target"`
 	CurrentCommand   string        `json:"current_command"`
 	BackendSessionID string        `json:"backend_session_id"`
@@ -936,6 +982,7 @@ func (d *Daemon) persistSessions() {
 			Agent:            snap.Agent,
 			CWD:              snap.CWD,
 			Transport:        snap.Transport,
+			TmuxSessionName:  snap.TmuxSessionName,
 			TmuxTarget:       snap.TmuxTarget,
 			CurrentCommand:   snap.CurrentCommand,
 			BackendSessionID: snap.BackendSessionID,
@@ -1020,6 +1067,7 @@ func (d *Daemon) restoreSessions() {
 
 		sess := session.NewSession(rec.ID, rec.Name, rec.Agent, rec.CWD)
 		sess.SetTransport(rec.Transport)
+		sess.TmuxSessionName = rec.TmuxSessionName
 		sess.TmuxTarget = rec.TmuxTarget
 		sess.SetCurrentCommand(rec.CurrentCommand)
 		sess.SetBackendSessionID(rec.BackendSessionID)

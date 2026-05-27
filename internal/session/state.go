@@ -23,12 +23,19 @@ const (
 type Session struct {
 	mu sync.RWMutex
 
-	ID         string
-	Name       string
-	Agent      string
-	CWD        string
-	Transport  string
-	TmuxTarget string // canonical "<tmux-session>:<window-name>", e.g. "agents:myapp"
+	ID        string
+	Name      string
+	Agent     string
+	CWD       string
+	Transport string
+	// TmuxSessionName is the tmux session that owns this agent pane.
+	// New tmux-backed sessions use one tmux session per agent so session-
+	// scoped environment is isolated from sibling agents.
+	TmuxSessionName string
+	// TmuxTarget is the stable pane target used for routing. For tmux-backed
+	// sessions this is a "%pane_id" so window/session names can change without
+	// breaking SendKeys / capture / pipe-pane routing.
+	TmuxTarget string
 	// CurrentCommand is the most recent prompt sent (truncated to ~200
 	// runes), set by SendPrompt/sendExecPrompt. The Capture RPC may
 	// override this with the live `tmux display-message #{pane_current_command}`
@@ -177,6 +184,7 @@ type Snapshot struct {
 	CWD              string
 	Transport        string
 	Env              map[string]string
+	TmuxSessionName  string
 	TmuxTarget       string
 	CurrentCommand   string
 	BackendSessionID string
@@ -201,6 +209,7 @@ func (s *Session) Snapshot() Snapshot {
 		CWD:              s.CWD,
 		Transport:        s.Transport,
 		Env:              copyEnvMap(s.Env),
+		TmuxSessionName:  s.TmuxSessionName,
 		TmuxTarget:       s.TmuxTarget,
 		CurrentCommand:   s.CurrentCommand,
 		BackendSessionID: s.BackendSessionID,

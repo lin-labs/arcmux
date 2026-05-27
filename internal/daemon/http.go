@@ -108,7 +108,7 @@ func (h *HTTPServer) handleSessionNew(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	tmuxSession := h.daemon.cfg.Tmux.DefaultSession
+	tmuxSession := h.daemon.agentTmuxSessionName("", name, "", id)
 	target, err := h.daemon.setupTmuxPane(ctx, tmuxSession, name, cwd, nil)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{
@@ -127,6 +127,7 @@ func (h *HTTPServer) handleSessionNew(w http.ResponseWriter, r *http.Request) {
 
 	sess := session.NewSession(id, name, agent, cwd)
 	sess.SetTransport(profile.TransportTmux)
+	sess.TmuxSessionName = tmuxSession
 	sess.TmuxTarget = target
 	sess.SetState(session.StateIdle)
 
