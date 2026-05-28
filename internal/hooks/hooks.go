@@ -85,6 +85,14 @@ func GenericHookPath(hookDir string) string {
 	return filepath.Join(hookDir, "hooks", genericHookName)
 }
 
+// EnsureGenericHook writes the shared, session-aware Claude hook without
+// requiring a concrete session. Daemon startup uses this so the global hook is
+// present immediately after deploy/restart; per-session Install still returns
+// each session's JSONL path and remains the watcher contract.
+func (i *Installer) EnsureGenericHook(hookDir string) error {
+	return i.installGenericHook(hookDir)
+}
+
 // Cleanup removes the per-session JSONL output file. It deliberately does NOT
 // remove the generic hook script: that script is shared across every session,
 // so tearing down one session must not delete it. Either artifact may be

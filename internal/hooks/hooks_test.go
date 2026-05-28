@@ -103,6 +103,32 @@ func TestInstaller_Install_Claude_GenericIsIdempotentAcrossSessions(t *testing.T
 	}
 }
 
+func TestInstaller_EnsureGenericHook_WithoutSession(t *testing.T) {
+	tmpDir := t.TempDir()
+	hookDir := filepath.Join(tmpDir, "claude")
+	installer := NewInstaller(filepath.Join(tmpDir, "out"))
+
+	if err := installer.EnsureGenericHook(hookDir); err != nil {
+		t.Fatalf("EnsureGenericHook: %v", err)
+	}
+
+	scriptPath := GenericHookPath(hookDir)
+	info, err := os.Stat(scriptPath)
+	if err != nil {
+		t.Fatalf("generic hook script not created: %v", err)
+	}
+	if info.Mode()&0o111 == 0 {
+		t.Error("hook script should be executable")
+	}
+	got, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != genericHookScript {
+		t.Error("generic hook content drifted from the fixed template")
+	}
+}
+
 // TestGenericHook_DerivesPathFromEnv runs the generated script under /bin/sh
 // and asserts it writes a valid JSON line to the env-derived per-session JSONL
 // — and that with the env unset it no-ops (writes nothing, exits 0).

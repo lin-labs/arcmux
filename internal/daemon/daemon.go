@@ -124,13 +124,24 @@ func (d *Daemon) Start(ctx context.Context) error {
 		return fmt.Errorf("create hook output dir: %w", err)
 	}
 	// Sweep legacy per-session hook scripts (arcmux-s-*.sh) left by the old
-	// generator. Coded migration, not a one-off rm: runs on every startup,
-	// idempotent, never touches the generic hook. Best-effort / non-fatal.
-	if d.cfg.Hooks.AutoInstall && filepath.IsAbs(d.cfg.Hooks.ClaudeHookDir) {
-		if n, err := d.hooks.CleanupLegacyScripts(d.cfg.Hooks.ClaudeHookDir); err != nil {
-			d.logger.Warn("legacy hook script cleanup failed (non-fatal)", "error", err)
-		} else if n > 0 {
-			d.logger.Info("swept legacy per-session hook scripts", "removed", n)
+	// generator, then materialize the single generic hook. Both are coded
+	// migrations, not one-off shell cleanup: they run on every startup,
+	// idempotently. Best-effort / non-fatal so legacy RPCs can still serve if
+	// the user's Claude hook dir is temporarily unavailable.
+	if d.cfg.Hooks.AutoInstall {
+		if !filepath.IsAbs(d.cfg.Hooks.ClaudeHookDir) {
+			d.logger.Warn("hook install skipped: claude hook dir is not absolute", "hook_dir", d.cfg.Hooks.ClaudeHookDir)
+		} else {
+			if n, err := d.hooks.CleanupLegacyScripts(d.cfg.Hooks.ClaudeHookDir); err != nil {
+				d.logger.Warn("legacy hook script cleanup failed (non-fatal)", "error", err)
+			} else if n > 0 {
+				d.logger.Info("swept legacy per-session hook scripts", "removed", n)
+			}
+			if err := d.hooks.EnsureGenericHook(d.cfg.Hooks.ClaudeHookDir); err != nil {
+				d.logger.Warn("generic hook install failed (non-fatal)", "error", err)
+			} else {
+				d.logger.Info("ensured generic session hook", "path", hooks.GenericHookPath(d.cfg.Hooks.ClaudeHookDir))
+			}
 		}
 	}
 
