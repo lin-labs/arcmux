@@ -71,3 +71,44 @@ staticcheck ./... 2>/dev/null    # if installed
 - [x] Real-deps E2E (local `make start` + endpoint hit; or `make deploy` to
       labs and remote curl)
 - [ ] Manual user flow (N/A — this is a daemon, no UI)
+
+## PR review checklist — accumulated from real PRs
+
+### Claude hooks / session env handoff (drawn from arcmux-hooks-1)
+
+- **One generic hook, never per-session scripts**: the installer must write a
+  single fixed-name `~/.claude/hooks/arcmux-session-hook.sh` (idempotent, fixed
+  content) — reject any PR that reintroduces `arcmux-<sessionID>.sh` generation.
+  The generic hook must no-op when `ARCMUX_SESSION_ID`/`ARCMUX_HOOK_OUTPUT_DIR`
+  are unset (safe to register globally).
+- **/tmp/arcmux env handoff is DATA, never sourced**: env reaches the spawned
+  agent via `/tmp/arcmux/<id>.env` (a data file), loaded by
+  `eval "$(<abs-arcmux> hook-env <id>)"`. The loader must `eval` arcmux's OWN
+  re-quoted output, NEVER `source` the raw writable file. Verify in code:
+  `LoadSessionEnvExports` does `Lstat` symlink-reject + current-uid ownership +
+  `0o077` perm mask (dir 0700 / file 0600) + `ARCMUX_` key allowlist + NUL/
+  newline reject, and emits POSIX single-quote-escaped (`'\''`) exports.
+  Required test: a malicious value (`'; touch PWNED; '`) round-trips as a
+  literal and the marker is never created.
+- **Loader uses an absolute binary path**: PATH is not guaranteed inside the
+  pane — the loader prefix must use `os.Executable()` (→ `~/.local/bin/arcmux`),
+  not bare `arcmux`.
+- **hook-env fails safe**: on any validation error it prints NOTHING to stdout
+  and exits 0, so the `eval` is a no-op and the agent launches with no injected
+  env (the generic hook then no-ops). Don't let a bad/hostile env file block
+  agent launch.
+- **Watcher unchanged by construction**: `Install` must keep returning
+  `OutputPath(sessionID)` and the generic hook must write the byte-identical
+  `<HookOutputDir>/arcmux-hooks-<id>.jsonl` filename, so `watcher.Watch` /
+  status / ready are unaffected. Assert returned path == watched path.
+- **Legacy cleanup is coded + idempotent, not a one-off rm**:
+  `CleanupLegacyScripts` globs `arcmux-s-*.sh`, skips the generic hook, runs at
+  daemon startup, returns the count, no error on zero. Logs
+  `swept legacy per-session hook scripts removed=N`.
+- **Runtime-path change ⇒ rebuild + restart required**: any change to the
+  daemon launch path needs `make install` (→ `~/.local/bin/arcmux`) + restart
+  (`systemctl --user restart arcmux`). arcmux runs as a systemd user service;
+  restarting recycles every managed pane (the whole org tier) — drive the live
+  restart from OUTSIDE the profile (a `systemd-run --user` transient unit) so
+  the deploy survives the restart, and verify post-restart: legacy swept to 0,
+  generic hook present, `/tmp/arcmux` 0700 + `<id>.env` 0600.
