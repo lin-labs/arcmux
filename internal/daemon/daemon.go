@@ -123,6 +123,16 @@ func (d *Daemon) Start(ctx context.Context) error {
 	if err := os.MkdirAll(d.cfg.Hooks.HookOutputDir, 0o755); err != nil {
 		return fmt.Errorf("create hook output dir: %w", err)
 	}
+	// Sweep legacy per-session hook scripts (arcmux-s-*.sh) left by the old
+	// generator. Coded migration, not a one-off rm: runs on every startup,
+	// idempotent, never touches the generic hook. Best-effort / non-fatal.
+	if d.cfg.Hooks.AutoInstall && filepath.IsAbs(d.cfg.Hooks.ClaudeHookDir) {
+		if n, err := d.hooks.CleanupLegacyScripts(d.cfg.Hooks.ClaudeHookDir); err != nil {
+			d.logger.Warn("legacy hook script cleanup failed (non-fatal)", "error", err)
+		} else if n > 0 {
+			d.logger.Info("swept legacy per-session hook scripts", "removed", n)
+		}
+	}
 
 	// Open daemon-level state.bolt for the C1 substrate surfaces
 	// (Send/PeekInbox/AckInbox/QueryAudit). Best-effort: a failure to
@@ -497,13 +507,24 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 	sess.TmuxSessionName = tmuxSession
 	sess.TmuxTarget = target
 
-	// Install hooks
+	// Install hooks (one generic, idempotent script) + write the per-session
+	// env file the tmux loader will load before launching the agent. The env
+	// file lives under /tmp/arcmux with restrictive perms; the loader reads it
+	// via `arcmux hook-env` (validated + re-quoted), never sourcing it raw.
 	if d.cfg.Hooks.AutoInstall {
 		hookPath, err := d.hooks.Install(id, req.Agent, prof.HookDir)
 		if err != nil {
 			d.logger.Warn("hook install failed (non-fatal)", "error", err)
 		} else {
 			d.watcher.Watch(id, hookPath)
+		}
+		if req.Agent == "claude" {
+			if _, err := hooks.WriteSessionEnvFile(hooks.SessionEnvDir, id, map[string]string{
+				"ARCMUX_SESSION_ID":      id,
+				"ARCMUX_HOOK_OUTPUT_DIR": d.cfg.Hooks.HookOutputDir,
+			}); err != nil {
+				d.logger.Warn("write session hook env failed (non-fatal)", "error", err)
+			}
 		}
 	}
 
@@ -546,12 +567,46 @@ func (d *Daemon) findNonTerminalByNameOwner(name, ownerID string) *session.Sessi
 	return nil
 }
 
+// agentStartCommand returns the command the tmux loader runs to launch the
+// agent. For claude with hooks enabled it prefixes a fail-safe env loader:
+//
+//	eval "$('<abs-arcmux>' hook-env '<id>')" ; <StartCommand>
+//
+// We use the daemon's own absolute binary path (os.Executable) rather than a
+// bare `arcmux`, because PATH is not guaranteed inside the spawned pane. The
+// eval consumes arcmux's OWN single-quote-escaped output — it never sources
+// the raw /tmp/arcmux file. If `hook-env` errors it prints nothing and exits
+// 0, so the eval is a no-op and the agent still launches with no injected env
+// (the generic hook then safely no-ops). For non-claude agents or when
+// AutoInstall is off, the StartCommand is returned unchanged.
+func (d *Daemon) agentStartCommand(id, agent, startCommand string) string {
+	if !d.cfg.Hooks.AutoInstall || agent != "claude" {
+		return startCommand
+	}
+	bin, err := os.Executable()
+	if err != nil || bin == "" {
+		bin = "arcmux" // fall back to PATH resolution
+	}
+	return fmt.Sprintf(`eval "$(%s hook-env %s)" ; %s`,
+		shellSingleQuote(bin), shellSingleQuote(id), startCommand)
+}
+
+// shellSingleQuote wraps s in single quotes, POSIX-escaping embedded quotes,
+// so it is a single safe shell token in the loader command.
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 func (d *Daemon) startAgentLifecycle(id string, sess *session.Session, prof profile.Profile, prompt string) {
 	ctx := d.ctx
-	target := sess.Snapshot().TmuxTarget
+	snap := sess.Snapshot()
+	target := snap.TmuxTarget
 
-	// Start the agent process
-	if err := d.tmux.SendKeys(ctx, target, prof.StartCommand, "Enter"); err != nil {
+	// Start the agent process. For claude with hooks enabled, prefix the
+	// launch with the env loader so the generic hook learns its per-session
+	// JSONL path; the loader fails safe (no injected env) if hook-env errors.
+	startCommand := d.agentStartCommand(id, snap.Agent, prof.StartCommand)
+	if err := d.tmux.SendKeys(ctx, target, startCommand, "Enter"); err != nil {
 		sess.SetState(session.StateFailed)
 		d.emitStateChanged(id, session.StateFailed, "failed to start agent")
 		return
