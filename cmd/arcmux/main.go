@@ -44,6 +44,8 @@ func run(args []string) error {
 		return cmdPulse(args[1:])
 	case "profiles":
 		return cmdProfiles(args[1:], os.Stdout)
+	case "hook-env":
+		return cmdHookEnv(args[1:], os.Stdout)
 	case "info", "status":
 		return cmdInfo(args[1:], os.Stdout)
 	case "version":

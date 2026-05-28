@@ -2,7 +2,9 @@ package hooks
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -55,14 +57,148 @@ func TestInstaller_Install_Claude(t *testing.T) {
 		t.Error("expected non-empty output path")
 	}
 
-	// Check hook script was created
-	scriptPath := filepath.Join(hookDir, "hooks", "arcmux-s-test.sh")
+	// The single GENERIC hook script must exist and be executable.
+	scriptPath := GenericHookPath(hookDir)
 	info, err := os.Stat(scriptPath)
 	if err != nil {
-		t.Fatalf("hook script not created: %v", err)
+		t.Fatalf("generic hook script not created: %v", err)
 	}
 	if info.Mode()&0o111 == 0 {
 		t.Error("hook script should be executable")
+	}
+
+	// No per-session script may be created any more.
+	if _, err := os.Stat(filepath.Join(hookDir, "hooks", "arcmux-s-test.sh")); !os.IsNotExist(err) {
+		t.Error("a per-session hook script must NOT be created")
+	}
+}
+
+func TestInstaller_Install_Claude_GenericIsIdempotentAcrossSessions(t *testing.T) {
+	tmpDir := t.TempDir()
+	hookDir := filepath.Join(tmpDir, "claude")
+	installer := NewInstaller(tmpDir)
+
+	for _, id := range []string{"s-1", "s-2", "s-3"} {
+		if _, err := installer.Install(id, "claude", hookDir); err != nil {
+			t.Fatalf("Install(%s): %v", id, err)
+		}
+	}
+
+	// Exactly one script file in the hooks dir, regardless of session count.
+	entries, err := filepath.Glob(filepath.Join(hookDir, "hooks", "*.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || filepath.Base(entries[0]) != genericHookName {
+		t.Errorf("expected exactly one generic hook script, got %v", entries)
+	}
+
+	// Content is the fixed generic script (idempotent).
+	got, err := os.ReadFile(GenericHookPath(hookDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != genericHookScript {
+		t.Error("generic hook content drifted from the fixed template")
+	}
+}
+
+// TestGenericHook_DerivesPathFromEnv runs the generated script under /bin/sh
+// and asserts it writes a valid JSON line to the env-derived per-session JSONL
+// — and that with the env unset it no-ops (writes nothing, exits 0).
+func TestGenericHook_DerivesPathFromEnv(t *testing.T) {
+	tmpDir := t.TempDir()
+	hookDir := filepath.Join(tmpDir, "claude")
+	// Watcher contract: when ARCMUX_HOOK_OUTPUT_DIR == installer.OutputDir,
+	// the hook's derived path must equal OutputPath. Use the same dir.
+	outDir := filepath.Join(tmpDir, "out")
+	installer := NewInstaller(outDir)
+	if _, err := installer.Install("s-env", "claude", hookDir); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	script := GenericHookPath(hookDir)
+
+	// With env set: appends one JSON event at the derived path.
+	cmd := exec.Command("/bin/sh", script)
+	cmd.Env = append(os.Environ(),
+		"ARCMUX_SESSION_ID=s-env",
+		"ARCMUX_HOOK_OUTPUT_DIR="+outDir,
+		"CLAUDE_HOOK_EVENT_TYPE=tool_use",
+		"CLAUDE_TOOL_NAME=bash",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("run hook: %v (%s)", err, out)
+	}
+	derived := filepath.Join(outDir, "arcmux-hooks-s-env.jsonl")
+	if derived != installer.OutputPath("s-env") {
+		// The hook's path math must match OutputPath (watcher contract) when
+		// ARCMUX_HOOK_OUTPUT_DIR == installer.OutputDir.
+		t.Fatalf("derived path %q != OutputPath under same dir", derived)
+	}
+	data, err := os.ReadFile(derived)
+	if err != nil {
+		t.Fatalf("read derived jsonl: %v", err)
+	}
+	ev, err := ParseHookEvent([]byte(strings.TrimSpace(string(data))))
+	if err != nil {
+		t.Fatalf("parse event: %v (line=%q)", err, data)
+	}
+	if ev.Event != "tool_use" || ev.Tool != "bash" || ev.SessionID != "s-env" {
+		t.Errorf("unexpected event: %+v", ev)
+	}
+
+	// With env unset: no-op, exit 0, nothing written.
+	noEnv := exec.Command("/bin/sh", script)
+	noEnv.Env = []string{"PATH=/usr/bin:/bin"}
+	if out, err := noEnv.CombinedOutput(); err != nil {
+		t.Fatalf("hook with no env should exit 0, got %v (%s)", err, out)
+	}
+}
+
+func TestCleanupLegacyScripts(t *testing.T) {
+	tmpDir := t.TempDir()
+	hookDir := filepath.Join(tmpDir, "claude")
+	hooksSub := filepath.Join(hookDir, "hooks")
+	if err := os.MkdirAll(hooksSub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Seed legacy per-session scripts + an unrelated script + the generic.
+	legacy := []string{"arcmux-s-111.sh", "arcmux-s-222.sh", "arcmux-s-333.sh"}
+	for _, n := range legacy {
+		if err := os.WriteFile(filepath.Join(hooksSub, n), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(hooksSub, "skill-telemetry.sh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	installer := NewInstaller(tmpDir)
+	if _, err := installer.Install("s-keep", "claude", hookDir); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := installer.CleanupLegacyScripts(hookDir)
+	if err != nil {
+		t.Fatalf("CleanupLegacyScripts: %v", err)
+	}
+	if n != len(legacy) {
+		t.Errorf("removed %d, want %d", n, len(legacy))
+	}
+	for _, name := range legacy {
+		if _, err := os.Stat(filepath.Join(hooksSub, name)); !os.IsNotExist(err) {
+			t.Errorf("legacy %s should be removed", name)
+		}
+	}
+	// Generic + unrelated scripts survive.
+	if _, err := os.Stat(GenericHookPath(hookDir)); err != nil {
+		t.Errorf("generic hook must survive cleanup: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(hooksSub, "skill-telemetry.sh")); err != nil {
+		t.Errorf("unrelated hook must survive cleanup: %v", err)
+	}
+	// Idempotent: second sweep removes nothing.
+	if n2, err := installer.CleanupLegacyScripts(hookDir); err != nil || n2 != 0 {
+		t.Errorf("second sweep: n=%d err=%v, want 0/nil", n2, err)
 	}
 }
 
@@ -111,9 +247,9 @@ func TestInstaller_Cleanup(t *testing.T) {
 	}
 }
 
-func TestInstaller_Cleanup_RemovesClaudeScript(t *testing.T) {
-	// Install a full Claude session, then Cleanup must remove both the
-	// jsonl output and the generated per-session hook script.
+func TestInstaller_Cleanup_PreservesGenericScript(t *testing.T) {
+	// Cleanup removes the per-session JSONL output but must NOT remove the
+	// shared generic hook script — it serves every other live session.
 	tmpDir := t.TempDir()
 	hookDir := filepath.Join(tmpDir, "claude")
 	installer := NewInstaller(tmpDir)
@@ -122,13 +258,12 @@ func TestInstaller_Cleanup_RemovesClaudeScript(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Install: %v", err)
 	}
-	// Materialize the jsonl file so Cleanup has both artifacts to remove.
 	if err := os.WriteFile(jsonlPath, []byte(""), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	scriptPath := filepath.Join(hookDir, "hooks", "arcmux-s-test.sh")
+	scriptPath := GenericHookPath(hookDir)
 	if _, err := os.Stat(scriptPath); err != nil {
-		t.Fatalf("script not created: %v", err)
+		t.Fatalf("generic script not created: %v", err)
 	}
 
 	if err := installer.Cleanup("s-test"); err != nil {
@@ -137,8 +272,8 @@ func TestInstaller_Cleanup_RemovesClaudeScript(t *testing.T) {
 	if _, err := os.Stat(jsonlPath); !os.IsNotExist(err) {
 		t.Error("jsonl should be removed after cleanup")
 	}
-	if _, err := os.Stat(scriptPath); !os.IsNotExist(err) {
-		t.Error("hook script should be removed after cleanup")
+	if _, err := os.Stat(scriptPath); err != nil {
+		t.Error("generic hook script must survive per-session cleanup")
 	}
 }
 
