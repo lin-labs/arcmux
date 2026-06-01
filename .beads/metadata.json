@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "arcmux",
+  "project_id": "74d68b10-d4c4-4c64-be5a-10fb44068d20"
+}
