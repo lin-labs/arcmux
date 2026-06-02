@@ -70,13 +70,30 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 var nameSafe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
+// agentStartCommand returns the shell command that launches a remote-control
+// session for the given agent, and whether the agent is supported. Claude uses
+// the `cld` wrapper paired with the Vox / claude.ai mobile app; codex reuses the
+// interactive full-auto command from the arcmux profile registry so the two
+// stay in sync.
+func agentStartCommand(agent string) (string, bool) {
+	switch agent {
+	case "claude":
+		return "cld --remote-control", true
+	case "codex":
+		return profile.DefaultProfiles()["codex"].StartCommand, true
+	default:
+		return "", false
+	}
+}
+
 func (h *HTTPServer) handleSessionNew(w http.ResponseWriter, r *http.Request) {
 	agent := r.URL.Query().Get("agent")
 	if agent == "" {
 		agent = "claude"
 	}
 
-	if agent != "claude" {
+	command, ok := agentStartCommand(agent)
+	if !ok {
 		writeJSON(w, http.StatusNotImplemented, errorResponse{
 			Error: fmt.Sprintf("agent not implemented: %s", agent),
 		})
@@ -89,7 +106,7 @@ func (h *HTTPServer) handleSessionNew(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
 	if name == "" {
 		// Use the full nanosecond suffix to avoid collisions on rapid creates.
-		name = fmt.Sprintf("claude-%s", id[2:])
+		name = fmt.Sprintf("%s-%s", agent, id[2:])
 	} else if !nameSafe.MatchString(name) {
 		writeJSON(w, http.StatusBadRequest, errorResponse{
 			Error: "name must match [A-Za-z0-9_-]{1,64}",
@@ -120,7 +137,6 @@ func (h *HTTPServer) handleSessionNew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	command := "cld --remote-control"
 	if err := h.daemon.tmux.SendKeys(ctx, target, command, "Enter"); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{
 			Error: fmt.Sprintf("send start command: %v", err),
@@ -139,8 +155,8 @@ func (h *HTTPServer) handleSessionNew(w http.ResponseWriter, r *http.Request) {
 	h.daemon.mu.Unlock()
 	h.daemon.persistSessions()
 
-	h.daemon.logger.Info("http created claude remote-control session",
-		"session_id", id, "name", name, "tmux_target", target)
+	h.daemon.logger.Info("http created remote agent session",
+		"agent", agent, "session_id", id, "name", name, "tmux_target", target)
 
 	writeJSON(w, http.StatusOK, sessionNewResponse{
 		SessionID:  id,
