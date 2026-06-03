@@ -24,6 +24,8 @@ func NewHTTPServer(d *Daemon, addr string) *HTTPServer {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/session/new", h.handleSessionNew)
 	mux.HandleFunc("/session/close", h.handleSessionClose)
+	mux.HandleFunc("/session/capture", h.handleSessionCapture)
+	mux.HandleFunc("/session/send", h.handleSessionSend)
 	mux.HandleFunc("/sessions", h.handleSessionsList)
 	mux.HandleFunc("/profiles", h.handleProfilesList)
 	mux.HandleFunc("/profiles/create", h.handleProfilesCreate)
@@ -237,6 +239,92 @@ func (h *HTTPServer) handleSessionClose(w http.ResponseWriter, r *http.Request) 
 		SessionID:  snap.ID,
 		TmuxTarget: snap.TmuxTarget,
 		Closed:     true,
+	})
+}
+
+type sessionCaptureResponse struct {
+	Name       string `json:"name"`
+	SessionID  string `json:"session_id"`
+	TmuxTarget string `json:"tmux_target"`
+	Content    string `json:"content"`
+}
+
+type sessionSendResponse struct {
+	Name      string `json:"name"`
+	SessionID string `json:"session_id"`
+	Delivered bool   `json:"delivered"`
+}
+
+func boolParam(r *http.Request, key string) bool {
+	v := r.URL.Query().Get(key)
+	return v == "1" || v == "true"
+}
+
+// handleSessionCapture reads a session's pane contents. Thin HTTP shim over the
+// same daemon.Capture path the gRPC Capture RPC uses. Pass history=1 for full
+// scrollback (default: visible screen only).
+func (h *HTTPServer) handleSessionCapture(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "missing name"})
+		return
+	}
+	sess := h.findByName(name)
+	if sess == nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{
+			Error: fmt.Sprintf("session not found: %s", name),
+		})
+		return
+	}
+	snap := sess.Snapshot()
+	content, err := h.daemon.Capture(r.Context(), snap.ID, boolParam(r, "history"))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{
+			Error: fmt.Sprintf("capture: %v", err),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, sessionCaptureResponse{
+		Name:       name,
+		SessionID:  snap.ID,
+		TmuxTarget: snap.TmuxTarget,
+		Content:    content,
+	})
+}
+
+// handleSessionSend delivers text to a session. Thin HTTP shim over the same
+// daemon.SendPrompt path the gRPC SendPrompt RPC uses. confirm=1 requests
+// delivery confirmation; wait_idle=1 waits for a working agent to go idle.
+func (h *HTTPServer) handleSessionSend(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "missing name"})
+		return
+	}
+	text := r.URL.Query().Get("text")
+	if text == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "missing text"})
+		return
+	}
+	sess := h.findByName(name)
+	if sess == nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{
+			Error: fmt.Sprintf("session not found: %s", name),
+		})
+		return
+	}
+	snap := sess.Snapshot()
+	if err := h.daemon.SendPrompt(r.Context(), snap.ID, text, boolParam(r, "confirm"), boolParam(r, "wait_idle")); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{
+			Error: fmt.Sprintf("send: %v", err),
+		})
+		return
+	}
+	h.daemon.logger.Info("http sent to session", "session_id", snap.ID, "name", name, "bytes", len(text))
+	writeJSON(w, http.StatusOK, sessionSendResponse{
+		Name:      name,
+		SessionID: snap.ID,
+		Delivered: true,
 	})
 }
 

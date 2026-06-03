@@ -142,6 +142,79 @@ curl -s "http://127.0.0.1:7777/session/close?name=alpha"
 
 ---
 
+## `POST|GET /session/capture`
+
+Read a session's pane contents. Thin HTTP shim over the same daemon path the
+gRPC `Capture` RPC uses.
+
+### Query parameters
+
+| name      | type   | default | notes                                                  |
+|-----------|--------|---------|--------------------------------------------------------|
+| `name`    | string | —       | Session name (required).                               |
+| `history` | bool   | `false` | `1`/`true` returns full scrollback; default is the visible screen only. |
+
+### Responses
+
+`200 OK`
+```json
+{
+  "name": "alpha",
+  "session_id": "s-1779483006940496000",
+  "tmux_target": "%1",
+  "content": "...pane text..."
+}
+```
+
+`400` — missing `name`.
+`404` — no live session with that name.
+`500` — capture failed.
+
+### Example
+
+```bash
+curl -s "http://127.0.0.1:7777/session/capture?name=alpha&history=1"
+```
+
+---
+
+## `POST|GET /session/send`
+
+Deliver text to a session. Thin HTTP shim over the same daemon path the gRPC
+`SendPrompt` RPC uses.
+
+### Query parameters
+
+| name        | type   | default | notes                                                       |
+|-------------|--------|---------|-------------------------------------------------------------|
+| `name`      | string | —       | Session name (required).                                    |
+| `text`      | string | —       | Text to deliver (required).                                 |
+| `confirm`   | bool   | `false` | `1`/`true` requests delivery confirmation.                  |
+| `wait_idle` | bool   | `false` | `1`/`true` waits for a working agent to go idle before sending. |
+
+### Responses
+
+`200 OK`
+```json
+{
+  "name": "alpha",
+  "session_id": "s-1779483006940496000",
+  "delivered": true
+}
+```
+
+`400` — missing `name` or `text`.
+`404` — no live session with that name.
+`500` — delivery failed.
+
+### Example
+
+```bash
+curl -s "http://127.0.0.1:7777/session/send?name=alpha&text=use+JWT&confirm=1"
+```
+
+---
+
 ## Notes for implementers
 
 - **Identity:** the canonical identifier is `session_id` (opaque); `name` is the
@@ -154,5 +227,6 @@ curl -s "http://127.0.0.1:7777/session/close?name=alpha"
   server: `tmux -L arcmux attach -t agents`.
 - **Lifecycle:** sessions also surface via the gRPC `ListSessions` /
   `Status` / `Subscribe` RPCs; the HTTP API is additive, not a replacement.
-- **Roadmap (not yet implemented):** `codex` agent support, `/session/send`
-  (prompt delivery), `/session/capture` (read pane output), event stream.
+- **Roadmap (not yet implemented):** event stream over HTTP, project-scoped
+  session filtering (`/sessions?project=`), babysit call-context minting
+  (`/babysit/new`, `/babysit/context`), server-side bearer auth.

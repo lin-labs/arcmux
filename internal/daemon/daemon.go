@@ -61,6 +61,11 @@ type Daemon struct {
 	// (notably confirmDelivery). Production code never sets this.
 	sendPromptHook func(ctx context.Context, sessionID, text string, confirmDelivery, waitIdle bool) error
 
+	// captureHook, when non-nil, replaces the production Capture pane read.
+	// Test-only hook (mirrors sendPromptHook) so unit tests of the HTTP
+	// capture shim don't need a live tmux pane. Production code never sets it.
+	captureHook func(ctx context.Context, sessionID string, includeHistory bool) (string, error)
+
 	// state is the daemon-level bbolt store backing the C1 substrate RPCs
 	// (Send/PeekInbox/AckInbox/QueryAudit). Opened at Start, lazily on
 	// first need if Start hasn't been called (test path). One file:
@@ -820,6 +825,11 @@ func (d *Daemon) SendPrompt(ctx context.Context, sessionID, text string, confirm
 
 // Capture returns the current pane output.
 func (d *Daemon) Capture(ctx context.Context, sessionID string, includeHistory bool) (string, error) {
+	// Test hook: when installed (unit tests only), short-circuit before any
+	// tmux/exec read so the HTTP capture shim can be tested without a pane.
+	if d.captureHook != nil {
+		return d.captureHook(ctx, sessionID, includeHistory)
+	}
 	sess, ok := d.GetSession(sessionID)
 	if !ok {
 		return "", fmt.Errorf("session not found: %s", sessionID)
