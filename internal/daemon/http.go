@@ -28,6 +28,8 @@ func NewHTTPServer(d *Daemon, addr string) *HTTPServer {
 	mux.HandleFunc("/session/capture", h.handleSessionCapture)
 	mux.HandleFunc("/session/send", h.handleSessionSend)
 	mux.HandleFunc("/sessions", h.handleSessionsList)
+	mux.HandleFunc("/babysit/new", h.handleBabysitNew)
+	mux.HandleFunc("/babysit/context", h.handleBabysitContext)
 	mux.HandleFunc("/profiles", h.handleProfilesList)
 	mux.HandleFunc("/profiles/create", h.handleProfilesCreate)
 	mux.HandleFunc("/profiles/remove", h.handleProfilesRemove)

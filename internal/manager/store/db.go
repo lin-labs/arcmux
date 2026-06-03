@@ -37,6 +37,12 @@ const (
 	// Created lazily by EnsureSessionInbox; readers tolerate a missing
 	// sub-bucket as "no queue exists yet".
 	BucketSessionInbox = "session-inbox"
+
+	// BucketBabysitContext (B3) holds ephemeral, TTL'd babysit call contexts
+	// keyed by their opaque token. Values are JSON blobs owned by the daemon
+	// package; the store treats them as opaque bytes. Expiry is enforced
+	// lazily by the daemon on read.
+	BucketBabysitContext = "babysit-context"
 )
 
 // AllBuckets lists buckets created on Open.
@@ -44,6 +50,7 @@ var AllBuckets = []string{
 	BucketAudit,
 	BucketMeta,
 	BucketSessionInbox,
+	BucketBabysitContext,
 }
 
 // DB wraps a bbolt handle with arcmux-specific helpers.

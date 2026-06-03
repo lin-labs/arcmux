@@ -237,6 +237,78 @@ curl -s "http://127.0.0.1:7777/session/send?name=alpha&text=use+JWT&confirm=1"
 
 ---
 
+## `POST|GET /babysit/new`
+
+Mint an ephemeral, project-scoped **call context** for babysitter voice mode and
+return a connect handle. The context is persisted to the daemon bbolt store with
+a TTL; the voxtop relay resolves it on connect via `/babysit/context`.
+
+### Query parameters
+
+| name      | type   | default | notes                                                              |
+|-----------|--------|---------|--------------------------------------------------------------------|
+| `project` | string | —       | Project slug (required). Scopes panes via the same rule as `/sessions?project=`. |
+| `server`  | string | (none)  | voxtop-server host (`host:port`) used to build `connect_url`. Loopback → `ws://`, else `wss://`. |
+| `ttl`     | int    | `600`   | Context lifetime in seconds.                                       |
+
+### Response
+
+`200 OK`
+```json
+{
+  "context_id": "ctx-ab12cd34ef56",
+  "token": "<opaque>",
+  "project": "voxtop",
+  "connect_url": "wss://labs:5060/v1/realtime/converse?context=<token>",
+  "repo_cwd": "/home/blin/Projects/voxtop",
+  "plan_refs": ["/home/blin/Projects/voxtop/docs/prd-xai-realtime-voice-chat.md"],
+  "panes": [
+    {"name": "vox-a", "session_id": "s-..", "tmux_target": "%42", "state": "working", "cwd": "/home/blin/Projects/voxtop/VoxtopServer"}
+  ],
+  "expires_at": "2026-06-03T16:40:00-07:00"
+}
+```
+
+`400` — missing `project`.
+`503` — daemon state store unavailable.
+
+The connect token rides the WS as `?context=` — distinct from `?token=`, which
+remains the voxtop API key.
+
+### Example
+
+```bash
+curl -s "http://127.0.0.1:7777/babysit/new?project=voxtop&server=labs:5060"
+```
+
+---
+
+## `GET /babysit/context`
+
+Resolve a minted call context by token. Called by the voxtop relay on connect to
+load the scope (panes + repo + plan refs) for the session.
+
+### Query parameters
+
+| name      | type   | notes                                  |
+|-----------|--------|----------------------------------------|
+| `context` | string | Context token (or `token=` alias).     |
+
+### Responses
+
+`200 OK` — the full context JSON (same shape persisted at mint time).
+`400` — missing token.
+`404` — unknown or expired token (expired tokens are deleted on read).
+`503` — daemon state store unavailable.
+
+### Example
+
+```bash
+curl -s "http://127.0.0.1:7777/babysit/context?context=<token>"
+```
+
+---
+
 ## Notes for implementers
 
 - **Identity:** the canonical identifier is `session_id` (opaque); `name` is the
@@ -249,6 +321,5 @@ curl -s "http://127.0.0.1:7777/session/send?name=alpha&text=use+JWT&confirm=1"
   server: `tmux -L arcmux attach -t agents`.
 - **Lifecycle:** sessions also surface via the gRPC `ListSessions` /
   `Status` / `Subscribe` RPCs; the HTTP API is additive, not a replacement.
-- **Roadmap (not yet implemented):** event stream over HTTP, project-scoped
-  session filtering (`/sessions?project=`), babysit call-context minting
-  (`/babysit/new`, `/babysit/context`), server-side bearer auth.
+- **Roadmap (not yet implemented):** event stream over HTTP, server-side bearer
+  auth (required before any off-localhost exposure of this control plane).
