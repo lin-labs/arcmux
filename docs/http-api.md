@@ -22,11 +22,11 @@ All responses are `application/json`. Errors use the shape:
 
 ## Supported agents
 
-| agent    | status         | command launched              |
-|----------|----------------|-------------------------------|
-| `claude` | implemented    | `cld --remote-control`        |
-| `codex`  | not implemented | returns 501                  |
-| others   | not implemented | returns 501                  |
+| agent    | status          | command launched                               |
+|----------|-----------------|------------------------------------------------|
+| `claude` | implemented     | `cld --remote-control`                         |
+| `codex`  | implemented     | codex start command from the profile registry  |
+| others   | not implemented | returns 501                                    |
 
 `cld` is the user's alias for `claude --dangerously-skip-permissions`. Each
 session runs in its own tmux window on the daemon's isolated tmux socket (see
@@ -87,7 +87,7 @@ List all live sessions.
       "name": "claude-1779483006907958000",
       "agent": "claude",
       "state": "idle",
-      "tmux_target": "agents:claude-1779483006907958000",
+      "tmux_target": "%42",
       "cwd": "",
       "started_at": "2026-05-22T13:50:06-07:00"
     }

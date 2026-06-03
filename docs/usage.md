@@ -2,7 +2,10 @@
 
 A practical guide for running arcmux's three-tier multi-agent system day-to-day.
 
-This doc lives at `~obsAgents/Projects/arcmux/docs/usage.md` (vault-canonical, no in-repo mirror).
+This doc lives in-repo at `docs/usage.md` (canonical). Note: arcmux is now a
+pure substrate — role structure (Elon/Manager/IC) is owned by callers (elonco),
+not the daemon; the mental model below describes the elonco usage pattern, not
+daemon-enforced tiers.
 
 ---
 
