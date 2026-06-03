@@ -91,6 +91,11 @@ type DaemonConfig struct {
 	HTTPAddr    string `toml:"http_addr"`
 	ProfileName string `toml:"profile_name"`
 	StatePath   string `toml:"state_path"`
+	// HTTPAuthToken, when set, requires non-loopback HTTP callers to present
+	// `Authorization: Bearer <token>`. Loopback requests stay open for local
+	// dev. Empty (default) disables auth entirely. Required before exposing the
+	// control plane off-localhost (e.g. over Tailscale).
+	HTTPAuthToken string `toml:"http_auth_token"`
 }
 
 type TmuxConfig struct {

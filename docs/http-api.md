@@ -20,6 +20,22 @@ All responses are `application/json`. Errors use the shape:
 { "error": "<message>" }
 ```
 
+## Authentication
+
+By default the control plane is unauthenticated and bound to loopback. Before
+exposing it off-localhost (e.g. over Tailscale), set a shared secret:
+
+```toml
+[daemon]
+http_addr = "0.0.0.0:7777"
+http_auth_token = "<shared-secret>"
+```
+
+When `http_auth_token` is set, **non-loopback** requests must present
+`Authorization: Bearer <token>` or receive `401`. Loopback callers
+(`127.0.0.1`, `::1`, `localhost`) always bypass auth for local dev. When the
+token is empty (default), auth is disabled entirely.
+
 ## Supported agents
 
 | agent    | status          | command launched                               |

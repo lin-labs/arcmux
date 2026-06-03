@@ -2,12 +2,15 @@ package daemon
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"github.com/lin-labs/arcmux/internal/profile"
 	"github.com/lin-labs/arcmux/internal/project"
@@ -16,12 +19,13 @@ import (
 
 // HTTPServer exposes a small HTTP API for managing sessions.
 type HTTPServer struct {
-	daemon *Daemon
-	srv    *http.Server
+	daemon    *Daemon
+	srv       *http.Server
+	authToken string
 }
 
 func NewHTTPServer(d *Daemon, addr string) *HTTPServer {
-	h := &HTTPServer{daemon: d}
+	h := &HTTPServer{daemon: d, authToken: d.cfg.Daemon.HTTPAuthToken}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/session/new", h.handleSessionNew)
 	mux.HandleFunc("/session/close", h.handleSessionClose)
@@ -33,8 +37,50 @@ func NewHTTPServer(d *Daemon, addr string) *HTTPServer {
 	mux.HandleFunc("/profiles", h.handleProfilesList)
 	mux.HandleFunc("/profiles/create", h.handleProfilesCreate)
 	mux.HandleFunc("/profiles/remove", h.handleProfilesRemove)
-	h.srv = &http.Server{Addr: addr, Handler: mux}
+	h.srv = &http.Server{Addr: addr, Handler: h.withAuth(mux)}
 	return h
+}
+
+// isLoopback reports whether a RemoteAddr (host:port or bare host) is a
+// loopback address. Loopback callers bypass bearer auth for local dev.
+func isLoopback(remoteAddr string) bool {
+	host := remoteAddr
+	if h, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		host = h
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// authorized reports whether a request may proceed: auth disabled (no token),
+// a loopback caller, or a matching bearer token.
+func (h *HTTPServer) authorized(r *http.Request) bool {
+	if h.authToken == "" {
+		return true
+	}
+	if isLoopback(r.RemoteAddr) {
+		return true
+	}
+	const prefix = "Bearer "
+	got := r.Header.Get("Authorization")
+	if !strings.HasPrefix(got, prefix) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got[len(prefix):]), []byte(h.authToken)) == 1
+}
+
+// withAuth wraps the mux, rejecting unauthorized non-loopback requests with 401.
+func (h *HTTPServer) withAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !h.authorized(r) {
+			writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "unauthorized"})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (h *HTTPServer) Serve() error {
