@@ -5,10 +5,22 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/lin-labs/arcmux/internal/project"
 	"github.com/lin-labs/arcmux/internal/session"
 )
+
+func writeProjectsTOML(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "projects.toml")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
 
 // seedSession inserts a tmux-transport session into the daemon registry so the
 // HTTP handlers can resolve it by name without spawning a real pane.
@@ -82,6 +94,80 @@ func TestHandleSessionCaptureMissingName(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+func seedSessionCWD(d *Daemon, id, name, cwd, owner string) {
+	sess := session.NewSession(id, name, "claude", cwd)
+	sess.TmuxTarget = "%" + id
+	sess.SetOwnerID(owner)
+	d.mu.Lock()
+	d.sessions[id] = sess
+	d.mu.Unlock()
+}
+
+func TestHandleSessionsListProjectFilter(t *testing.T) {
+	d, cleanup := newCreateSessionTestDaemon(t)
+	defer cleanup()
+	// In-repo cwd match, owner-tag match, and a non-member.
+	seedSessionCWD(d, "p1", "vox-a", "/home/blin/Projects/voxtop/VoxtopServer", "")
+	seedSessionCWD(d, "p2", "vox-b", "/somewhere/else", "elonco:voxtop")
+	seedSessionCWD(d, "p3", "arc-a", "/home/blin/Projects/arcmux", "")
+
+	// Register voxtop so cwd matching has a repo root.
+	reg, err := project.Load(writeProjectsTOML(t,
+		`[[project]]
+slug = "voxtop"
+repo_cwd = "/home/blin/Projects/voxtop"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.projects = reg
+
+	h := &HTTPServer{daemon: d}
+	req := httptest.NewRequest(http.MethodGet, "/sessions?project=voxtop", nil)
+	rec := httptest.NewRecorder()
+	h.handleSessionsList(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var resp sessionsListResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, s := range resp.Sessions {
+		names[s.Name] = true
+	}
+	if !names["vox-a"] || !names["vox-b"] {
+		t.Errorf("expected vox-a and vox-b in %v", names)
+	}
+	if names["arc-a"] {
+		t.Errorf("arc-a should be filtered out: %v", names)
+	}
+}
+
+func TestHandleSessionsListUnknownProjectEmpty(t *testing.T) {
+	d, cleanup := newCreateSessionTestDaemon(t)
+	defer cleanup()
+	seedSessionCWD(d, "x1", "a", "/home/blin/Projects/arcmux", "")
+
+	h := &HTTPServer{daemon: d}
+	req := httptest.NewRequest(http.MethodGet, "/sessions?project=ghostproj", nil)
+	rec := httptest.NewRecorder()
+	h.handleSessionsList(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (unknown project is empty, not error)", rec.Code)
+	}
+	var resp sessionsListResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Sessions) != 0 {
+		t.Errorf("unknown project should yield empty list, got %d", len(resp.Sessions))
 	}
 }
 

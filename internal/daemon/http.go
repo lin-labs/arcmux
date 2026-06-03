@@ -10,6 +10,7 @@ import (
 	"regexp"
 
 	"github.com/lin-labs/arcmux/internal/profile"
+	"github.com/lin-labs/arcmux/internal/project"
 	"github.com/lin-labs/arcmux/internal/session"
 )
 
@@ -350,9 +351,22 @@ type profilesResponse struct {
 
 func (h *HTTPServer) handleSessionsList(w http.ResponseWriter, r *http.Request) {
 	sessions := h.daemon.ListSessions()
+
+	// Optional project scoping: ?project=<slug> returns only sessions whose cwd
+	// is under the project's repo_cwd or whose owner_id tags the project. An
+	// unknown project simply yields no matches (not an error).
+	projectSlug := r.URL.Query().Get("project")
+	var matcher project.Project
+	if projectSlug != "" {
+		matcher = h.daemon.projectMatcher(projectSlug)
+	}
+
 	out := sessionsListResponse{Sessions: make([]sessionSummary, 0, len(sessions))}
 	for _, s := range sessions {
 		snap := s.Snapshot()
+		if projectSlug != "" && !matcher.Matches(snap.CWD, snap.OwnerID) {
+			continue
+		}
 		out.Sessions = append(out.Sessions, sessionSummary{
 			SessionID:      snap.ID,
 			Name:           snap.Name,

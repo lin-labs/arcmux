@@ -76,6 +76,28 @@ curl -s "http://127.0.0.1:7777/session/new?agent=claude&name=alpha"
 
 List all live sessions.
 
+### Query parameters
+
+| name      | type   | default | notes                                                                 |
+|-----------|--------|---------|-----------------------------------------------------------------------|
+| `project` | string | (none)  | When set, return only sessions belonging to the project (see below). An unknown project yields an empty list, not an error. |
+
+**Project scoping.** arcmux is a pure substrate and does not store a "project"
+on a session. The `project` filter resolves membership two ways: (1) the
+session's `cwd` is within the project's `repo_cwd`, or (2) the session's
+`owner_id` tags the project as a colon-delimited component (e.g.
+`elonco:voxtop`, `project:voxtop`). `repo_cwd` comes from the project registry
+at `~/.config/arcmux/projects.toml`:
+
+```toml
+[[project]]
+slug = "voxtop"
+repo_cwd = "/home/blin/Projects/voxtop"
+plan_globs = ["docs/prd-*.md", "docs/plans/*.md"]
+```
+
+A missing registry file is fine — owner_id tag matching still works.
+
 ### Response
 
 `200 OK`

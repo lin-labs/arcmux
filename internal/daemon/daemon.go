@@ -21,6 +21,7 @@ import (
 	"github.com/lin-labs/arcmux/internal/mux"
 	"github.com/lin-labs/arcmux/internal/muxbuild"
 	"github.com/lin-labs/arcmux/internal/profile"
+	"github.com/lin-labs/arcmux/internal/project"
 	"github.com/lin-labs/arcmux/internal/session"
 	"github.com/lin-labs/arcmux/internal/tmux"
 	"google.golang.org/grpc"
@@ -66,6 +67,11 @@ type Daemon struct {
 	// capture shim don't need a live tmux pane. Production code never sets it.
 	captureHook func(ctx context.Context, sessionID string, includeHistory bool) (string, error)
 
+	// projects is the project registry (slug -> repo_cwd + plan_globs) used to
+	// scope sessions to a project (HTTP /sessions?project=) and to mint babysit
+	// call contexts. May be nil/empty when no projects.toml is present.
+	projects *project.Registry
+
 	// state is the daemon-level bbolt store backing the C1 substrate RPCs
 	// (Send/PeekInbox/AckInbox/QueryAudit). Opened at Start, lazily on
 	// first need if Start hasn't been called (test path). One file:
@@ -91,6 +97,13 @@ func New(cfg *config.Config, logger *slog.Logger) *Daemon {
 			Tmux: cfg.Tmux,
 		})
 	}
+	// Project registry is optional; a missing or malformed projects.toml must
+	// not stop the daemon, so log and continue with an empty registry.
+	projects, perr := project.Load("")
+	if perr != nil {
+		logger.Warn("project registry load failed; continuing without it", "error", perr)
+		projects, _ = project.Load(filepath.Join(os.TempDir(), "arcmux-no-such-projects.toml"))
+	}
 	return &Daemon{
 		cfg:          cfg,
 		tmux:         tmux.NewClient(cfg.Tmux.SocketName),
@@ -98,6 +111,7 @@ func New(cfg *config.Config, logger *slog.Logger) *Daemon {
 		hooks:        hooks.NewInstaller(cfg.Hooks.HookOutputDir),
 		watcher:      hooks.NewWatcher(cfg.Hooks.HookOutputDir, logger),
 		profiles:     cfg.Agents,
+		projects:     projects,
 		logger:       logger,
 		sessions:     make(map[string]*session.Session),
 		monitors:     make(map[string]context.CancelFunc),
@@ -124,6 +138,16 @@ func newDeliveryJudge(cfg *config.Config, logger *slog.Logger) delivery.Judge {
 	logger.Info("delivery judge selected", "judge", cfg.Delivery.Judge,
 		"session_state_dir", cfg.Hooks.SessionStateDir)
 	return judge
+}
+
+// projectMatcher returns a project.Project for the slug — the registered one
+// when present, otherwise an ephemeral Project carrying just the slug so
+// owner_id-tag matching still works for unregistered projects. Nil-safe.
+func (d *Daemon) projectMatcher(slug string) project.Project {
+	if p, ok := d.projects.Resolve(slug); ok {
+		return p
+	}
+	return project.Project{Slug: slug}
 }
 
 // Start begins the daemon: starts the gRPC server and background loops.
