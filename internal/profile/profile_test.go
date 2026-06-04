@@ -64,6 +64,17 @@ func TestDefaultProfiles_Claude(t *testing.T) {
 	if !filepath.IsAbs(p.HookDir) {
 		t.Errorf("HookDir = %q, must be absolute (no literal ~)", p.HookDir)
 	}
+	// Regression: the ready pattern must match a genuinely-ready Claude TUI,
+	// not the old ">" which never appears in Claude Code v2.x (prompt glyph
+	// is "❯"), and the working indicator must be set so the health monitor
+	// doesn't falsely mark a busy-but-quiet session idle. See arcmux-jwf /
+	// arcmux-u1c.
+	if p.ReadyPattern == "" || p.ReadyPattern == ">" {
+		t.Errorf("ReadyPattern = %q, must be a real ready signal (not empty or %q)", p.ReadyPattern, ">")
+	}
+	if p.WorkingIndicator == "" {
+		t.Error("WorkingIndicator must be set so working->idle isn't driven by screen quiescence alone")
+	}
 }
 
 func TestDefaultProfiles_ExecDrivers(t *testing.T) {

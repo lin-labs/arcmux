@@ -17,7 +17,33 @@ const (
 	EventNudgeExhausted = "nudge_exhausted"
 	EventAgentExited    = "agent_exited"
 	EventCrashDetected  = "crash_detected"
+	EventIdleDetected   = "idle_detected"
 )
+
+// idleQuiescence returns how long a working session's visible output must
+// stay unchanged (with no working indicator on screen) before the monitor
+// transitions it back to idle. Derived from the capture interval so faster
+// polling yields faster idle detection, floored so a tiny interval can't
+// make us declare idle on a single quiet tick.
+func idleQuiescence(interval time.Duration) time.Duration {
+	q := 2 * interval
+	if q < 5*time.Second {
+		q = 5 * time.Second
+	}
+	return q
+}
+
+// quiescentIdle decides whether a working session has finished its turn and
+// should transition back to idle. The agent is considered done when it is
+// currently working, shows no stuck pattern, has no working indicator on
+// screen, and its visible output has been unchanged for at least the
+// quiescence window.
+func quiescentIdle(state session.State, stuckMatch string, workingVisible bool, sinceChange, quiescence time.Duration) bool {
+	if state != session.StateWorking || stuckMatch != "" || workingVisible {
+		return false
+	}
+	return sinceChange >= quiescence
+}
 
 // HealthEvent is emitted when the monitor detects a state change.
 type HealthEvent struct {
@@ -99,25 +125,43 @@ func (m *Monitor) Nudge(ctx context.Context, sess *session.Session, prof profile
 	return m.tmux.SendKeys(ctx, snap.TmuxTarget, prof.NudgeCommand, "Enter")
 }
 
+// runState carries the per-session bookkeeping the tick loop needs across
+// ticks (kept here rather than on Monitor so one Monitor can drive many
+// sessions without cross-talk).
+type runState struct {
+	lastOutput   string
+	lastChangeAt time.Time
+}
+
 // Run starts the monitor loop for a single session.
 func (m *Monitor) Run(ctx context.Context, sess *session.Session, prof profile.Profile) {
 	ticker := time.NewTicker(m.interval)
 	defer ticker.Stop()
+
+	rs := &runState{lastChangeAt: time.Now()}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			m.tick(ctx, sess, prof)
+			m.tick(ctx, sess, prof, rs)
 		}
 	}
 }
 
-func (m *Monitor) tick(ctx context.Context, sess *session.Session, prof profile.Profile) {
+func (m *Monitor) tick(ctx context.Context, sess *session.Session, prof profile.Profile, rs *runState) {
 	result := m.Check(ctx, sess, prof)
 	now := time.Now()
 	snap := sess.Snapshot()
+
+	// Track visible-output quiescence: reset the timer whenever the screen
+	// changes. A working session whose screen has stopped changing (and is
+	// not showing a working indicator) has finished its turn.
+	if rs.lastOutput != result.Output {
+		rs.lastOutput = result.Output
+		rs.lastChangeAt = now
+	}
 
 	if !result.Alive {
 		sess.SetState(session.StateExited)
@@ -165,6 +209,27 @@ func (m *Monitor) tick(ctx context.Context, sess *session.Session, prof profile.
 			SessionID: snap.ID,
 			Type:      EventStuckDetected,
 			Reason:    "idle timeout exceeded",
+			Timestamp: now,
+		})
+		return
+	}
+
+	// Working -> idle: the agent's turn has ended. We infer this from the
+	// pane going quiescent — visible output unchanged for the quiescence
+	// window — with no working indicator on screen and no stuck pattern.
+	// This is the only working->idle path for the tmux transport; without
+	// it a session set to "working" on prompt delivery would stay "working"
+	// forever (the hook watcher records Stop events but nothing consumed
+	// them to drive state). See arcmux-u1c.
+	workingVisible := prof.WorkingIndicator != "" &&
+		strings.Contains(strings.ToLower(result.Output), strings.ToLower(prof.WorkingIndicator))
+	if quiescentIdle(snap.State, result.StuckMatch, workingVisible, now.Sub(rs.lastChangeAt), idleQuiescence(m.interval)) {
+		sess.SetState(session.StateIdle)
+		sess.ResetNudge()
+		m.emit(HealthEvent{
+			SessionID: snap.ID,
+			Type:      EventIdleDetected,
+			Reason:    "output quiescent",
 			Timestamp: now,
 		})
 		return

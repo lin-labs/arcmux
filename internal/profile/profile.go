@@ -65,10 +65,28 @@ func DefaultProfiles() map[string]Profile {
 			HookType:           "codex_output",
 		},
 		"claude": {
-			Transport:         TransportTmux,
-			Name:              "claude",
-			StartCommand:      "claude --dangerously-skip-permissions --remote-control",
-			ReadyPattern:      ">",
+			Transport:    TransportTmux,
+			Name:         "claude",
+			StartCommand: "claude --dangerously-skip-permissions --remote-control",
+			// Claude Code v2.x renders its prompt as "❯" (U+276F) and shows
+			// no bare ">" on screen, so the old ">" ready pattern never
+			// matched and the handshake always timed out into StateFailed.
+			// "Remote Control active" is printed by --remote-control (which
+			// both the default StartCommand and the HTTP "cld --remote-control"
+			// launch path pass, and which arcmux *requires* to drive the pane
+			// at all) and appears only once the TUI is fully up — so it's the
+			// most robust readiness signal and, unlike "❯", can't match the
+			// pre-launch shell prompt line.
+			ReadyPattern: "Remote Control active",
+			// WorkingIndicator gates the health monitor's working->idle
+			// transition: while it is visible the session is never declared
+			// idle. Claude shows "esc to interrupt" in its footer throughout
+			// a turn (thinking, streaming, and silent tool execution) and
+			// drops it ("← for agents") only when done. Without this, a long
+			// silent tool call whose screen happens not to change for the
+			// quiescence window could be falsely marked idle and have a queued
+			// inbox message delivered mid-execution. See arcmux-u1c.
+			WorkingIndicator:  "esc to interrupt",
 			StuckTextPatterns: []string{"tool denied", "would you like"},
 			StuckTimeout:      5 * time.Minute,
 			IdleTimeout:       60 * time.Second,
