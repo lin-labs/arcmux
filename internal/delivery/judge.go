@@ -2,9 +2,9 @@ package delivery
 
 import (
 	"context"
+	"fmt"
 	"strings"
-
-	"github.com/lin-labs/arcmux/internal/typesafe"
+	"time"
 )
 
 type State string
@@ -16,6 +16,9 @@ const (
 	StateUnclear       State = "unclear"
 )
 
+// Evidence is the input every judge sees for one delivery assessment. Screen
+// fields drive the heuristic and typesafe judges; SessionID + DeliveryStartedAt
+// let the hooks judge locate and time-bound the agent's cached hook state.
 type Evidence struct {
 	Agent            string
 	Prompt           string
@@ -23,6 +26,15 @@ type Evidence struct {
 	AfterOutput      string
 	WorkingIndicator string
 	Attempt          int
+
+	// SessionID is the arcmux session whose hook state file the hooks judge
+	// reads. Empty for callers that only use screen-based judges.
+	SessionID string
+	// DeliveryStartedAt marks when this delivery began (right after the prompt
+	// was submitted). The hooks judge treats a prompt-submit hook event at or
+	// after this instant as proof the agent ingested this delivery. Zero means
+	// "unknown" and the hooks judge falls back to the heuristic.
+	DeliveryStartedAt time.Time
 }
 
 type Assessment struct {
@@ -34,32 +46,61 @@ type Assessment struct {
 	Model                   string
 }
 
+// Judge classifies whether a requested prompt has been ingested by the agent.
+// Exactly one judge is selected per daemon via NewJudge.
 type Judge interface {
 	Assess(ctx context.Context, evidence Evidence) (Assessment, error)
 }
 
-type evaluator interface {
-	Evaluate(ctx context.Context, document any, prompts []typesafe.Prompt) (*typesafe.EvaluationResponse, error)
+// JudgeKind names the available delivery judges. Selection is explicit (config
+// [delivery].judge); there is no automatic fallback between typesafe and hooks.
+type JudgeKind string
+
+const (
+	// JudgeTypesafe asks the Typesafe AI API (heuristic fallback on error or
+	// missing key). This is the default to preserve historical behavior.
+	JudgeTypesafe JudgeKind = "typesafe"
+	// JudgeHooks reads cached per-session hook state ("the cached data") and
+	// falls back to the heuristic before the first hook event lands.
+	JudgeHooks JudgeKind = "hooks"
+	// JudgeHeuristic uses only the screen-scraping heuristic — no network, no
+	// hook state.
+	JudgeHeuristic JudgeKind = "heuristic"
+)
+
+// JudgeOptions is the decoupled config NewJudge needs, so the delivery package
+// does not import internal/config. The daemon translates config into this.
+type JudgeOptions struct {
+	// Kind selects the judge. Empty is treated as JudgeTypesafe.
+	Kind JudgeKind
+	// SessionStateDir is the directory holding per-session hook state files
+	// (~/data/arcmux/sessions). Required when Kind == JudgeHooks.
+	SessionStateDir string
 }
 
+// NewJudge returns the single judge selected by opts.Kind. An unknown kind is
+// an error so a typo in config fails loudly rather than silently degrading.
+func NewJudge(opts JudgeOptions) (Judge, error) {
+	switch opts.Kind {
+	case "", JudgeTypesafe:
+		return newTypesafeJudge(), nil
+	case JudgeHeuristic:
+		return HeuristicJudge{}, nil
+	case JudgeHooks:
+		if opts.SessionStateDir == "" {
+			return nil, fmt.Errorf("delivery judge %q requires a non-empty SessionStateDir", JudgeHooks)
+		}
+		return newHooksJudge(opts.SessionStateDir, HeuristicJudge{}), nil
+	default:
+		return nil, fmt.Errorf("unknown delivery judge %q (want one of: %s, %s, %s)",
+			opts.Kind, JudgeTypesafe, JudgeHooks, JudgeHeuristic)
+	}
+}
+
+// HeuristicJudge classifies delivery state from the screen text alone. It is
+// always available (no network, no hook state) and serves as the internal
+// fallback for the other judges.
 type HeuristicJudge struct{}
-
-type TypesafeJudge struct {
-	evaluator evaluator
-	fallback  Judge
-}
-
-func NewJudge() Judge {
-	fallback := HeuristicJudge{}
-	client := typesafe.NewFromEnv()
-	if client == nil {
-		return fallback
-	}
-	return &TypesafeJudge{
-		evaluator: client,
-		fallback:  fallback,
-	}
-}
 
 func (j HeuristicJudge) Assess(_ context.Context, evidence Evidence) (Assessment, error) {
 	output := normalizeScreen(evidence.AfterOutput)
@@ -109,98 +150,6 @@ func (j HeuristicJudge) Assess(_ context.Context, evidence Evidence) (Assessment
 			Source:                  "heuristic",
 		}, nil
 	}
-}
-
-func (j *TypesafeJudge) Assess(ctx context.Context, evidence Evidence) (Assessment, error) {
-	if j == nil || j.evaluator == nil {
-		return j.fallback.Assess(ctx, evidence)
-	}
-
-	document := map[string]any{
-		"agent":              evidence.Agent,
-		"requested_prompt":   evidence.Prompt,
-		"screen_before_send": trimForDecision(evidence.BeforeOutput),
-		"screen_after_send":  trimForDecision(evidence.AfterOutput),
-		"working_indicator":  evidence.WorkingIndicator,
-		"attempt":            evidence.Attempt,
-	}
-
-	resp, err := j.evaluator.Evaluate(ctx, document, []typesafe.Prompt{
-		{
-			Key:          "delivery_state",
-			Type:         "choice",
-			Instructions: "Which state best describes whether the requested prompt has been ingested by the agent?",
-			Options: []typesafe.ChoiceOption{
-				{Option: string(StateIngested), Description: "The agent has accepted the prompt and is now responding, running tools, or otherwise working on it."},
-				{Option: string(StatePendingSubmit), Description: "The prompt text is still sitting in the input composer and likely needs another submit action such as pressing Enter."},
-				{Option: string(StateBlocked), Description: "A trust prompt, resume prompt, confirmation prompt, or similar interactive blocker is preventing the requested prompt from being ingested."},
-				{Option: string(StateUnclear), Description: "The screen does not provide enough evidence to tell whether the prompt was ingested."},
-			},
-		},
-		{
-			Key:          "enter_helpful",
-			Type:         "noul",
-			Instructions: "Would pressing Enter now likely advance delivery of the requested prompt rather than interrupt active work?",
-		},
-		{
-			Key:          "work_started",
-			Type:         "noul",
-			Instructions: "Has the agent already started acting on the requested prompt?",
-		},
-		{
-			Key:          "prompt_pending_input",
-			Type:         "noul",
-			Instructions: "Is the requested prompt still visible in the agent input composer rather than already submitted?",
-		},
-	})
-	if err != nil {
-		if j.fallback == nil {
-			return Assessment{}, err
-		}
-		return j.fallback.Assess(ctx, evidence)
-	}
-
-	assessment := Assessment{
-		State:  StateUnclear,
-		Source: "typesafe",
-		Model:  resp.Model,
-	}
-
-	for _, response := range resp.Responses {
-		switch response.Key {
-		case "delivery_state":
-			assessment.State = State(response.Chosen)
-			assessment.Confidence = response.Confidence
-		case "enter_helpful":
-			assessment.EnterHelpfulProbability = response.Probability
-		case "work_started":
-			assessment.WorkStartedProbability = response.Probability
-		case "prompt_pending_input":
-			if assessment.State == StateUnclear && response.Probability >= 0.8 {
-				assessment.State = StatePendingSubmit
-				if assessment.Confidence < response.Probability {
-					assessment.Confidence = response.Probability
-				}
-			}
-		}
-	}
-
-	if assessment.State == StateUnclear && assessment.WorkStartedProbability >= 0.88 {
-		assessment.State = StateIngested
-		if assessment.Confidence < assessment.WorkStartedProbability {
-			assessment.Confidence = assessment.WorkStartedProbability
-		}
-	}
-
-	return assessment, nil
-}
-
-func trimForDecision(s string) string {
-	const max = 4000
-	if len(s) <= max {
-		return s
-	}
-	return s[len(s)-max:]
 }
 
 func normalizeScreen(s string) string {

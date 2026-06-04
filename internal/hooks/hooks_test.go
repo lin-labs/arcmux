@@ -181,6 +181,42 @@ func TestGenericHook_DerivesPathFromEnv(t *testing.T) {
 	}
 }
 
+// TestGenericHook_ParsesStdinJSON verifies the real Claude path: the hook reads
+// the JSON payload on stdin (hook_event_name/tool_name) rather than relying on
+// CLAUDE_* env vars, and records the parsed event in the JSONL audit.
+func TestGenericHook_ParsesStdinJSON(t *testing.T) {
+	tmpDir := t.TempDir()
+	hookDir := filepath.Join(tmpDir, "claude")
+	outDir := filepath.Join(tmpDir, "out")
+	installer := NewInstaller(outDir)
+	if _, err := installer.Install("s-stdin", "claude", hookDir); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	script := GenericHookPath(hookDir)
+
+	cmd := exec.Command("/bin/sh", script)
+	// No CLAUDE_* env — the event must come from stdin.
+	cmd.Env = append(os.Environ(),
+		"ARCMUX_SESSION_ID=s-stdin",
+		"ARCMUX_HOOK_OUTPUT_DIR="+outDir,
+	)
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"UserPromptSubmit","tool_name":"","session_id":"x"}`)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("run hook: %v (%s)", err, out)
+	}
+	data, err := os.ReadFile(installer.OutputPath("s-stdin"))
+	if err != nil {
+		t.Fatalf("read jsonl: %v", err)
+	}
+	ev, err := ParseHookEvent([]byte(strings.TrimSpace(string(data))))
+	if err != nil {
+		t.Fatalf("parse event: %v (line=%q)", err, data)
+	}
+	if ev.Event != "UserPromptSubmit" {
+		t.Fatalf("event = %q, want UserPromptSubmit (parsed from stdin)", ev.Event)
+	}
+}
+
 func TestCleanupLegacyScripts(t *testing.T) {
 	tmpDir := t.TempDir()
 	hookDir := filepath.Join(tmpDir, "claude")

@@ -99,8 +99,26 @@ func New(cfg *config.Config, logger *slog.Logger) *Daemon {
 		processes:    make(map[string]*os.Process),
 		healthEvents: make(chan health.HealthEvent, 64),
 		eventBus:     NewEventBus(),
-		delivery:     delivery.NewController(delivery.NewJudge(), delivery.DefaultControllerConfig()),
+		delivery:     delivery.NewController(newDeliveryJudge(cfg, logger), delivery.DefaultControllerConfig()),
 	}
+}
+
+// newDeliveryJudge selects the prompt-delivery judge from config. An unknown
+// judge value is already rejected at config load, so a build error here is a
+// defensive fallback to the always-available heuristic rather than a crash.
+func newDeliveryJudge(cfg *config.Config, logger *slog.Logger) delivery.Judge {
+	judge, err := delivery.NewJudge(delivery.JudgeOptions{
+		Kind:            delivery.JudgeKind(cfg.Delivery.Judge),
+		SessionStateDir: cfg.Hooks.SessionStateDir,
+	})
+	if err != nil {
+		logger.Error("build delivery judge failed; falling back to heuristic",
+			"judge", cfg.Delivery.Judge, "error", err)
+		return delivery.HeuristicJudge{}
+	}
+	logger.Info("delivery judge selected", "judge", cfg.Delivery.Judge,
+		"session_state_dir", cfg.Hooks.SessionStateDir)
+	return judge
 }
 
 // Start begins the daemon: starts the gRPC server and background loops.
@@ -141,6 +159,15 @@ func (d *Daemon) Start(ctx context.Context) error {
 				d.logger.Warn("generic hook install failed (non-fatal)", "error", err)
 			} else {
 				d.logger.Info("ensured generic session hook", "path", hooks.GenericHookPath(d.cfg.Hooks.ClaudeHookDir))
+			}
+		}
+		// Materialize the codex bridge script (registration in codex config
+		// stays manual — see docs/codex-hooks-findings.md). Best-effort.
+		if filepath.IsAbs(d.cfg.Hooks.CodexHookDir) {
+			if err := d.hooks.EnsureCodexHook(d.cfg.Hooks.CodexHookDir); err != nil {
+				d.logger.Warn("codex hook install failed (non-fatal)", "error", err)
+			} else {
+				d.logger.Info("ensured codex bridge hook", "path", hooks.CodexHookPath(d.cfg.Hooks.CodexHookDir))
 			}
 		}
 	}
@@ -529,11 +556,25 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 		} else {
 			d.watcher.Watch(id, hookPath)
 		}
-		if req.Agent == "claude" {
-			if _, err := hooks.WriteSessionEnvFile(hooks.SessionEnvDir, id, map[string]string{
-				"ARCMUX_SESSION_ID":      id,
-				"ARCMUX_HOOK_OUTPUT_DIR": d.cfg.Hooks.HookOutputDir,
-			}); err != nil {
+		// Seed the per-session hook state doc + drop the env file the agent
+		// hooks read. Both claude and codex hooks call `arcmux hook`, which
+		// writes the state doc the hooks judge reads — so give both the
+		// session id and the state dir.
+		if req.Agent == "claude" || req.Agent == "codex" {
+			if err := hooks.InitSessionState(d.cfg.Hooks.SessionStateDir, id, req.Agent, time.Now()); err != nil {
+				d.logger.Warn("init session state failed (non-fatal)", "error", err)
+			}
+			sessionEnv := map[string]string{
+				"ARCMUX_SESSION_ID":        id,
+				"ARCMUX_HOOK_OUTPUT_DIR":   d.cfg.Hooks.HookOutputDir,
+				"ARCMUX_SESSION_STATE_DIR": d.cfg.Hooks.SessionStateDir,
+			}
+			// Point the hook at this exact arcmux binary so it doesn't depend on
+			// `arcmux` being on the agent shell's PATH.
+			if exe, err := os.Executable(); err == nil {
+				sessionEnv["ARCMUX_BIN"] = exe
+			}
+			if _, err := hooks.WriteSessionEnvFile(hooks.SessionEnvDir, id, sessionEnv); err != nil {
 				d.logger.Warn("write session hook env failed (non-fatal)", "error", err)
 			}
 		}
@@ -579,7 +620,7 @@ func (d *Daemon) findNonTerminalByNameOwner(name, ownerID string) *session.Sessi
 }
 
 // agentStartCommand returns the command the tmux loader runs to launch the
-// agent. For claude with hooks enabled it prefixes a fail-safe env loader:
+// agent. For hook-backed agents (claude, codex) it prefixes a fail-safe env loader:
 //
 //	eval "$('<abs-arcmux>' hook-env '<id>')" ; <StartCommand>
 //
@@ -591,7 +632,10 @@ func (d *Daemon) findNonTerminalByNameOwner(name, ownerID string) *session.Sessi
 // (the generic hook then safely no-ops). For non-claude agents or when
 // AutoInstall is off, the StartCommand is returned unchanged.
 func (d *Daemon) agentStartCommand(id, agent, startCommand string) string {
-	if !d.cfg.Hooks.AutoInstall || agent != "claude" {
+	// Both claude and codex hooks read ARCMUX_SESSION_ID / ARCMUX_SESSION_STATE_DIR
+	// / ARCMUX_BIN from the env the loader injects, so wrap both. Other agents
+	// (and AutoInstall off) launch unchanged.
+	if !d.cfg.Hooks.AutoInstall || (agent != "claude" && agent != "codex") {
 		return startCommand
 	}
 	bin, err := os.Executable()
@@ -819,6 +863,11 @@ func (d *Daemon) Kill(ctx context.Context, sessionID string, graceful bool, time
 	d.tmux.PipePaneStop(ctx, snap.TmuxTarget)
 	d.watcher.Unwatch(sessionID)
 	d.hooks.Cleanup(sessionID)
+	// Retire the session's hook state doc into archived/ now that nothing is
+	// watching it. Best-effort: a missing file (screen-only agents) is fine.
+	if err := hooks.ArchiveSessionState(d.cfg.Hooks.SessionStateDir, sessionID); err != nil {
+		d.logger.Warn("archive session state failed (non-fatal)", "session", sessionID, "error", err)
+	}
 
 	sess.SetState(session.StateExited)
 	d.persistSessions()
@@ -1176,6 +1225,13 @@ func (d *Daemon) restoreSessions() {
 		hookPath := d.hooks.OutputPath(rec.ID)
 		if _, err := os.Stat(hookPath); err == nil {
 			d.watcher.Watch(rec.ID, hookPath)
+		}
+		// Ensure the per-session hook state doc still exists for restored
+		// hook-backed agents (idempotent: preserves existing event fields).
+		if rec.Agent == "claude" || rec.Agent == "codex" {
+			if err := hooks.InitSessionState(d.cfg.Hooks.SessionStateDir, rec.ID, rec.Agent, time.Now()); err != nil {
+				d.logger.Warn("init session state on restore failed (non-fatal)", "session", rec.ID, "error", err)
+			}
 		}
 
 		restored++

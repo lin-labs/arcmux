@@ -173,6 +173,11 @@ func (d *Daemon) deliverPrompt(ctx context.Context, sess *session.Session, prof 
 		beforeOutput = ""
 	}
 
+	// Stamp the delivery start BEFORE the send so the hooks judge counts any
+	// prompt-submit hook the agent fires for this delivery — even if it ingests
+	// before we begin polling.
+	deliveryStartedAt := time.Now()
+
 	result, err := d.tmux.SendPrompt(ctx, target, text)
 	if err != nil {
 		d.emitEvent(Event{
@@ -206,7 +211,7 @@ func (d *Daemon) deliverPrompt(ctx context.Context, sess *session.Session, prof 
 		},
 	})
 
-	return d.ensurePromptIngested(ctx, sess, prof, text, beforeOutput)
+	return d.ensurePromptIngested(ctx, sess, prof, text, beforeOutput, deliveryStartedAt)
 }
 
 func containsFold(s, substr string) bool {

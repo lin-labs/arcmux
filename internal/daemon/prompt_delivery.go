@@ -17,13 +17,15 @@ type promptDeliveryRuntime struct {
 	profile   profile.Profile
 }
 
-func (d *Daemon) ensurePromptIngested(ctx context.Context, sess *session.Session, prof profile.Profile, prompt, beforeOutput string) error {
+func (d *Daemon) ensurePromptIngested(ctx context.Context, sess *session.Session, prof profile.Profile, prompt, beforeOutput string, deliveryStartedAt time.Time) error {
 	snap := sess.Snapshot()
 	assessment, err := d.delivery.EnsureIngested(ctx, delivery.Evidence{
-		Agent:            prof.Name,
-		Prompt:           prompt,
-		BeforeOutput:     beforeOutput,
-		WorkingIndicator: prof.WorkingIndicator,
+		Agent:             prof.Name,
+		Prompt:            prompt,
+		BeforeOutput:      beforeOutput,
+		WorkingIndicator:  prof.WorkingIndicator,
+		SessionID:         snap.ID,
+		DeliveryStartedAt: deliveryStartedAt,
 	}, &promptDeliveryRuntime{
 		daemon:    d,
 		sessionID: snap.ID,

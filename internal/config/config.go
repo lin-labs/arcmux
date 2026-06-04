@@ -13,13 +13,32 @@ import (
 
 // Config is the top-level configuration for the arcmux daemon.
 type Config struct {
-	Daemon DaemonConfig               `toml:"daemon"`
-	Mux    MuxConfig                  `toml:"mux"`
-	Tmux   TmuxConfig                 `toml:"tmux"`
-	Health HealthConfig               `toml:"health"`
-	Hooks  HooksConfig                `toml:"hooks"`
-	Pulse  PulseConfig                `toml:"pulse"`
-	Agents map[string]profile.Profile `toml:"agents"`
+	Daemon   DaemonConfig               `toml:"daemon"`
+	Mux      MuxConfig                  `toml:"mux"`
+	Tmux     TmuxConfig                 `toml:"tmux"`
+	Health   HealthConfig               `toml:"health"`
+	Hooks    HooksConfig                `toml:"hooks"`
+	Pulse    PulseConfig                `toml:"pulse"`
+	Delivery DeliveryConfig             `toml:"delivery"`
+	Agents   map[string]profile.Profile `toml:"agents"`
+}
+
+// DeliveryConfig selects which prompt-delivery judge the daemon uses. Selection
+// is an explicit single choice — there is no automatic fallback between the
+// typesafe and hooks judges. Flip Judge to "hooks" once the cached hook-state
+// path is proven in tests + a few production runs.
+type DeliveryConfig struct {
+	Judge string `toml:"judge"` // "typesafe" (default) | "hooks" | "heuristic"
+}
+
+// Validate rejects an unknown judge so a config typo fails loudly at load.
+func (d DeliveryConfig) Validate() error {
+	switch d.Judge {
+	case "", "typesafe", "hooks", "heuristic":
+		return nil
+	default:
+		return fmt.Errorf("config: delivery.judge %q is not one of typesafe|hooks|heuristic", d.Judge)
+	}
 }
 
 // MuxConfig selects the terminal multiplexer backend. Valid values are
@@ -85,8 +104,14 @@ type HealthConfig struct {
 
 type HooksConfig struct {
 	ClaudeHookDir string `toml:"claude_hook_dir"`
+	CodexHookDir  string `toml:"codex_hook_dir"`
 	HookOutputDir string `toml:"hook_output_dir"`
-	AutoInstall   bool   `toml:"auto_install"`
+	// SessionStateDir holds per-session hook state docs
+	// (<dir>/<id>.json, archived under <dir>/archived/). Default
+	// ~/data/arcmux/sessions. Read by the hooks judge; written by the
+	// `arcmux hook` CLI and seeded/archived by the daemon.
+	SessionStateDir string `toml:"session_state_dir"`
+	AutoInstall     bool   `toml:"auto_install"`
 }
 
 // DefaultConfigPath returns ~/.config/arcmux/config.toml.
@@ -124,9 +149,14 @@ func Load(path string) (*Config, error) {
 			StuckTimeout:    "5m",
 		},
 		Hooks: HooksConfig{
-			ClaudeHookDir: defaultClaudeHookDir(),
-			HookOutputDir: "/tmp/arcmux-hooks",
-			AutoInstall:   true,
+			ClaudeHookDir:   defaultClaudeHookDir(),
+			CodexHookDir:    defaultCodexHookDir(),
+			HookOutputDir:   "/tmp/arcmux-hooks",
+			SessionStateDir: defaultSessionStateDir(),
+			AutoInstall:     true,
+		},
+		Delivery: DeliveryConfig{
+			Judge: "typesafe",
 		},
 		Pulse: PulseConfig{
 			Enabled:           true,
@@ -178,6 +208,17 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 
+	// Fill an empty session_state_dir from the default so a partial [hooks]
+	// table doesn't zero it. (Runs after expandConfigPaths, so the default is
+	// already absolute.)
+	if cfg.Hooks.SessionStateDir == "" {
+		cfg.Hooks.SessionStateDir = defaultSessionStateDir()
+	}
+
+	if err := cfg.Delivery.Validate(); err != nil {
+		return nil, err
+	}
+
 	return cfg, nil
 }
 
@@ -210,7 +251,9 @@ func expandConfigPaths(cfg *Config) {
 	cfg.Daemon.LogDir = expandTilde(cfg.Daemon.LogDir)
 	cfg.Daemon.StatePath = expandTilde(cfg.Daemon.StatePath)
 	cfg.Hooks.ClaudeHookDir = expandTilde(cfg.Hooks.ClaudeHookDir)
+	cfg.Hooks.CodexHookDir = expandTilde(cfg.Hooks.CodexHookDir)
 	cfg.Hooks.HookOutputDir = expandTilde(cfg.Hooks.HookOutputDir)
+	cfg.Hooks.SessionStateDir = expandTilde(cfg.Hooks.SessionStateDir)
 	cfg.Pulse.DataRoot = expandTilde(cfg.Pulse.DataRoot)
 	for name, prof := range cfg.Agents {
 		prof.HookDir = expandTilde(prof.HookDir)
@@ -227,6 +270,17 @@ func defaultClaudeHookDir() string {
 		return ".claude"
 	}
 	return filepath.Join(home, ".claude")
+}
+
+// defaultCodexHookDir returns ~/.codex/hooks — where arcmux materializes the
+// codex lifecycle-hook bridge script. Registration in codex config stays
+// manual (see docs/codex-hooks-findings.md).
+func defaultCodexHookDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(".codex", "hooks")
+	}
+	return filepath.Join(home, ".codex", "hooks")
 }
 
 // ParsePulse converts the user-facing string durations to time.Duration. It
@@ -287,6 +341,14 @@ func DefaultAgentProfiles() map[string]profile.Profile {
 func defaultLogDir() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".config", "arcmux", "logs")
+}
+
+// defaultSessionStateDir returns ~/data/arcmux/sessions — the persistent home
+// for per-session hook state docs, alongside the manager's
+// ~/data/arcmux/<project>/state.bolt convention.
+func defaultSessionStateDir() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "data", "arcmux", "sessions")
 }
 
 func mergeAgentProfiles(defaults, loaded map[string]profile.Profile) map[string]profile.Profile {
