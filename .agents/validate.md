@@ -95,6 +95,48 @@ Highest rung NOT yet automated for the judge: a live claude/codex session
 firing its real hook through a daemon-gated SendPrompt with judge=hooks. Run
 via `make validate-e2e` after setting judge=hooks in the e2e daemon config.
 
+## Substrate live-E2E recipe (real claude/codex panes)
+
+Highest-fidelity manual rung for the *substrate* session API (CreateSession /
+SendPrompt / Capture / Status). Proves the agent lifecycle end-to-end with real
+agents — exercised when validating handshake / state-machine changes.
+
+```bash
+# isolated daemon on the default socket the CLI dials; pulse off; tmux backend
+cat > /tmp/cfg.toml <<EOF
+[daemon]
+socket = "$HOME/.config/arcmux/arcmux.sock"
+log_dir = "/tmp/arcmux-e2e/logs"
+state_path = "/tmp/arcmux-e2e/state.bolt"
+http_addr = "127.0.0.1:7777"
+[mux]
+backend = "tmux"
+[pulse]
+enabled = false
+EOF
+./bin/arcmux start --config /tmp/cfg.toml &              # http info: 127.0.0.1:7777
+./bin/arcmux-cli create --agent claude --name t-cld --cwd /tmp/wd   # expect state -> idle (NOT failed)
+./bin/arcmux-cli create --agent codex  --name t-cdx --cwd /tmp/wd
+printf 'What is 17*23? number only.' | ./bin/arcmux-cli send <session_id>   # expect delivered=true
+./bin/arcmux-cli status <session_id>                    # working -> idle within ~2*capture_interval
+tmux -L <socket_name> capture-pane -t <name> -p | tail  # see the agent's answer
+```
+
+Gotchas learned:
+- **The substrate `CreateSession` gRPC is tmux-only by design**, regardless of
+  `[mux].backend`. `d.mux` (the cmux/tmux workspace backend) is used ONLY by the
+  pulse/workspace-orchestration path (`pulse_supervisor.go`) — i.e. the
+  elonco/manager layer. `arcmux-cli create` and the `arcmux` skill always make
+  raw tmux sessions on the `[tmux].socket_name` server; they never create cmux
+  workspaces. **To get agents visible in the cmux (mobile) app, launch via
+  elonco, not direct `arcmux-cli create`.**
+- `arcmux-cli` (create/send/capture/status/kill) dials the hardcoded default
+  socket `~/.config/arcmux/arcmux.sock`; only audit/inbox/ready take `--socket`.
+  Point the daemon's `[daemon].socket` at the default for the CLI to work.
+- claude ready signal is `"Remote Control active"` (footer from `--remote-control`),
+  NOT `">"`; working indicator is `"esc to interrupt"`. codex shows
+  `"Working (Ns • esc to interrupt)"`. See arcmux-jwf / arcmux-u1c.
+
 ## PR review checklist — accumulated from real PRs
 
 ### Claude hooks / session env handoff (drawn from arcmux-hooks-1)
