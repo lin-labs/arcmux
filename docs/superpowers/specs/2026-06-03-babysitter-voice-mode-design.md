@@ -1,8 +1,27 @@
 # Babysitter Voice Mode — Design
 
 **Date:** 2026-06-03
-**Status:** Approved at the architecture level; grounded against code after a Codex
-review (see "Review resolutions"). Sub-project specs land per-unit before build.
+**Status:** Implemented. B (arcmux subsystem) and A (voxtop relay mode) shipped
+with tests; A.5 (web prototype) built; C (iOS multi-server) and D (iOS
+push/tray/connect) code-complete pending a macOS Xcode build + APNs
+provisioning. Grounded against code after a Codex review (see "Review
+resolutions").
+
+### Build status (2026-06-03)
+
+| Unit | State | Verification |
+|------|-------|--------------|
+| B — arcmux babysit subsystem | done | `go test ./...` green (capture/send, project filter, context mint/lookup, auth) |
+| A — voxtop babysit relay mode | done | 84 voxtop server tests green; two-phase gate tested via real `run_relay` |
+| A.5 — web prototype | built | `voice-controlled-pm/`; JS syntax-checked, serves; live voice loop needs running server + xAI key + mic |
+| C — iOS multi-server | code complete | needs `xcodegen generate` + iOS build on macOS |
+| D — iOS push/tray/connect | code complete | needs macOS build, APNs key + provisioning, and the arcmux push **sender** |
+
+**Remaining to be fully live:** (1) macOS Xcode build of C+D; (2) an APNs auth
+key + provisioning profile with push; (3) the arcmux push-trigger hook to
+actually *send* APNs alerts (device-token delivery to the sender) — the only
+piece left entirely unbuilt. The deep-link + tray + connect paths work without
+push.
 **Repos touched:** `arcmux` (keystone), `voxtop` (relay + iOS), `voice-controlled-pm` (prototype client)
 
 ## Summary
