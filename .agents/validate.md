@@ -72,6 +72,29 @@ staticcheck ./... 2>/dev/null    # if installed
       labs and remote curl)
 - [ ] Manual user flow (N/A — this is a daemon, no UI)
 
+## Delivery judge ([delivery].judge)
+
+`[delivery].judge` selects exactly one prompt-delivery judge: `typesafe`
+(default), `hooks`, or `heuristic`. No automatic fallback between typesafe and
+hooks — flip to `hooks` only after it's proven in test + a few prod runs. Boot
+proof with hooks (isolated config, tmp socket/dirs):
+
+```bash
+./bin/arcmux start --config /tmp/cfg.toml   # expect log: "delivery judge selected" judge=hooks
+# on start it also installs both hooks:
+#   <claude_hook_dir>/hooks/arcmux-session-hook.sh   (parses Claude stdin JSON)
+#   <codex_hook_dir>/arcmux-codex-hook.sh            (codex lifecycle bridge)
+```
+
+The hooks judge reads per-session state at `<session_state_dir>/<id>.json`
+(default ~/data/arcmux/sessions), mutated by `arcmux hook` from the agent
+hooks; archived to `sessions/archived/<id>.json` on unwatch. Codex hook
+registration in `~/.codex/hooks.json` is manual + trusted via codex `/hooks`.
+
+Highest rung NOT yet automated for the judge: a live claude/codex session
+firing its real hook through a daemon-gated SendPrompt with judge=hooks. Run
+via `make validate-e2e` after setting judge=hooks in the e2e daemon config.
+
 ## PR review checklist — accumulated from real PRs
 
 ### Claude hooks / session env handoff (drawn from arcmux-hooks-1)
