@@ -11,3 +11,4 @@
 {"id":"int-738193ed58126f1234d7829c5284469c","kind":"field_change","created_at":"2026-06-04T01:19:00.157828Z","actor":"blin","issue_id":"arcmux-f76","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
 {"id":"int-0d77ff5611cf3ce8a0056f5edbb15738","kind":"field_change","created_at":"2026-06-04T01:19:00.849955Z","actor":"blin","issue_id":"arcmux-b99","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}
 {"id":"int-33a38e8b10403f71b1993dd3b9e45b34","kind":"field_change","created_at":"2026-06-04T04:19:20.863766Z","actor":"blin","issue_id":"arcmux-b99","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
+{"id":"int-620b8b7787f85cf572953845c1e43848","kind":"field_change","created_at":"2026-06-04T04:36:21.495394Z","actor":"blin","issue_id":"arcmux-b99","extra":{"field":"status","new_value":"open","old_value":"closed"}}

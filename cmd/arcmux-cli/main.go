@@ -17,6 +17,11 @@ import (
 )
 
 func socketPath() string {
+	// ARCMUX_SOCKET overrides the default so the CLI can target an isolated
+	// daemon (tests, e2e, multiple profiles) without touching ~/.config.
+	if s := os.Getenv("ARCMUX_SOCKET"); s != "" {
+		return s
+	}
 	h, _ := os.UserHomeDir()
 	return filepath.Join(h, ".config", "arcmux", "arcmux.sock")
 }
@@ -193,6 +198,28 @@ func main() {
 			die(err)
 		}
 		enc.Encode(map[string]any{"killed": r.Killed, "final_state": r.FinalState})
+	case "subscribe":
+		// subscribe [session_id] — stream events as JSON lines until the ctx
+		// deadline or the stream closes. Used by the e2e harness to observe
+		// prompt_ingested events (and their judge_source).
+		req := &arcmuxv1.SubscribeRequest{}
+		if len(os.Args) >= 3 {
+			req.SessionId = os.Args[2]
+		}
+		stream, err := c.Subscribe(ctx, req)
+		if err != nil {
+			die(err)
+		}
+		for {
+			ev, err := stream.Recv()
+			if err != nil {
+				return
+			}
+			enc.Encode(map[string]any{
+				"type": ev.Type, "session_id": ev.SessionId, "state": ev.State,
+				"message": ev.Message, "data": ev.Data, "ts": ev.Timestamp,
+			})
+		}
 	default:
 		die(fmt.Errorf("unknown subcommand %q", cmd))
 	}

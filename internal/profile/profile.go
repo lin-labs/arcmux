@@ -78,6 +78,13 @@ func DefaultProfiles() map[string]Profile {
 			// most robust readiness signal and, unlike "❯", can't match the
 			// pre-launch shell prompt line.
 			ReadyPattern: "Remote Control active",
+			// Claude shows a folder-trust gate in any untrusted cwd:
+			// "Is this a project you created or one you trust? … 1. Yes, I
+			// trust this folder" with "Yes" pre-highlighted, so Enter confirms.
+			// Without this the handshake hangs at the trust prompt in a fresh
+			// directory. "trust this folder" matches option 1's label.
+			TrustPromptPattern: "trust this folder",
+			TrustResponse:      "Enter",
 			// WorkingIndicator gates the health monitor's working->idle
 			// transition: while it is visible the session is never declared
 			// idle. Claude shows "esc to interrupt" in its footer throughout

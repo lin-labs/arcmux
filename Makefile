@@ -1,4 +1,4 @@
-.PHONY: build install proto test validate validate-structural validate-substrate validate-substrate-e2e validate-e2e validate-eval validate-all clean start stop restart status logs tail release deploy
+.PHONY: build install proto test validate validate-structural validate-substrate validate-substrate-e2e validate-e2e validate-e2e-hooks validate-eval validate-all clean start stop restart status logs tail release deploy
 
 BINARY := arcmux
 INSTALL_DIR := $(HOME)/.local/bin
@@ -75,6 +75,18 @@ validate-e2e: build
 	@./bin/$(BINARY)-e2e \
 	  $(if $(SCENARIO),--scenario $(SCENARIO)) \
 	  $(if $(MODE),--mode $(MODE))
+
+# Real-agent e2e for the hooks delivery judge. Spawns a LIVE agent through an
+# isolated daemon configured with [delivery].judge=hooks and asserts (1) the
+# agent's native hook fired `arcmux hook` (state doc records prompt_submit) and
+# (2) a prompt_ingested event carries judge_source=hooks. Opt-in / not CI:
+# needs a real agent binary + auth + the hook registered in the agent's config
+# (claude: ~/.claude/settings.json; codex: ~/.codex/hooks.json + /hooks trust).
+#
+#   make validate-e2e-hooks                # claude (default)
+#   make validate-e2e-hooks AGENT=codex    # codex (after trusting its hooks)
+validate-e2e-hooks: build
+	@bash scripts/e2e/hooks-judge-live.sh $(if $(AGENT),$(AGENT),claude)
 
 # Back-compat aliases — keep one cycle while callers migrate.
 validate-eval: validate-e2e

@@ -75,6 +75,16 @@ func TestDefaultProfiles_Claude(t *testing.T) {
 	if p.WorkingIndicator == "" {
 		t.Error("WorkingIndicator must be set so working->idle isn't driven by screen quiescence alone")
 	}
+	// Regression: Claude shows a folder-trust gate in any untrusted cwd. Without
+	// a trust pattern the handshake hangs at that prompt until timeout (proven
+	// by the real-agent e2e). TrustResponse "Enter" confirms the pre-highlighted
+	// "Yes, I trust this folder".
+	if p.TrustPromptPattern == "" {
+		t.Error("TrustPromptPattern must be set so the handshake clears Claude's folder-trust gate")
+	}
+	if p.TrustResponse == "" {
+		t.Error("TrustResponse must be set (Enter) to confirm the trust prompt")
+	}
 }
 
 func TestDefaultProfiles_ExecDrivers(t *testing.T) {

@@ -154,6 +154,15 @@ func (d *Daemon) waitForReadyPattern(ctx context.Context, target string, prof pr
 			return nil
 		}
 
+		// A trust prompt can render AFTER Phase 2's one-shot check (claude
+		// paints its folder-trust gate a few seconds into startup). Resolve it
+		// here too so a late prompt doesn't wedge the ready-wait until timeout.
+		if handled, herr := d.handleTrustPrompt(ctx, target, prof); herr != nil {
+			return herr
+		} else if handled {
+			d.logger.Info("trust prompt handled during ready-wait", "target", target)
+		}
+
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
