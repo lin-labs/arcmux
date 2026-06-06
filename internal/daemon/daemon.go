@@ -24,6 +24,7 @@ import (
 	"github.com/lin-labs/arcmux/internal/project"
 	"github.com/lin-labs/arcmux/internal/session"
 	"github.com/lin-labs/arcmux/internal/tmux"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 )
 
@@ -51,6 +52,10 @@ type Daemon struct {
 	httpSrv  *HTTPServer
 	ctx      context.Context
 	cancel   context.CancelFunc
+
+	// otelShutdown flushes the OTLP trace provider on daemon Stop (LabOps
+	// observability). Nil when tracing failed to init — never fatal.
+	otelShutdown func(context.Context) error
 
 	pulse *PulseSupervisor
 
@@ -246,7 +251,15 @@ func (d *Daemon) Start(ctx context.Context) error {
 	}
 	d.listener = listener
 
-	d.server = grpc.NewServer()
+	// OTel tracing (LabOps observability). Exports OTLP per OTEL_* env; harmless
+	// if unconfigured. See monitoring repo docs/otel-conventions.md.
+	if shutdown, oerr := initTracer(d.ctx); oerr != nil {
+		d.logger.Warn("otel init failed; continuing without tracing", "error", oerr)
+	} else {
+		d.otelShutdown = shutdown
+	}
+
+	d.server = grpc.NewServer(grpc.StatsHandler(otelgrpc.NewServerHandler()))
 	arcmuxv1.RegisterAgentRuntimeServer(d.server, NewGRPCServer(d))
 
 	// Start background loops
@@ -331,6 +344,13 @@ func (d *Daemon) Stop() {
 	if d.httpSrv != nil {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_ = d.httpSrv.Shutdown(shutdownCtx)
+		cancel()
+	}
+
+	// Flush OTLP traces (LabOps observability).
+	if d.otelShutdown != nil {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = d.otelShutdown(flushCtx)
 		cancel()
 	}
 

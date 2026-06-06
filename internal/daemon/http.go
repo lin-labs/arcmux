@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"strings"
 
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+
 	"github.com/lin-labs/arcmux/internal/profile"
 	"github.com/lin-labs/arcmux/internal/project"
 	"github.com/lin-labs/arcmux/internal/session"
@@ -37,7 +39,7 @@ func NewHTTPServer(d *Daemon, addr string) *HTTPServer {
 	mux.HandleFunc("/profiles", h.handleProfilesList)
 	mux.HandleFunc("/profiles/create", h.handleProfilesCreate)
 	mux.HandleFunc("/profiles/remove", h.handleProfilesRemove)
-	h.srv = &http.Server{Addr: addr, Handler: h.withAuth(mux)}
+	h.srv = &http.Server{Addr: addr, Handler: otelhttp.NewHandler(h.withAuth(mux), "arcmux-http")}
 	return h
 }
 
