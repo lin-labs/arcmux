@@ -3,6 +3,8 @@ package daemon
 import (
 	"strings"
 	"testing"
+
+	"github.com/lin-labs/arcmux/internal/session"
 )
 
 func TestAgentStartCommand(t *testing.T) {
@@ -12,7 +14,7 @@ func TestAgentStartCommand(t *testing.T) {
 		wantContains string
 	}{
 		{"claude", true, "cld --remote-control"},
-		{"codex", true, "codex --dangerously-bypass-approvals-and-sandbox"},
+		{"codex", true, "cdx remote-server"},
 		{"gemini", false, ""},
 		{"", false, ""},
 	}
@@ -28,5 +30,40 @@ func TestAgentStartCommand(t *testing.T) {
 		if !tc.wantOK && cmd != "" {
 			t.Errorf("agentStartCommand(%q) = %q, want empty", tc.agent, cmd)
 		}
+	}
+}
+
+func TestIsCodexRemoteServerSnapshot(t *testing.T) {
+	tests := []struct {
+		name string
+		snap session.Snapshot
+		want bool
+	}{
+		{
+			name: "codex remote server",
+			snap: session.Snapshot{Agent: "codex", CurrentCommand: "cdx remote-server"},
+			want: true,
+		},
+		{
+			name: "codex tui",
+			snap: session.Snapshot{
+				Agent:          "codex",
+				CurrentCommand: "codex --dangerously-bypass-approvals-and-sandbox --no-alt-screen",
+			},
+			want: false,
+		},
+		{
+			name: "claude remote control",
+			snap: session.Snapshot{Agent: "claude", CurrentCommand: "cld --remote-control"},
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isCodexRemoteServerSnapshot(tc.snap); got != tc.want {
+				t.Fatalf("isCodexRemoteServerSnapshot() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

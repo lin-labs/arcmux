@@ -44,11 +44,15 @@ func (h *HTTPServer) Shutdown(ctx context.Context) error {
 }
 
 type sessionNewResponse struct {
-	SessionID  string `json:"session_id"`
-	Name       string `json:"name"`
-	Agent      string `json:"agent"`
-	TmuxTarget string `json:"tmux_target"`
-	Command    string `json:"command"`
+	SessionID      string `json:"session_id"`
+	Name           string `json:"name"`
+	Agent          string `json:"agent"`
+	State          string `json:"state,omitempty"`
+	TmuxTarget     string `json:"tmux_target"`
+	Command        string `json:"command"`
+	CurrentCommand string `json:"current_command,omitempty"`
+	RemoteServer   bool   `json:"remote_server,omitempty"`
+	AlreadyRunning bool   `json:"already_running,omitempty"`
 }
 
 type sessionCloseResponse struct {
@@ -70,17 +74,21 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 var nameSafe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
+const (
+	codexRemoteServerAgent   = "codex"
+	codexRemoteServerCommand = "cdx remote-server"
+)
+
 // agentStartCommand returns the shell command that launches a remote-control
 // session for the given agent, and whether the agent is supported. Claude uses
-// the `cld` wrapper paired with the Vox / claude.ai mobile app; codex reuses the
-// interactive full-auto command from the arcmux profile registry so the two
-// stay in sync.
+// the `cld` wrapper paired with the Vox / claude.ai mobile app; Codex uses the
+// singleton remote server consumed by the Codex remote client.
 func agentStartCommand(agent string) (string, bool) {
 	switch agent {
 	case "claude":
 		return "cld --remote-control", true
 	case "codex":
-		return profile.DefaultProfiles()["codex"].StartCommand, true
+		return codexRemoteServerCommand, true
 	default:
 		return "", false
 	}
@@ -101,17 +109,36 @@ func (h *HTTPServer) handleSessionNew(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	id := generateSessionID()
-
 	name := r.URL.Query().Get("name")
-	if name == "" {
-		// Use the full nanosecond suffix to avoid collisions on rapid creates.
-		name = fmt.Sprintf("%s-%s", agent, id[2:])
-	} else if !nameSafe.MatchString(name) {
+	if name != "" && !nameSafe.MatchString(name) {
 		writeJSON(w, http.StatusBadRequest, errorResponse{
 			Error: "name must match [A-Za-z0-9_-]{1,64}",
 		})
 		return
+	}
+
+	if agent == codexRemoteServerAgent {
+		if existing := h.findActiveCodexRemoteServer(ctx); existing != nil {
+			snap := existing.Snapshot()
+			writeJSON(w, http.StatusOK, sessionNewResponse{
+				SessionID:      snap.ID,
+				Name:           snap.Name,
+				Agent:          snap.Agent,
+				State:          string(snap.State),
+				TmuxTarget:     snap.TmuxTarget,
+				Command:        snap.CurrentCommand,
+				CurrentCommand: snap.CurrentCommand,
+				RemoteServer:   true,
+				AlreadyRunning: true,
+			})
+			return
+		}
+	}
+
+	id := generateSessionID()
+	if name == "" {
+		// Use the full nanosecond suffix to avoid collisions on rapid creates.
+		name = fmt.Sprintf("%s-%s", agent, id[2:])
 	}
 
 	if existing := h.findByName(name); existing != nil {
@@ -148,6 +175,7 @@ func (h *HTTPServer) handleSessionNew(w http.ResponseWriter, r *http.Request) {
 	sess.SetTransport(profile.TransportTmux)
 	sess.TmuxSessionName = tmuxSession
 	sess.TmuxTarget = target
+	sess.SetCurrentCommand(command)
 	sess.SetState(session.StateIdle)
 
 	h.daemon.mu.Lock()
@@ -159,11 +187,14 @@ func (h *HTTPServer) handleSessionNew(w http.ResponseWriter, r *http.Request) {
 		"agent", agent, "session_id", id, "name", name, "tmux_target", target)
 
 	writeJSON(w, http.StatusOK, sessionNewResponse{
-		SessionID:  id,
-		Name:       name,
-		Agent:      agent,
-		TmuxTarget: target,
-		Command:    command,
+		SessionID:      id,
+		Name:           name,
+		Agent:          agent,
+		State:          string(session.StateIdle),
+		TmuxTarget:     target,
+		Command:        command,
+		CurrentCommand: command,
+		RemoteServer:   isCodexRemoteServerSnapshot(sess.Snapshot()),
 	})
 }
 
@@ -183,8 +214,14 @@ func (h *HTTPServer) handleSessionClose(w http.ResponseWriter, r *http.Request) 
 	}
 
 	snap := sess.Snapshot()
-	if err := h.daemon.tmux.KillPane(r.Context(), snap.TmuxTarget); err != nil {
-		h.daemon.logger.Warn("close: kill pane failed", "name", name, "error", err)
+	if snap.TmuxSessionName != "" {
+		if err := h.daemon.tmux.KillSession(r.Context(), snap.TmuxSessionName); err != nil {
+			h.daemon.logger.Warn("close: kill tmux session failed", "name", name, "session", snap.TmuxSessionName, "error", err)
+		}
+	} else if snap.TmuxTarget != "" {
+		if err := h.daemon.tmux.KillPane(r.Context(), snap.TmuxTarget); err != nil {
+			h.daemon.logger.Warn("close: kill pane failed", "name", name, "error", err)
+		}
 	}
 
 	h.daemon.mu.Lock()
@@ -204,13 +241,15 @@ func (h *HTTPServer) handleSessionClose(w http.ResponseWriter, r *http.Request) 
 }
 
 type sessionSummary struct {
-	SessionID  string `json:"session_id"`
-	Name       string `json:"name"`
-	Agent      string `json:"agent"`
-	State      string `json:"state"`
-	TmuxTarget string `json:"tmux_target"`
-	CWD        string `json:"cwd,omitempty"`
-	StartedAt  string `json:"started_at"`
+	SessionID      string `json:"session_id"`
+	Name           string `json:"name"`
+	Agent          string `json:"agent"`
+	State          string `json:"state"`
+	TmuxTarget     string `json:"tmux_target"`
+	CWD            string `json:"cwd,omitempty"`
+	StartedAt      string `json:"started_at"`
+	CurrentCommand string `json:"current_command,omitempty"`
+	RemoteServer   bool   `json:"remote_server,omitempty"`
 }
 
 type sessionsListResponse struct {
@@ -227,13 +266,15 @@ func (h *HTTPServer) handleSessionsList(w http.ResponseWriter, r *http.Request) 
 	for _, s := range sessions {
 		snap := s.Snapshot()
 		out.Sessions = append(out.Sessions, sessionSummary{
-			SessionID:  snap.ID,
-			Name:       snap.Name,
-			Agent:      snap.Agent,
-			State:      string(snap.State),
-			TmuxTarget: snap.TmuxTarget,
-			CWD:        snap.CWD,
-			StartedAt:  snap.StartedAt.Format("2006-01-02T15:04:05Z07:00"),
+			SessionID:      snap.ID,
+			Name:           snap.Name,
+			Agent:          snap.Agent,
+			State:          string(snap.State),
+			TmuxTarget:     snap.TmuxTarget,
+			CWD:            snap.CWD,
+			StartedAt:      snap.StartedAt.Format("2006-01-02T15:04:05Z07:00"),
+			CurrentCommand: snap.CurrentCommand,
+			RemoteServer:   isCodexRemoteServerSnapshot(snap),
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -293,4 +334,25 @@ func (h *HTTPServer) findByName(name string) *session.Session {
 		}
 	}
 	return nil
+}
+
+func (h *HTTPServer) findActiveCodexRemoteServer(ctx context.Context) *session.Session {
+	for _, s := range h.daemon.ListSessions() {
+		snap := s.Snapshot()
+		if !isCodexRemoteServerSnapshot(snap) {
+			continue
+		}
+		if snap.State == session.StateExited || snap.State == session.StateFailed {
+			continue
+		}
+		if snap.TmuxTarget == "" || !h.daemon.tmux.PaneExists(ctx, snap.TmuxTarget) {
+			continue
+		}
+		return s
+	}
+	return nil
+}
+
+func isCodexRemoteServerSnapshot(snap session.Snapshot) bool {
+	return snap.Agent == codexRemoteServerAgent && snap.CurrentCommand == codexRemoteServerCommand
 }
