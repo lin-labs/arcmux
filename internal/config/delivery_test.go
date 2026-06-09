@@ -13,8 +13,10 @@ func TestDeliveryDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Delivery.Judge != "typesafe" {
-		t.Fatalf("default judge = %q, want typesafe", cfg.Delivery.Judge)
+	// Default is the auto cascade: hooks ground truth when available,
+	// typesafe otherwise, heuristic without an API key.
+	if cfg.Delivery.Judge != "auto" {
+		t.Fatalf("default judge = %q, want auto", cfg.Delivery.Judge)
 	}
 	if cfg.Hooks.SessionStateDir == "" || !filepath.IsAbs(cfg.Hooks.SessionStateDir) {
 		t.Fatalf("session_state_dir = %q, want absolute default", cfg.Hooks.SessionStateDir)

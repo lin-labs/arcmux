@@ -52,16 +52,23 @@ type Judge interface {
 	Assess(ctx context.Context, evidence Evidence) (Assessment, error)
 }
 
-// JudgeKind names the available delivery judges. Selection is explicit (config
-// [delivery].judge); there is no automatic fallback between typesafe and hooks.
+// JudgeKind names the available delivery judges (config [delivery].judge).
 type JudgeKind string
 
 const (
+	// JudgeAuto is the cascade hooks → typesafe → heuristic and the default:
+	// hook events are ground truth whenever the session's agent emits them, so
+	// they always win when available; sessions without a usable hook signal
+	// (non-hook-backed agents, or the window before the first event lands)
+	// degrade to the typesafe judge, which itself degrades to the heuristic
+	// when no API key is configured.
+	JudgeAuto JudgeKind = "auto"
 	// JudgeTypesafe asks the Typesafe AI API (heuristic fallback on error or
-	// missing key). This is the default to preserve historical behavior.
+	// missing key). Pin this only to bypass hook state entirely.
 	JudgeTypesafe JudgeKind = "typesafe"
 	// JudgeHooks reads cached per-session hook state ("the cached data") and
-	// falls back to the heuristic before the first hook event lands.
+	// falls back to the heuristic (NOT typesafe) before the first hook event
+	// lands. Pin this to keep deliveries off the network entirely.
 	JudgeHooks JudgeKind = "hooks"
 	// JudgeHeuristic uses only the screen-scraping heuristic — no network, no
 	// hook state.
@@ -71,10 +78,10 @@ const (
 // JudgeOptions is the decoupled config NewJudge needs, so the delivery package
 // does not import internal/config. The daemon translates config into this.
 type JudgeOptions struct {
-	// Kind selects the judge. Empty is treated as JudgeTypesafe.
+	// Kind selects the judge. Empty is treated as JudgeAuto.
 	Kind JudgeKind
 	// SessionStateDir is the directory holding per-session hook state files
-	// (~/data/arcmux/sessions). Required when Kind == JudgeHooks.
+	// (~/data/arcmux/sessions). Required when Kind is JudgeHooks or JudgeAuto.
 	SessionStateDir string
 }
 
@@ -82,7 +89,17 @@ type JudgeOptions struct {
 // an error so a typo in config fails loudly rather than silently degrading.
 func NewJudge(opts JudgeOptions) (Judge, error) {
 	switch opts.Kind {
-	case "", JudgeTypesafe:
+	case "", JudgeAuto:
+		if opts.SessionStateDir == "" {
+			if opts.Kind == JudgeAuto {
+				return nil, fmt.Errorf("delivery judge %q requires a non-empty SessionStateDir", JudgeAuto)
+			}
+			// Implicit default with no hook state configured: the cascade
+			// minus its hooks tier.
+			return newTypesafeJudge(), nil
+		}
+		return newHooksJudge(opts.SessionStateDir, newTypesafeJudge()), nil
+	case JudgeTypesafe:
 		return newTypesafeJudge(), nil
 	case JudgeHeuristic:
 		return HeuristicJudge{}, nil
@@ -92,8 +109,8 @@ func NewJudge(opts JudgeOptions) (Judge, error) {
 		}
 		return newHooksJudge(opts.SessionStateDir, HeuristicJudge{}), nil
 	default:
-		return nil, fmt.Errorf("unknown delivery judge %q (want one of: %s, %s, %s)",
-			opts.Kind, JudgeTypesafe, JudgeHooks, JudgeHeuristic)
+		return nil, fmt.Errorf("unknown delivery judge %q (want one of: %s, %s, %s, %s)",
+			opts.Kind, JudgeAuto, JudgeTypesafe, JudgeHooks, JudgeHeuristic)
 	}
 }
 

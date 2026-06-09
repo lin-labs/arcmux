@@ -32,7 +32,11 @@ tmux -L <tmux-socket-name> attach -t <session-name>     # human attach (socket p
 The daemon creates a dedicated tmux session under its configured tmux socket,
 launches the agent with a fail-safe env loader (`eval "$(arcmux hook-env <id>)"`),
 performs the ready/trust handshake, and verifies prompt delivery via the
-configured judge (`[delivery] judge = "hooks" | "typesafe" | "heuristic"`).
+configured judge. The default `[delivery] judge = "auto"` is a cascade —
+**hooks ground truth always wins when the agent emits hook events**; sessions
+without a usable hook signal degrade to the typesafe judge, then to the
+screen heuristic. Pin `"hooks"`, `"typesafe"`, or `"heuristic"` only to
+bypass tiers deliberately.
 
 **Hook-backed delivery verification.** Each LLM's native lifecycle hooks call
 `arcmux hook`, the single writer of the per-session state doc the hooks judge

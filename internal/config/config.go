@@ -23,21 +23,23 @@ type Config struct {
 	Agents   map[string]profile.Profile `toml:"agents"`
 }
 
-// DeliveryConfig selects which prompt-delivery judge the daemon uses. Selection
-// is an explicit single choice — there is no automatic fallback between the
-// typesafe and hooks judges. Flip Judge to "hooks" once the cached hook-state
-// path is proven in tests + a few production runs.
+// DeliveryConfig selects which prompt-delivery judge the daemon uses. The
+// default "auto" is a cascade — hook events are ground truth and always win
+// when the session's agent emits them; otherwise the typesafe judge assesses,
+// itself degrading to the screen heuristic without an API key. Pin one of the
+// other values only to bypass tiers deliberately (e.g. "hooks" to stay off
+// the network, "typesafe" to ignore hook state).
 type DeliveryConfig struct {
-	Judge string `toml:"judge"` // "typesafe" (default) | "hooks" | "heuristic"
+	Judge string `toml:"judge"` // "auto" (default) | "typesafe" | "hooks" | "heuristic"
 }
 
 // Validate rejects an unknown judge so a config typo fails loudly at load.
 func (d DeliveryConfig) Validate() error {
 	switch d.Judge {
-	case "", "typesafe", "hooks", "heuristic":
+	case "", "auto", "typesafe", "hooks", "heuristic":
 		return nil
 	default:
-		return fmt.Errorf("config: delivery.judge %q is not one of typesafe|hooks|heuristic", d.Judge)
+		return fmt.Errorf("config: delivery.judge %q is not one of auto|typesafe|hooks|heuristic", d.Judge)
 	}
 }
 
@@ -158,7 +160,7 @@ func Load(path string) (*Config, error) {
 			AutoInstall:     true,
 		},
 		Delivery: DeliveryConfig{
-			Judge: "typesafe",
+			Judge: "auto",
 		},
 		Pulse: PulseConfig{
 			Enabled:           true,

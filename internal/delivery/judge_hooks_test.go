@@ -143,6 +143,7 @@ func TestNewJudgeSelection(t *testing.T) {
 	}{
 		{JudgeHeuristic, false},
 		{JudgeHooks, false},
+		{JudgeAuto, false},
 		{"", false},
 		{"bogus", true},
 	}
@@ -160,5 +161,34 @@ func TestNewJudgeSelection(t *testing.T) {
 		if j == nil {
 			t.Fatalf("kind %q: nil judge", c.kind)
 		}
+	}
+}
+
+// TestNewJudgeAutoCascade pins the default wiring: auto (and the empty default
+// with a state dir) is hooks-first — the returned judge must consult per-session
+// hook state before anything else. Explicit auto without a state dir is a
+// loud error; the implicit empty default degrades to the non-hooks tiers.
+func TestNewJudgeAutoCascade(t *testing.T) {
+	t.Parallel()
+
+	for _, kind := range []JudgeKind{JudgeAuto, ""} {
+		j, err := NewJudge(JudgeOptions{Kind: kind, SessionStateDir: "/tmp/x"})
+		if err != nil {
+			t.Fatalf("kind %q: %v", kind, err)
+		}
+		if _, ok := j.(*HooksJudge); !ok {
+			t.Fatalf("kind %q with state dir: judge = %T, want *HooksJudge (hooks must win when available)", kind, j)
+		}
+	}
+
+	if _, err := NewJudge(JudgeOptions{Kind: JudgeAuto}); err == nil {
+		t.Fatal("explicit auto without SessionStateDir must error")
+	}
+	j, err := NewJudge(JudgeOptions{})
+	if err != nil {
+		t.Fatalf("empty default without state dir: %v", err)
+	}
+	if _, ok := j.(*HooksJudge); ok {
+		t.Fatal("empty default without state dir must not be a hooks judge")
 	}
 }
