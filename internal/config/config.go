@@ -105,6 +105,7 @@ type HealthConfig struct {
 type HooksConfig struct {
 	ClaudeHookDir string `toml:"claude_hook_dir"`
 	CodexHookDir  string `toml:"codex_hook_dir"`
+	GrokHookDir   string `toml:"grok_hook_dir"`
 	HookOutputDir string `toml:"hook_output_dir"`
 	// SessionStateDir holds per-session hook state docs
 	// (<dir>/<id>.json, archived under <dir>/archived/). Default
@@ -151,6 +152,7 @@ func Load(path string) (*Config, error) {
 		Hooks: HooksConfig{
 			ClaudeHookDir:   defaultClaudeHookDir(),
 			CodexHookDir:    defaultCodexHookDir(),
+			GrokHookDir:     defaultGrokHookDir(),
 			HookOutputDir:   "/tmp/arcmux-hooks",
 			SessionStateDir: defaultSessionStateDir(),
 			AutoInstall:     true,
@@ -252,6 +254,7 @@ func expandConfigPaths(cfg *Config) {
 	cfg.Daemon.StatePath = expandTilde(cfg.Daemon.StatePath)
 	cfg.Hooks.ClaudeHookDir = expandTilde(cfg.Hooks.ClaudeHookDir)
 	cfg.Hooks.CodexHookDir = expandTilde(cfg.Hooks.CodexHookDir)
+	cfg.Hooks.GrokHookDir = expandTilde(cfg.Hooks.GrokHookDir)
 	cfg.Hooks.HookOutputDir = expandTilde(cfg.Hooks.HookOutputDir)
 	cfg.Hooks.SessionStateDir = expandTilde(cfg.Hooks.SessionStateDir)
 	cfg.Pulse.DataRoot = expandTilde(cfg.Pulse.DataRoot)
@@ -281,6 +284,17 @@ func defaultCodexHookDir() string {
 		return filepath.Join(".codex", "hooks")
 	}
 	return filepath.Join(home, ".codex", "hooks")
+}
+
+// defaultGrokHookDir returns ~/.grok — grok loads drop-in hook files from
+// <dir>/hooks/*.json (always trusted), so materializing arcmux's registration
+// file there is the complete hook setup; no manual config edit is needed.
+func defaultGrokHookDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".grok"
+	}
+	return filepath.Join(home, ".grok")
 }
 
 // ParsePulse converts the user-facing string durations to time.Duration. It

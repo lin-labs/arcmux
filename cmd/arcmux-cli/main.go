@@ -33,7 +33,7 @@ func die(err error) {
 
 func main() {
 	if len(os.Args) < 2 {
-		die(fmt.Errorf("usage: arcmux-cli create|list|send|capture|status|kill|audit|inbox|ready [args]"))
+		die(fmt.Errorf("usage: arcmux-cli create|exec|agents|list|send|capture|status|kill|audit|inbox|ready [args]"))
 	}
 	cmd := os.Args[1]
 
@@ -68,6 +68,16 @@ func main() {
 	}
 	defer conn.Close()
 	c := arcmuxv1.NewAgentRuntimeClient(conn)
+
+	// exec runs a full headless agent turn synchronously, so it owns its
+	// context (longer default deadline, --timeout override).
+	if cmd == "exec" {
+		if err := cmdExec(c, os.Args[2:], os.Stdout); err != nil {
+			die(err)
+		}
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	enc := json.NewEncoder(os.Stdout)
@@ -189,6 +199,27 @@ func main() {
 			})
 		}
 		enc.Encode(map[string]any{"sessions": out, "count": len(out)})
+	case "agents":
+		// Enumerate registered agent profiles. Profiles of the same LLM share
+		// a class ("grok" + "grok_exec" → class=grok); pick transport=tmux for
+		// an interactive pane, transport=exec for a headless one-shot.
+		r, err := c.ListAgents(ctx, &arcmuxv1.ListAgentsRequest{})
+		if err != nil {
+			die(err)
+		}
+		out := make([]map[string]any, 0, len(r.Agents))
+		for _, a := range r.Agents {
+			out = append(out, map[string]any{
+				"name":          a.Name,
+				"class":         a.Class,
+				"transport":     a.Transport,
+				"exec_driver":   a.ExecDriver,
+				"hook_type":     a.HookType,
+				"hook_backed":   a.HookBacked,
+				"start_command": a.StartCommand,
+			})
+		}
+		enc.Encode(map[string]any{"agents": out, "count": len(out)})
 	case "kill":
 		if len(os.Args) < 3 {
 			die(fmt.Errorf("kill <session_id> — run `arcmux-cli list` to see session ids"))

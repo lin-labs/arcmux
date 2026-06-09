@@ -201,6 +201,8 @@ func (d *Daemon) buildExecRunConfig(sess *session.Session, prof profile.Profile,
 		return d.buildCodexExecRun(sess, prompt)
 	case profile.ExecDriverClaudePrintStreamJSON:
 		return d.buildClaudeExecRun(sess, prompt)
+	case profile.ExecDriverGrokStreamJSON:
+		return d.buildGrokExecRun(sess, prompt)
 	default:
 		return nil, fmt.Errorf("unsupported exec driver: %s", prof.ExecDriver)
 	}
@@ -259,6 +261,33 @@ func (d *Daemon) buildClaudeExecRun(sess *session.Session, prompt string) (*exec
 	return &execRunConfig{
 		cmd:    cmd,
 		parser: &claudePrintParser{},
+	}, nil
+}
+
+func (d *Daemon) buildGrokExecRun(sess *session.Session, prompt string) (*execRunConfig, error) {
+	snap := sess.Snapshot()
+
+	// `grok -p` is single-turn headless; streaming-json emits
+	// {"type":"thought"|"text","data":...} chunks and a final
+	// {"type":"end","sessionId":...} event whose sessionId we keep so a
+	// follow-up prompt on the same arcmux session resumes the grok thread.
+	args := []string{
+		"-p", prompt,
+		"--output-format", "streaming-json",
+		"--permission-mode", "bypassPermissions",
+	}
+	if snap.BackendSessionID != "" {
+		args = append(args, "--resume", snap.BackendSessionID)
+	}
+
+	cmd, err := commandWithSnapshotEnv("grok", args, nil, snap)
+	if err != nil {
+		return nil, err
+	}
+
+	return &execRunConfig{
+		cmd:    cmd,
+		parser: &grokExecParser{},
 	}, nil
 }
 
@@ -567,6 +596,43 @@ func (p *claudePrintParser) FinalOutput() string {
 	}
 	if strings.TrimSpace(p.resultText) != "" {
 		return p.resultText
+	}
+	return strings.Join(p.raw, "\n")
+}
+
+// grokExecParser consumes `grok -p --output-format streaming-json` events:
+// token-level {"type":"thought","data":"..."} (ignored) and
+// {"type":"text","data":"..."} chunks that concatenate into the assistant
+// message, then {"type":"end","stopReason":"EndTurn","sessionId":"..."}
+// carrying the grok session id used for --resume.
+type grokExecParser struct {
+	text strings.Builder
+	raw  []string
+}
+
+func (p *grokExecParser) HandleStdoutLine(sess *session.Session, line string) {
+	p.raw = append(p.raw, line)
+	var event struct {
+		Type      string `json:"type"`
+		Data      string `json:"data"`
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal([]byte(line), &event); err != nil {
+		return
+	}
+	switch event.Type {
+	case "text":
+		p.text.WriteString(event.Data)
+	case "end":
+		if event.SessionID != "" {
+			sess.SetBackendSessionID(event.SessionID)
+		}
+	}
+}
+
+func (p *grokExecParser) FinalOutput() string {
+	if out := strings.TrimSpace(p.text.String()); out != "" {
+		return out
 	}
 	return strings.Join(p.raw, "\n")
 }

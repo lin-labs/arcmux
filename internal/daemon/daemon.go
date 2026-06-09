@@ -170,6 +170,16 @@ func (d *Daemon) Start(ctx context.Context) error {
 				d.logger.Info("ensured codex bridge hook", "path", hooks.CodexHookPath(d.cfg.Hooks.CodexHookDir))
 			}
 		}
+		// Materialize the grok hook script + drop-in registration. Grok merges
+		// ~/.grok/hooks/*.json at session start (always trusted), so this is
+		// the complete setup — no manual registration step. Best-effort.
+		if filepath.IsAbs(d.cfg.Hooks.GrokHookDir) {
+			if err := d.hooks.EnsureGrokHook(d.cfg.Hooks.GrokHookDir); err != nil {
+				d.logger.Warn("grok hook install failed (non-fatal)", "error", err)
+			} else {
+				d.logger.Info("ensured grok session hook", "path", hooks.GrokHookConfigPath(d.cfg.Hooks.GrokHookDir))
+			}
+		}
 	}
 
 	// Open daemon-level state.bolt for the C1 substrate surfaces
@@ -550,22 +560,23 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 	// file lives under /tmp/arcmux with restrictive perms; the loader reads it
 	// via `arcmux hook-env` (validated + re-quoted), never sourcing it raw.
 	if d.cfg.Hooks.AutoInstall {
-		hookPath, err := d.hooks.Install(id, req.Agent, prof.HookDir)
+		hookPath, err := d.hooks.Install(id, prof.HookType, prof.HookDir)
 		if err != nil {
 			d.logger.Warn("hook install failed (non-fatal)", "error", err)
 		} else {
 			d.watcher.Watch(id, hookPath)
 		}
 		// Seed the per-session hook state doc + drop the env file the agent
-		// hooks read. Both claude and codex hooks call `arcmux hook`, which
-		// writes the state doc the hooks judge reads — so give both the
-		// session id and the state dir.
-		if req.Agent == "claude" || req.Agent == "codex" {
+		// hooks read. Every hook-backed agent (claude, codex, grok) calls
+		// `arcmux hook`, which writes the state doc the hooks judge reads —
+		// so give it the session id and the state dir.
+		if prof.HookBacked() {
 			if err := hooks.InitSessionState(d.cfg.Hooks.SessionStateDir, id, req.Agent, time.Now()); err != nil {
 				d.logger.Warn("init session state failed (non-fatal)", "error", err)
 			}
 			sessionEnv := map[string]string{
 				"ARCMUX_SESSION_ID":        id,
+				"ARCMUX_HOOK_AGENT":        req.Agent,
 				"ARCMUX_HOOK_OUTPUT_DIR":   d.cfg.Hooks.HookOutputDir,
 				"ARCMUX_SESSION_STATE_DIR": d.cfg.Hooks.SessionStateDir,
 			}
@@ -620,7 +631,8 @@ func (d *Daemon) findNonTerminalByNameOwner(name, ownerID string) *session.Sessi
 }
 
 // agentStartCommand returns the command the tmux loader runs to launch the
-// agent. For hook-backed agents (claude, codex) it prefixes a fail-safe env loader:
+// agent. For hook-backed agents (claude, codex, grok) it prefixes a fail-safe
+// env loader:
 //
 //	eval "$('<abs-arcmux>' hook-env '<id>')" ; <StartCommand>
 //
@@ -629,13 +641,25 @@ func (d *Daemon) findNonTerminalByNameOwner(name, ownerID string) *session.Sessi
 // eval consumes arcmux's OWN single-quote-escaped output — it never sources
 // the raw /tmp/arcmux file. If `hook-env` errors it prints nothing and exits
 // 0, so the eval is a no-op and the agent still launches with no injected env
-// (the generic hook then safely no-ops). For non-claude agents or when
+// (the generic hook then safely no-ops). For non-hook-backed agents or when
 // AutoInstall is off, the StartCommand is returned unchanged.
 func (d *Daemon) agentStartCommand(id, agent, startCommand string) string {
-	// Both claude and codex hooks read ARCMUX_SESSION_ID / ARCMUX_SESSION_STATE_DIR
-	// / ARCMUX_BIN from the env the loader injects, so wrap both. Other agents
-	// (and AutoInstall off) launch unchanged.
-	if !d.cfg.Hooks.AutoInstall || (agent != "claude" && agent != "codex") {
+	prof, ok := d.profiles[agent]
+
+	// Render per-session start args (e.g. grok's private leader socket).
+	// Placeholder values are substituted as individually shell-quoted tokens;
+	// adjacent quoted segments concatenate, so templates may embed them in
+	// larger arguments ("{hook_dir}/x-{session_id}.sock").
+	if ok && prof.SessionStartArgs != "" {
+		args := strings.ReplaceAll(prof.SessionStartArgs, "{session_id}", shellSingleQuote(id))
+		args = strings.ReplaceAll(args, "{hook_dir}", shellSingleQuote(prof.HookDir))
+		startCommand = startCommand + " " + args
+	}
+
+	// Hook-backed agents read ARCMUX_SESSION_ID / ARCMUX_SESSION_STATE_DIR
+	// / ARCMUX_BIN from the env the loader injects. Other agents (and
+	// AutoInstall off) launch unchanged.
+	if !d.cfg.Hooks.AutoInstall || !ok || !prof.HookBacked() {
 		return startCommand
 	}
 	bin, err := os.Executable()
@@ -885,6 +909,18 @@ func (d *Daemon) ListSessions() []*session.Session {
 		list = append(list, s)
 	}
 	return list
+}
+
+// ListAgentProfiles returns a copy of the registered agent profiles
+// (built-in classes merged with config [agents] overrides). The map is
+// immutable after construction, so no lock is needed; copying keeps callers
+// from mutating the registry.
+func (d *Daemon) ListAgentProfiles() map[string]profile.Profile {
+	out := make(map[string]profile.Profile, len(d.profiles))
+	for name, prof := range d.profiles {
+		out[name] = prof
+	}
+	return out
 }
 
 // GetSession returns a session by ID.
@@ -1228,7 +1264,7 @@ func (d *Daemon) restoreSessions() {
 		}
 		// Ensure the per-session hook state doc still exists for restored
 		// hook-backed agents (idempotent: preserves existing event fields).
-		if rec.Agent == "claude" || rec.Agent == "codex" {
+		if prof, ok := d.profiles[rec.Agent]; ok && prof.HookBacked() {
 			if err := hooks.InitSessionState(d.cfg.Hooks.SessionStateDir, rec.ID, rec.Agent, time.Now()); err != nil {
 				d.logger.Warn("init session state on restore failed (non-fatal)", "session", rec.ID, "error", err)
 			}

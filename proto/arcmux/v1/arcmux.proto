@@ -13,6 +13,10 @@ service AgentRuntime {
   rpc Kill(KillRequest) returns (KillResponse);
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
 
+  // Discovery: enumerate the registered agent profiles (LLM classes and
+  // their interactive/exec modes) so callers don't need config access.
+  rpc ListAgents(ListAgentsRequest) returns (ListAgentsResponse);
+
   // Streaming
   rpc StreamOutput(StreamOutputRequest) returns (stream OutputChunk);
   rpc Subscribe(SubscribeRequest) returns (stream Event);
@@ -148,6 +152,28 @@ message SessionSummary {
   string started_at = 6;
   string session_name = 7;
   string owner_id = 8;        // C1: echo for attribution
+}
+
+// --- ListAgents ---
+
+message ListAgentsRequest {}
+
+message ListAgentsResponse {
+  repeated AgentInfo agents = 1;
+}
+
+// AgentInfo describes one registered agent profile. Profiles belonging to the
+// same LLM share a class: e.g. "grok" (transport=tmux) and "grok_exec"
+// (transport=exec) both carry class="grok". Callers picking a run mode for an
+// LLM filter by class + transport.
+message AgentInfo {
+  string name = 1;            // profile name — the CreateSession `agent` value
+  string class = 2;           // LLM class ("codex", "claude", "grok"); may be empty for custom profiles
+  string transport = 3;       // "tmux" (interactive pane) or "exec" (headless one-shot)
+  string exec_driver = 4;     // exec transport only: "codex_exec_json", "claude_print_stream_json", "grok_stream_json"
+  string hook_type = 5;       // "claude_hooks", "codex_output", "grok_hooks", "screen_only", "structured_output"
+  string start_command = 6;   // tmux transport only: the command launched in the pane
+  bool hook_backed = 7;       // true when delivery can be verified by the hooks judge
 }
 
 // --- StreamOutput ---

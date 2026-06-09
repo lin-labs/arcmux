@@ -43,6 +43,69 @@ func TestClaudePrintParserTracksSessionAndOutput(t *testing.T) {
 	}
 }
 
+func TestGrokExecParserTracksSessionAndOutput(t *testing.T) {
+	sess := session.NewSession("s-1", "test", "grok_exec", "/tmp")
+	parser := &grokExecParser{}
+
+	// Real stream shape (verified live): token-level thought chunks, text
+	// chunks that concatenate, then an end event carrying the session id.
+	parser.HandleStdoutLine(sess, `{"type":"thought","data":"thinking"}`)
+	parser.HandleStdoutLine(sess, `{"type":"text","data":"po"}`)
+	parser.HandleStdoutLine(sess, `{"type":"text","data":"ng"}`)
+	parser.HandleStdoutLine(sess, `{"type":"end","stopReason":"EndTurn","sessionId":"019eae08-16ef-7d13-8e4a-2faac9de1596","requestId":"r-1"}`)
+
+	if got := sess.Snapshot().BackendSessionID; got != "019eae08-16ef-7d13-8e4a-2faac9de1596" {
+		t.Fatalf("BackendSessionID = %q", got)
+	}
+	if got := parser.FinalOutput(); got != "pong" {
+		t.Fatalf("FinalOutput = %q, want pong", got)
+	}
+}
+
+func TestGrokExecParserFallsBackToRawOnNoText(t *testing.T) {
+	sess := session.NewSession("s-1", "test", "grok_exec", "/tmp")
+	parser := &grokExecParser{}
+	parser.HandleStdoutLine(sess, `not json at all`)
+	if got := parser.FinalOutput(); got != "not json at all" {
+		t.Fatalf("FinalOutput = %q, want raw fallback", got)
+	}
+}
+
+func TestBuildExecRunConfigRoutesGrokDriver(t *testing.T) {
+	tmpDir := t.TempDir()
+	fakeGrok := filepath.Join(tmpDir, "grok")
+	if err := os.WriteFile(fakeGrok, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake grok: %v", err)
+	}
+	t.Setenv("PATH", tmpDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cfg := &config.Config{
+		Daemon: config.DaemonConfig{
+			Socket: filepath.Join(tmpDir, "arcmux.sock"),
+			LogDir: filepath.Join(tmpDir, "logs"),
+		},
+		Agents: config.DefaultAgentProfiles(),
+	}
+	d := New(cfg, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+
+	sess := session.NewSession("s-1", "test", "grok_exec", tmpDir)
+	sess.SetBackendSessionID("prev-session")
+
+	runCfg, err := d.buildExecRunConfig(sess, profile.DefaultProfiles()["grok_exec"], "hello")
+	if err != nil {
+		t.Fatalf("buildExecRunConfig: %v", err)
+	}
+	if _, ok := runCfg.parser.(*grokExecParser); !ok {
+		t.Fatalf("parser = %T, want *grokExecParser", runCfg.parser)
+	}
+	joined := strings.Join(runCfg.cmd.Args, " ")
+	for _, want := range []string{"-p hello", "--output-format streaming-json", "--resume prev-session"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("cmd args %q missing %q", joined, want)
+		}
+	}
+}
+
 func TestFinalizeExecOutputPrefersStructuredFile(t *testing.T) {
 	tmp := t.TempDir() + "/last.txt"
 	if err := os.WriteFile(tmp, []byte("file output"), 0o644); err != nil {

@@ -25,6 +25,13 @@ make start && sleep 1 && make status
 
 ## E2E entry points
 
+- `make validate-e2e-hooks AGENT=grok|claude|codex` — live-agent e2e: an
+  isolated daemon (judge=hooks) spawns the real agent in tmux, sends a
+  confirmed prompt, and asserts the native hook wrote prompt_submit into the
+  per-session state doc plus a prompt_ingested event. grok needs zero manual
+  hook registration (drop-in ~/.grok/hooks/arcmux-session.json).
+- Headless exec smoke (also exercises class→exec-profile resolution):
+  `ARCMUX_SOCKET=<sock> bin/arcmux-cli exec --agent grok "Reply with exactly: pong"`.
 - HTTP/gRPC endpoint check after `make start`: hit the documented port and
   confirm a known endpoint returns 200 / a valid proto response.
 - `make deploy` to labs followed by an SSH-side `make status` and a curl from

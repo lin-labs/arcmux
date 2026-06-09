@@ -48,7 +48,7 @@ func TestInstaller_Install_Claude(t *testing.T) {
 	hookDir := filepath.Join(tmpDir, "claude")
 	installer := NewInstaller(tmpDir)
 
-	path, err := installer.Install("s-test", "claude", hookDir)
+	path, err := installer.Install("s-test", "claude_hooks", hookDir)
 	if err != nil {
 		t.Fatalf("Install: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestInstaller_Install_Claude_GenericIsIdempotentAcrossSessions(t *testing.T
 	installer := NewInstaller(tmpDir)
 
 	for _, id := range []string{"s-1", "s-2", "s-3"} {
-		if _, err := installer.Install(id, "claude", hookDir); err != nil {
+		if _, err := installer.Install(id, "claude_hooks", hookDir); err != nil {
 			t.Fatalf("Install(%s): %v", id, err)
 		}
 	}
@@ -139,7 +139,7 @@ func TestGenericHook_DerivesPathFromEnv(t *testing.T) {
 	// the hook's derived path must equal OutputPath. Use the same dir.
 	outDir := filepath.Join(tmpDir, "out")
 	installer := NewInstaller(outDir)
-	if _, err := installer.Install("s-env", "claude", hookDir); err != nil {
+	if _, err := installer.Install("s-env", "claude_hooks", hookDir); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
 	script := GenericHookPath(hookDir)
@@ -189,7 +189,7 @@ func TestGenericHook_ParsesStdinJSON(t *testing.T) {
 	hookDir := filepath.Join(tmpDir, "claude")
 	outDir := filepath.Join(tmpDir, "out")
 	installer := NewInstaller(outDir)
-	if _, err := installer.Install("s-stdin", "claude", hookDir); err != nil {
+	if _, err := installer.Install("s-stdin", "claude_hooks", hookDir); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
 	script := GenericHookPath(hookDir)
@@ -235,7 +235,7 @@ func TestCleanupLegacyScripts(t *testing.T) {
 		t.Fatal(err)
 	}
 	installer := NewInstaller(tmpDir)
-	if _, err := installer.Install("s-keep", "claude", hookDir); err != nil {
+	if _, err := installer.Install("s-keep", "claude_hooks", hookDir); err != nil {
 		t.Fatal(err)
 	}
 
@@ -271,7 +271,7 @@ func TestInstaller_Install_Claude_RejectsRelativeHookDir(t *testing.T) {
 	installer := NewInstaller(t.TempDir())
 
 	for _, hookDir := range []string{"~/.claude", "relative/path", "."} {
-		_, err := installer.Install("s-test", "claude", hookDir)
+		_, err := installer.Install("s-test", "claude_hooks", hookDir)
 		if err == nil {
 			t.Errorf("Install with hookDir=%q expected error, got nil", hookDir)
 		}
@@ -282,7 +282,7 @@ func TestInstaller_Install_Codex(t *testing.T) {
 	tmpDir := t.TempDir()
 	installer := NewInstaller(tmpDir)
 
-	path, err := installer.Install("s-test", "codex", "")
+	path, err := installer.Install("s-test", "codex_output", "")
 	if err != nil {
 		t.Fatalf("Install: %v", err)
 	}
@@ -316,7 +316,7 @@ func TestInstaller_Cleanup_PreservesGenericScript(t *testing.T) {
 	hookDir := filepath.Join(tmpDir, "claude")
 	installer := NewInstaller(tmpDir)
 
-	jsonlPath, err := installer.Install("s-test", "claude", hookDir)
+	jsonlPath, err := installer.Install("s-test", "claude_hooks", hookDir)
 	if err != nil {
 		t.Fatalf("Install: %v", err)
 	}

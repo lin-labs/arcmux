@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"time"
 
 	arcmuxv1 "github.com/lin-labs/arcmux/gen/arcmux/v1"
@@ -175,6 +176,26 @@ func (s *GRPCServer) ListSessions(ctx context.Context, req *arcmuxv1.ListSession
 		})
 	}
 
+	return resp, nil
+}
+
+func (s *GRPCServer) ListAgents(ctx context.Context, req *arcmuxv1.ListAgentsRequest) (*arcmuxv1.ListAgentsResponse, error) {
+	profiles := s.daemon.ListAgentProfiles()
+	resp := &arcmuxv1.ListAgentsResponse{
+		Agents: make([]*arcmuxv1.AgentInfo, 0, len(profiles)),
+	}
+	for name, prof := range profiles {
+		resp.Agents = append(resp.Agents, &arcmuxv1.AgentInfo{
+			Name:         name,
+			Class:        prof.Class,
+			Transport:    prof.Transport,
+			ExecDriver:   prof.ExecDriver,
+			HookType:     prof.HookType,
+			StartCommand: prof.StartCommand,
+			HookBacked:   prof.HookBacked(),
+		})
+	}
+	sort.Slice(resp.Agents, func(i, j int) bool { return resp.Agents[i].Name < resp.Agents[j].Name })
 	return resp, nil
 }
 

@@ -25,6 +25,7 @@ const (
 	AgentRuntime_Status_FullMethodName        = "/arcmux.v1.AgentRuntime/Status"
 	AgentRuntime_Kill_FullMethodName          = "/arcmux.v1.AgentRuntime/Kill"
 	AgentRuntime_ListSessions_FullMethodName  = "/arcmux.v1.AgentRuntime/ListSessions"
+	AgentRuntime_ListAgents_FullMethodName    = "/arcmux.v1.AgentRuntime/ListAgents"
 	AgentRuntime_StreamOutput_FullMethodName  = "/arcmux.v1.AgentRuntime/StreamOutput"
 	AgentRuntime_Subscribe_FullMethodName     = "/arcmux.v1.AgentRuntime/Subscribe"
 	AgentRuntime_Send_FullMethodName          = "/arcmux.v1.AgentRuntime/Send"
@@ -45,6 +46,9 @@ type AgentRuntimeClient interface {
 	Status(ctx context.Context, in *StatusRequest, opts ...grpc.CallOption) (*StatusResponse, error)
 	Kill(ctx context.Context, in *KillRequest, opts ...grpc.CallOption) (*KillResponse, error)
 	ListSessions(ctx context.Context, in *ListSessionsRequest, opts ...grpc.CallOption) (*ListSessionsResponse, error)
+	// Discovery: enumerate the registered agent profiles (LLM classes and
+	// their interactive/exec modes) so callers don't need config access.
+	ListAgents(ctx context.Context, in *ListAgentsRequest, opts ...grpc.CallOption) (*ListAgentsResponse, error)
 	// Streaming
 	StreamOutput(ctx context.Context, in *StreamOutputRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[OutputChunk], error)
 	Subscribe(ctx context.Context, in *SubscribeRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Event], error)
@@ -119,6 +123,16 @@ func (c *agentRuntimeClient) ListSessions(ctx context.Context, in *ListSessionsR
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListSessionsResponse)
 	err := c.cc.Invoke(ctx, AgentRuntime_ListSessions_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentRuntimeClient) ListAgents(ctx context.Context, in *ListAgentsRequest, opts ...grpc.CallOption) (*ListAgentsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListAgentsResponse)
+	err := c.cc.Invoke(ctx, AgentRuntime_ListAgents_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -224,6 +238,9 @@ type AgentRuntimeServer interface {
 	Status(context.Context, *StatusRequest) (*StatusResponse, error)
 	Kill(context.Context, *KillRequest) (*KillResponse, error)
 	ListSessions(context.Context, *ListSessionsRequest) (*ListSessionsResponse, error)
+	// Discovery: enumerate the registered agent profiles (LLM classes and
+	// their interactive/exec modes) so callers don't need config access.
+	ListAgents(context.Context, *ListAgentsRequest) (*ListAgentsResponse, error)
 	// Streaming
 	StreamOutput(*StreamOutputRequest, grpc.ServerStreamingServer[OutputChunk]) error
 	Subscribe(*SubscribeRequest, grpc.ServerStreamingServer[Event]) error
@@ -261,6 +278,9 @@ func (UnimplementedAgentRuntimeServer) Kill(context.Context, *KillRequest) (*Kil
 }
 func (UnimplementedAgentRuntimeServer) ListSessions(context.Context, *ListSessionsRequest) (*ListSessionsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListSessions not implemented")
+}
+func (UnimplementedAgentRuntimeServer) ListAgents(context.Context, *ListAgentsRequest) (*ListAgentsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListAgents not implemented")
 }
 func (UnimplementedAgentRuntimeServer) StreamOutput(*StreamOutputRequest, grpc.ServerStreamingServer[OutputChunk]) error {
 	return status.Error(codes.Unimplemented, "method StreamOutput not implemented")
@@ -412,6 +432,24 @@ func _AgentRuntime_ListSessions_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AgentRuntime_ListAgents_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListAgentsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentRuntimeServer).ListAgents(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentRuntime_ListAgents_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentRuntimeServer).ListAgents(ctx, req.(*ListAgentsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _AgentRuntime_StreamOutput_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(StreamOutputRequest)
 	if err := stream.RecvMsg(m); err != nil {
@@ -554,6 +592,10 @@ var AgentRuntime_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListSessions",
 			Handler:    _AgentRuntime_ListSessions_Handler,
+		},
+		{
+			MethodName: "ListAgents",
+			Handler:    _AgentRuntime_ListAgents_Handler,
 		},
 		{
 			MethodName: "Send",

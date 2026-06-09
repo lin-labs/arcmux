@@ -1002,6 +1002,182 @@ func (x *SessionSummary) GetOwnerId() string {
 	return ""
 }
 
+type ListAgentsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListAgentsRequest) Reset() {
+	*x = ListAgentsRequest{}
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListAgentsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListAgentsRequest) ProtoMessage() {}
+
+func (x *ListAgentsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListAgentsRequest.ProtoReflect.Descriptor instead.
+func (*ListAgentsRequest) Descriptor() ([]byte, []int) {
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{14}
+}
+
+type ListAgentsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Agents        []*AgentInfo           `protobuf:"bytes,1,rep,name=agents,proto3" json:"agents,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListAgentsResponse) Reset() {
+	*x = ListAgentsResponse{}
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListAgentsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListAgentsResponse) ProtoMessage() {}
+
+func (x *ListAgentsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListAgentsResponse.ProtoReflect.Descriptor instead.
+func (*ListAgentsResponse) Descriptor() ([]byte, []int) {
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *ListAgentsResponse) GetAgents() []*AgentInfo {
+	if x != nil {
+		return x.Agents
+	}
+	return nil
+}
+
+// AgentInfo describes one registered agent profile. Profiles belonging to the
+// same LLM share a class: e.g. "grok" (transport=tmux) and "grok_exec"
+// (transport=exec) both carry class="grok". Callers picking a run mode for an
+// LLM filter by class + transport.
+type AgentInfo struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`                                     // profile name — the CreateSession `agent` value
+	Class         string                 `protobuf:"bytes,2,opt,name=class,proto3" json:"class,omitempty"`                                   // LLM class ("codex", "claude", "grok"); may be empty for custom profiles
+	Transport     string                 `protobuf:"bytes,3,opt,name=transport,proto3" json:"transport,omitempty"`                           // "tmux" (interactive pane) or "exec" (headless one-shot)
+	ExecDriver    string                 `protobuf:"bytes,4,opt,name=exec_driver,json=execDriver,proto3" json:"exec_driver,omitempty"`       // exec transport only: "codex_exec_json", "claude_print_stream_json", "grok_stream_json"
+	HookType      string                 `protobuf:"bytes,5,opt,name=hook_type,json=hookType,proto3" json:"hook_type,omitempty"`             // "claude_hooks", "codex_output", "grok_hooks", "screen_only", "structured_output"
+	StartCommand  string                 `protobuf:"bytes,6,opt,name=start_command,json=startCommand,proto3" json:"start_command,omitempty"` // tmux transport only: the command launched in the pane
+	HookBacked    bool                   `protobuf:"varint,7,opt,name=hook_backed,json=hookBacked,proto3" json:"hook_backed,omitempty"`      // true when delivery can be verified by the hooks judge
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AgentInfo) Reset() {
+	*x = AgentInfo{}
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AgentInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AgentInfo) ProtoMessage() {}
+
+func (x *AgentInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AgentInfo.ProtoReflect.Descriptor instead.
+func (*AgentInfo) Descriptor() ([]byte, []int) {
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *AgentInfo) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *AgentInfo) GetClass() string {
+	if x != nil {
+		return x.Class
+	}
+	return ""
+}
+
+func (x *AgentInfo) GetTransport() string {
+	if x != nil {
+		return x.Transport
+	}
+	return ""
+}
+
+func (x *AgentInfo) GetExecDriver() string {
+	if x != nil {
+		return x.ExecDriver
+	}
+	return ""
+}
+
+func (x *AgentInfo) GetHookType() string {
+	if x != nil {
+		return x.HookType
+	}
+	return ""
+}
+
+func (x *AgentInfo) GetStartCommand() string {
+	if x != nil {
+		return x.StartCommand
+	}
+	return ""
+}
+
+func (x *AgentInfo) GetHookBacked() bool {
+	if x != nil {
+		return x.HookBacked
+	}
+	return false
+}
+
 type StreamOutputRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
@@ -1011,7 +1187,7 @@ type StreamOutputRequest struct {
 
 func (x *StreamOutputRequest) Reset() {
 	*x = StreamOutputRequest{}
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[14]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1023,7 +1199,7 @@ func (x *StreamOutputRequest) String() string {
 func (*StreamOutputRequest) ProtoMessage() {}
 
 func (x *StreamOutputRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[14]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1036,7 +1212,7 @@ func (x *StreamOutputRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamOutputRequest.ProtoReflect.Descriptor instead.
 func (*StreamOutputRequest) Descriptor() ([]byte, []int) {
-	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{14}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *StreamOutputRequest) GetSessionId() string {
@@ -1056,7 +1232,7 @@ type OutputChunk struct {
 
 func (x *OutputChunk) Reset() {
 	*x = OutputChunk{}
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[15]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1068,7 +1244,7 @@ func (x *OutputChunk) String() string {
 func (*OutputChunk) ProtoMessage() {}
 
 func (x *OutputChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[15]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1081,7 +1257,7 @@ func (x *OutputChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OutputChunk.ProtoReflect.Descriptor instead.
 func (*OutputChunk) Descriptor() ([]byte, []int) {
-	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{15}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *OutputChunk) GetText() string {
@@ -1108,7 +1284,7 @@ type SubscribeRequest struct {
 
 func (x *SubscribeRequest) Reset() {
 	*x = SubscribeRequest{}
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[16]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1120,7 +1296,7 @@ func (x *SubscribeRequest) String() string {
 func (*SubscribeRequest) ProtoMessage() {}
 
 func (x *SubscribeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[16]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1133,7 +1309,7 @@ func (x *SubscribeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubscribeRequest.ProtoReflect.Descriptor instead.
 func (*SubscribeRequest) Descriptor() ([]byte, []int) {
-	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{16}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *SubscribeRequest) GetSessionId() string {
@@ -1164,7 +1340,7 @@ type Event struct {
 
 func (x *Event) Reset() {
 	*x = Event{}
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[17]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1176,7 +1352,7 @@ func (x *Event) String() string {
 func (*Event) ProtoMessage() {}
 
 func (x *Event) ProtoReflect() protoreflect.Message {
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[17]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1189,7 +1365,7 @@ func (x *Event) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Event.ProtoReflect.Descriptor instead.
 func (*Event) Descriptor() ([]byte, []int) {
-	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{17}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *Event) GetSessionId() string {
@@ -1269,7 +1445,7 @@ type SendRequest struct {
 
 func (x *SendRequest) Reset() {
 	*x = SendRequest{}
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[18]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1281,7 +1457,7 @@ func (x *SendRequest) String() string {
 func (*SendRequest) ProtoMessage() {}
 
 func (x *SendRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[18]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1294,7 +1470,7 @@ func (x *SendRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendRequest.ProtoReflect.Descriptor instead.
 func (*SendRequest) Descriptor() ([]byte, []int) {
-	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{18}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *SendRequest) GetSessionName() string {
@@ -1343,7 +1519,7 @@ type SendResponse struct {
 
 func (x *SendResponse) Reset() {
 	*x = SendResponse{}
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[19]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1355,7 +1531,7 @@ func (x *SendResponse) String() string {
 func (*SendResponse) ProtoMessage() {}
 
 func (x *SendResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[19]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1368,7 +1544,7 @@ func (x *SendResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendResponse.ProtoReflect.Descriptor instead.
 func (*SendResponse) Descriptor() ([]byte, []int) {
-	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{19}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *SendResponse) GetMsgId() string {
@@ -1402,7 +1578,7 @@ type PeekInboxRequest struct {
 
 func (x *PeekInboxRequest) Reset() {
 	*x = PeekInboxRequest{}
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[20]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1414,7 +1590,7 @@ func (x *PeekInboxRequest) String() string {
 func (*PeekInboxRequest) ProtoMessage() {}
 
 func (x *PeekInboxRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[20]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1427,7 +1603,7 @@ func (x *PeekInboxRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PeekInboxRequest.ProtoReflect.Descriptor instead.
 func (*PeekInboxRequest) Descriptor() ([]byte, []int) {
-	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{20}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *PeekInboxRequest) GetSessionName() string {
@@ -1453,7 +1629,7 @@ type PeekInboxResponse struct {
 
 func (x *PeekInboxResponse) Reset() {
 	*x = PeekInboxResponse{}
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[21]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1465,7 +1641,7 @@ func (x *PeekInboxResponse) String() string {
 func (*PeekInboxResponse) ProtoMessage() {}
 
 func (x *PeekInboxResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[21]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1478,7 +1654,7 @@ func (x *PeekInboxResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PeekInboxResponse.ProtoReflect.Descriptor instead.
 func (*PeekInboxResponse) Descriptor() ([]byte, []int) {
-	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{21}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *PeekInboxResponse) GetMessages() []*InboxMessage {
@@ -1500,7 +1676,7 @@ type InboxMessage struct {
 
 func (x *InboxMessage) Reset() {
 	*x = InboxMessage{}
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[22]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1512,7 +1688,7 @@ func (x *InboxMessage) String() string {
 func (*InboxMessage) ProtoMessage() {}
 
 func (x *InboxMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[22]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1525,7 +1701,7 @@ func (x *InboxMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InboxMessage.ProtoReflect.Descriptor instead.
 func (*InboxMessage) Descriptor() ([]byte, []int) {
-	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{22}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *InboxMessage) GetId() string {
@@ -1566,7 +1742,7 @@ type AckInboxRequest struct {
 
 func (x *AckInboxRequest) Reset() {
 	*x = AckInboxRequest{}
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[23]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1578,7 +1754,7 @@ func (x *AckInboxRequest) String() string {
 func (*AckInboxRequest) ProtoMessage() {}
 
 func (x *AckInboxRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[23]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1591,7 +1767,7 @@ func (x *AckInboxRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AckInboxRequest.ProtoReflect.Descriptor instead.
 func (*AckInboxRequest) Descriptor() ([]byte, []int) {
-	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{23}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *AckInboxRequest) GetSessionName() string {
@@ -1617,7 +1793,7 @@ type AckInboxResponse struct {
 
 func (x *AckInboxResponse) Reset() {
 	*x = AckInboxResponse{}
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[24]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1629,7 +1805,7 @@ func (x *AckInboxResponse) String() string {
 func (*AckInboxResponse) ProtoMessage() {}
 
 func (x *AckInboxResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[24]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1642,7 +1818,7 @@ func (x *AckInboxResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AckInboxResponse.ProtoReflect.Descriptor instead.
 func (*AckInboxResponse) Descriptor() ([]byte, []int) {
-	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{24}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *AckInboxResponse) GetAcked() bool {
@@ -1661,7 +1837,7 @@ type ReadyRequest struct {
 
 func (x *ReadyRequest) Reset() {
 	*x = ReadyRequest{}
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[25]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1673,7 +1849,7 @@ func (x *ReadyRequest) String() string {
 func (*ReadyRequest) ProtoMessage() {}
 
 func (x *ReadyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[25]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1686,7 +1862,7 @@ func (x *ReadyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadyRequest.ProtoReflect.Descriptor instead.
 func (*ReadyRequest) Descriptor() ([]byte, []int) {
-	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{25}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *ReadyRequest) GetSessionName() string {
@@ -1708,7 +1884,7 @@ type ReadyResponse struct {
 
 func (x *ReadyResponse) Reset() {
 	*x = ReadyResponse{}
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[26]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1720,7 +1896,7 @@ func (x *ReadyResponse) String() string {
 func (*ReadyResponse) ProtoMessage() {}
 
 func (x *ReadyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[26]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1733,7 +1909,7 @@ func (x *ReadyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadyResponse.ProtoReflect.Descriptor instead.
 func (*ReadyResponse) Descriptor() ([]byte, []int) {
-	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{26}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *ReadyResponse) GetReady() bool {
@@ -1776,7 +1952,7 @@ type QueryAuditRequest struct {
 
 func (x *QueryAuditRequest) Reset() {
 	*x = QueryAuditRequest{}
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[27]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1788,7 +1964,7 @@ func (x *QueryAuditRequest) String() string {
 func (*QueryAuditRequest) ProtoMessage() {}
 
 func (x *QueryAuditRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[27]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1801,7 +1977,7 @@ func (x *QueryAuditRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryAuditRequest.ProtoReflect.Descriptor instead.
 func (*QueryAuditRequest) Descriptor() ([]byte, []int) {
-	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{27}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *QueryAuditRequest) GetOwnerId() string {
@@ -1841,7 +2017,7 @@ type QueryAuditResponse struct {
 
 func (x *QueryAuditResponse) Reset() {
 	*x = QueryAuditResponse{}
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[28]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1853,7 +2029,7 @@ func (x *QueryAuditResponse) String() string {
 func (*QueryAuditResponse) ProtoMessage() {}
 
 func (x *QueryAuditResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[28]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1866,7 +2042,7 @@ func (x *QueryAuditResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryAuditResponse.ProtoReflect.Descriptor instead.
 func (*QueryAuditResponse) Descriptor() ([]byte, []int) {
-	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{28}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *QueryAuditResponse) GetEntries() []*AuditEntry {
@@ -1891,7 +2067,7 @@ type AuditEntry struct {
 
 func (x *AuditEntry) Reset() {
 	*x = AuditEntry{}
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[29]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1903,7 +2079,7 @@ func (x *AuditEntry) String() string {
 func (*AuditEntry) ProtoMessage() {}
 
 func (x *AuditEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_arcmux_v1_arcmux_proto_msgTypes[29]
+	mi := &file_arcmux_v1_arcmux_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1916,7 +2092,7 @@ func (x *AuditEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AuditEntry.ProtoReflect.Descriptor instead.
 func (*AuditEntry) Descriptor() ([]byte, []int) {
-	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{29}
+	return file_arcmux_v1_arcmux_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *AuditEntry) GetTimestamp() string {
@@ -2066,7 +2242,20 @@ const file_arcmux_v1_arcmux_proto_rawDesc = "" +
 	"\n" +
 	"started_at\x18\x06 \x01(\tR\tstartedAt\x12!\n" +
 	"\fsession_name\x18\a \x01(\tR\vsessionName\x12\x19\n" +
-	"\bowner_id\x18\b \x01(\tR\aownerId\"4\n" +
+	"\bowner_id\x18\b \x01(\tR\aownerId\"\x13\n" +
+	"\x11ListAgentsRequest\"B\n" +
+	"\x12ListAgentsResponse\x12,\n" +
+	"\x06agents\x18\x01 \x03(\v2\x14.arcmux.v1.AgentInfoR\x06agents\"\xd7\x01\n" +
+	"\tAgentInfo\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
+	"\x05class\x18\x02 \x01(\tR\x05class\x12\x1c\n" +
+	"\ttransport\x18\x03 \x01(\tR\ttransport\x12\x1f\n" +
+	"\vexec_driver\x18\x04 \x01(\tR\n" +
+	"execDriver\x12\x1b\n" +
+	"\thook_type\x18\x05 \x01(\tR\bhookType\x12#\n" +
+	"\rstart_command\x18\x06 \x01(\tR\fstartCommand\x12\x1f\n" +
+	"\vhook_backed\x18\a \x01(\bR\n" +
+	"hookBacked\"4\n" +
 	"\x13StreamOutputRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\"?\n" +
@@ -2142,7 +2331,7 @@ const file_arcmux_v1_arcmux_proto_rawDesc = "" +
 	"\x06detail\x18\a \x03(\v2!.arcmux.v1.AuditEntry.DetailEntryR\x06detail\x1a9\n" +
 	"\vDetailEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x012\x8d\a\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x012\xd8\a\n" +
 	"\fAgentRuntime\x12R\n" +
 	"\rCreateSession\x12\x1f.arcmux.v1.CreateSessionRequest\x1a .arcmux.v1.CreateSessionResponse\x12I\n" +
 	"\n" +
@@ -2150,7 +2339,9 @@ const file_arcmux_v1_arcmux_proto_rawDesc = "" +
 	"\aCapture\x12\x19.arcmux.v1.CaptureRequest\x1a\x1a.arcmux.v1.CaptureResponse\x12=\n" +
 	"\x06Status\x12\x18.arcmux.v1.StatusRequest\x1a\x19.arcmux.v1.StatusResponse\x127\n" +
 	"\x04Kill\x12\x16.arcmux.v1.KillRequest\x1a\x17.arcmux.v1.KillResponse\x12O\n" +
-	"\fListSessions\x12\x1e.arcmux.v1.ListSessionsRequest\x1a\x1f.arcmux.v1.ListSessionsResponse\x12H\n" +
+	"\fListSessions\x12\x1e.arcmux.v1.ListSessionsRequest\x1a\x1f.arcmux.v1.ListSessionsResponse\x12I\n" +
+	"\n" +
+	"ListAgents\x12\x1c.arcmux.v1.ListAgentsRequest\x1a\x1d.arcmux.v1.ListAgentsResponse\x12H\n" +
 	"\fStreamOutput\x12\x1e.arcmux.v1.StreamOutputRequest\x1a\x16.arcmux.v1.OutputChunk0\x01\x12<\n" +
 	"\tSubscribe\x12\x1b.arcmux.v1.SubscribeRequest\x1a\x10.arcmux.v1.Event0\x01\x127\n" +
 	"\x04Send\x12\x16.arcmux.v1.SendRequest\x1a\x17.arcmux.v1.SendResponse\x12F\n" +
@@ -2172,7 +2363,7 @@ func file_arcmux_v1_arcmux_proto_rawDescGZIP() []byte {
 	return file_arcmux_v1_arcmux_proto_rawDescData
 }
 
-var file_arcmux_v1_arcmux_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
+var file_arcmux_v1_arcmux_proto_msgTypes = make([]protoimpl.MessageInfo, 36)
 var file_arcmux_v1_arcmux_proto_goTypes = []any{
 	(*CreateSessionRequest)(nil),  // 0: arcmux.v1.CreateSessionRequest
 	(*CreateSessionResponse)(nil), // 1: arcmux.v1.CreateSessionResponse
@@ -2188,65 +2379,71 @@ var file_arcmux_v1_arcmux_proto_goTypes = []any{
 	(*ListSessionsRequest)(nil),   // 11: arcmux.v1.ListSessionsRequest
 	(*ListSessionsResponse)(nil),  // 12: arcmux.v1.ListSessionsResponse
 	(*SessionSummary)(nil),        // 13: arcmux.v1.SessionSummary
-	(*StreamOutputRequest)(nil),   // 14: arcmux.v1.StreamOutputRequest
-	(*OutputChunk)(nil),           // 15: arcmux.v1.OutputChunk
-	(*SubscribeRequest)(nil),      // 16: arcmux.v1.SubscribeRequest
-	(*Event)(nil),                 // 17: arcmux.v1.Event
-	(*SendRequest)(nil),           // 18: arcmux.v1.SendRequest
-	(*SendResponse)(nil),          // 19: arcmux.v1.SendResponse
-	(*PeekInboxRequest)(nil),      // 20: arcmux.v1.PeekInboxRequest
-	(*PeekInboxResponse)(nil),     // 21: arcmux.v1.PeekInboxResponse
-	(*InboxMessage)(nil),          // 22: arcmux.v1.InboxMessage
-	(*AckInboxRequest)(nil),       // 23: arcmux.v1.AckInboxRequest
-	(*AckInboxResponse)(nil),      // 24: arcmux.v1.AckInboxResponse
-	(*ReadyRequest)(nil),          // 25: arcmux.v1.ReadyRequest
-	(*ReadyResponse)(nil),         // 26: arcmux.v1.ReadyResponse
-	(*QueryAuditRequest)(nil),     // 27: arcmux.v1.QueryAuditRequest
-	(*QueryAuditResponse)(nil),    // 28: arcmux.v1.QueryAuditResponse
-	(*AuditEntry)(nil),            // 29: arcmux.v1.AuditEntry
-	nil,                           // 30: arcmux.v1.CreateSessionRequest.EnvEntry
-	nil,                           // 31: arcmux.v1.Event.DataEntry
-	nil,                           // 32: arcmux.v1.AuditEntry.DetailEntry
+	(*ListAgentsRequest)(nil),     // 14: arcmux.v1.ListAgentsRequest
+	(*ListAgentsResponse)(nil),    // 15: arcmux.v1.ListAgentsResponse
+	(*AgentInfo)(nil),             // 16: arcmux.v1.AgentInfo
+	(*StreamOutputRequest)(nil),   // 17: arcmux.v1.StreamOutputRequest
+	(*OutputChunk)(nil),           // 18: arcmux.v1.OutputChunk
+	(*SubscribeRequest)(nil),      // 19: arcmux.v1.SubscribeRequest
+	(*Event)(nil),                 // 20: arcmux.v1.Event
+	(*SendRequest)(nil),           // 21: arcmux.v1.SendRequest
+	(*SendResponse)(nil),          // 22: arcmux.v1.SendResponse
+	(*PeekInboxRequest)(nil),      // 23: arcmux.v1.PeekInboxRequest
+	(*PeekInboxResponse)(nil),     // 24: arcmux.v1.PeekInboxResponse
+	(*InboxMessage)(nil),          // 25: arcmux.v1.InboxMessage
+	(*AckInboxRequest)(nil),       // 26: arcmux.v1.AckInboxRequest
+	(*AckInboxResponse)(nil),      // 27: arcmux.v1.AckInboxResponse
+	(*ReadyRequest)(nil),          // 28: arcmux.v1.ReadyRequest
+	(*ReadyResponse)(nil),         // 29: arcmux.v1.ReadyResponse
+	(*QueryAuditRequest)(nil),     // 30: arcmux.v1.QueryAuditRequest
+	(*QueryAuditResponse)(nil),    // 31: arcmux.v1.QueryAuditResponse
+	(*AuditEntry)(nil),            // 32: arcmux.v1.AuditEntry
+	nil,                           // 33: arcmux.v1.CreateSessionRequest.EnvEntry
+	nil,                           // 34: arcmux.v1.Event.DataEntry
+	nil,                           // 35: arcmux.v1.AuditEntry.DetailEntry
 }
 var file_arcmux_v1_arcmux_proto_depIdxs = []int32{
-	30, // 0: arcmux.v1.CreateSessionRequest.env:type_name -> arcmux.v1.CreateSessionRequest.EnvEntry
+	33, // 0: arcmux.v1.CreateSessionRequest.env:type_name -> arcmux.v1.CreateSessionRequest.EnvEntry
 	8,  // 1: arcmux.v1.StatusResponse.hook_state:type_name -> arcmux.v1.HookState
 	13, // 2: arcmux.v1.ListSessionsResponse.sessions:type_name -> arcmux.v1.SessionSummary
-	31, // 3: arcmux.v1.Event.data:type_name -> arcmux.v1.Event.DataEntry
-	22, // 4: arcmux.v1.PeekInboxResponse.messages:type_name -> arcmux.v1.InboxMessage
-	29, // 5: arcmux.v1.QueryAuditResponse.entries:type_name -> arcmux.v1.AuditEntry
-	32, // 6: arcmux.v1.AuditEntry.detail:type_name -> arcmux.v1.AuditEntry.DetailEntry
-	0,  // 7: arcmux.v1.AgentRuntime.CreateSession:input_type -> arcmux.v1.CreateSessionRequest
-	2,  // 8: arcmux.v1.AgentRuntime.SendPrompt:input_type -> arcmux.v1.SendPromptRequest
-	4,  // 9: arcmux.v1.AgentRuntime.Capture:input_type -> arcmux.v1.CaptureRequest
-	6,  // 10: arcmux.v1.AgentRuntime.Status:input_type -> arcmux.v1.StatusRequest
-	9,  // 11: arcmux.v1.AgentRuntime.Kill:input_type -> arcmux.v1.KillRequest
-	11, // 12: arcmux.v1.AgentRuntime.ListSessions:input_type -> arcmux.v1.ListSessionsRequest
-	14, // 13: arcmux.v1.AgentRuntime.StreamOutput:input_type -> arcmux.v1.StreamOutputRequest
-	16, // 14: arcmux.v1.AgentRuntime.Subscribe:input_type -> arcmux.v1.SubscribeRequest
-	18, // 15: arcmux.v1.AgentRuntime.Send:input_type -> arcmux.v1.SendRequest
-	20, // 16: arcmux.v1.AgentRuntime.PeekInbox:input_type -> arcmux.v1.PeekInboxRequest
-	23, // 17: arcmux.v1.AgentRuntime.AckInbox:input_type -> arcmux.v1.AckInboxRequest
-	25, // 18: arcmux.v1.AgentRuntime.Ready:input_type -> arcmux.v1.ReadyRequest
-	27, // 19: arcmux.v1.AgentRuntime.QueryAudit:input_type -> arcmux.v1.QueryAuditRequest
-	1,  // 20: arcmux.v1.AgentRuntime.CreateSession:output_type -> arcmux.v1.CreateSessionResponse
-	3,  // 21: arcmux.v1.AgentRuntime.SendPrompt:output_type -> arcmux.v1.SendPromptResponse
-	5,  // 22: arcmux.v1.AgentRuntime.Capture:output_type -> arcmux.v1.CaptureResponse
-	7,  // 23: arcmux.v1.AgentRuntime.Status:output_type -> arcmux.v1.StatusResponse
-	10, // 24: arcmux.v1.AgentRuntime.Kill:output_type -> arcmux.v1.KillResponse
-	12, // 25: arcmux.v1.AgentRuntime.ListSessions:output_type -> arcmux.v1.ListSessionsResponse
-	15, // 26: arcmux.v1.AgentRuntime.StreamOutput:output_type -> arcmux.v1.OutputChunk
-	17, // 27: arcmux.v1.AgentRuntime.Subscribe:output_type -> arcmux.v1.Event
-	19, // 28: arcmux.v1.AgentRuntime.Send:output_type -> arcmux.v1.SendResponse
-	21, // 29: arcmux.v1.AgentRuntime.PeekInbox:output_type -> arcmux.v1.PeekInboxResponse
-	24, // 30: arcmux.v1.AgentRuntime.AckInbox:output_type -> arcmux.v1.AckInboxResponse
-	26, // 31: arcmux.v1.AgentRuntime.Ready:output_type -> arcmux.v1.ReadyResponse
-	28, // 32: arcmux.v1.AgentRuntime.QueryAudit:output_type -> arcmux.v1.QueryAuditResponse
-	20, // [20:33] is the sub-list for method output_type
-	7,  // [7:20] is the sub-list for method input_type
-	7,  // [7:7] is the sub-list for extension type_name
-	7,  // [7:7] is the sub-list for extension extendee
-	0,  // [0:7] is the sub-list for field type_name
+	16, // 3: arcmux.v1.ListAgentsResponse.agents:type_name -> arcmux.v1.AgentInfo
+	34, // 4: arcmux.v1.Event.data:type_name -> arcmux.v1.Event.DataEntry
+	25, // 5: arcmux.v1.PeekInboxResponse.messages:type_name -> arcmux.v1.InboxMessage
+	32, // 6: arcmux.v1.QueryAuditResponse.entries:type_name -> arcmux.v1.AuditEntry
+	35, // 7: arcmux.v1.AuditEntry.detail:type_name -> arcmux.v1.AuditEntry.DetailEntry
+	0,  // 8: arcmux.v1.AgentRuntime.CreateSession:input_type -> arcmux.v1.CreateSessionRequest
+	2,  // 9: arcmux.v1.AgentRuntime.SendPrompt:input_type -> arcmux.v1.SendPromptRequest
+	4,  // 10: arcmux.v1.AgentRuntime.Capture:input_type -> arcmux.v1.CaptureRequest
+	6,  // 11: arcmux.v1.AgentRuntime.Status:input_type -> arcmux.v1.StatusRequest
+	9,  // 12: arcmux.v1.AgentRuntime.Kill:input_type -> arcmux.v1.KillRequest
+	11, // 13: arcmux.v1.AgentRuntime.ListSessions:input_type -> arcmux.v1.ListSessionsRequest
+	14, // 14: arcmux.v1.AgentRuntime.ListAgents:input_type -> arcmux.v1.ListAgentsRequest
+	17, // 15: arcmux.v1.AgentRuntime.StreamOutput:input_type -> arcmux.v1.StreamOutputRequest
+	19, // 16: arcmux.v1.AgentRuntime.Subscribe:input_type -> arcmux.v1.SubscribeRequest
+	21, // 17: arcmux.v1.AgentRuntime.Send:input_type -> arcmux.v1.SendRequest
+	23, // 18: arcmux.v1.AgentRuntime.PeekInbox:input_type -> arcmux.v1.PeekInboxRequest
+	26, // 19: arcmux.v1.AgentRuntime.AckInbox:input_type -> arcmux.v1.AckInboxRequest
+	28, // 20: arcmux.v1.AgentRuntime.Ready:input_type -> arcmux.v1.ReadyRequest
+	30, // 21: arcmux.v1.AgentRuntime.QueryAudit:input_type -> arcmux.v1.QueryAuditRequest
+	1,  // 22: arcmux.v1.AgentRuntime.CreateSession:output_type -> arcmux.v1.CreateSessionResponse
+	3,  // 23: arcmux.v1.AgentRuntime.SendPrompt:output_type -> arcmux.v1.SendPromptResponse
+	5,  // 24: arcmux.v1.AgentRuntime.Capture:output_type -> arcmux.v1.CaptureResponse
+	7,  // 25: arcmux.v1.AgentRuntime.Status:output_type -> arcmux.v1.StatusResponse
+	10, // 26: arcmux.v1.AgentRuntime.Kill:output_type -> arcmux.v1.KillResponse
+	12, // 27: arcmux.v1.AgentRuntime.ListSessions:output_type -> arcmux.v1.ListSessionsResponse
+	15, // 28: arcmux.v1.AgentRuntime.ListAgents:output_type -> arcmux.v1.ListAgentsResponse
+	18, // 29: arcmux.v1.AgentRuntime.StreamOutput:output_type -> arcmux.v1.OutputChunk
+	20, // 30: arcmux.v1.AgentRuntime.Subscribe:output_type -> arcmux.v1.Event
+	22, // 31: arcmux.v1.AgentRuntime.Send:output_type -> arcmux.v1.SendResponse
+	24, // 32: arcmux.v1.AgentRuntime.PeekInbox:output_type -> arcmux.v1.PeekInboxResponse
+	27, // 33: arcmux.v1.AgentRuntime.AckInbox:output_type -> arcmux.v1.AckInboxResponse
+	29, // 34: arcmux.v1.AgentRuntime.Ready:output_type -> arcmux.v1.ReadyResponse
+	31, // 35: arcmux.v1.AgentRuntime.QueryAudit:output_type -> arcmux.v1.QueryAuditResponse
+	22, // [22:36] is the sub-list for method output_type
+	8,  // [8:22] is the sub-list for method input_type
+	8,  // [8:8] is the sub-list for extension type_name
+	8,  // [8:8] is the sub-list for extension extendee
+	0,  // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_arcmux_v1_arcmux_proto_init() }
@@ -2260,7 +2457,7 @@ func file_arcmux_v1_arcmux_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_arcmux_v1_arcmux_proto_rawDesc), len(file_arcmux_v1_arcmux_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   33,
+			NumMessages:   36,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
