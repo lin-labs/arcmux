@@ -1,0 +1,7 @@
+# Beads interchange files are unordered, id-keyed JSONL sets that `bd` re-exports
+# (sorted) and reconciles on import by newest `updated_at`. Git's default
+# line-merge spuriously conflicts on every divergent commit during a rebase —
+# adjacent issue/event insertions overlap even when records are independent.
+# The built-in `union` driver concatenates both sides instead of conflicting;
+# run `bd import .beads/issues.jsonl` afterward to dedupe any same-id double.
+.beads/*.jsonl merge=union
