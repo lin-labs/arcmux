@@ -1,25 +1,37 @@
-# Centralized arcmux state — subscriber contract
+# Centralized mux state — subscriber contract
 
-`~/data/arcmux/` is the single, centralized state root any application can
-read to observe arcmux-managed agent sessions — arcmux itself, mission-control,
-elonco, or future subscribers. Agents' native hooks write here **once**, via
-the `arcmux hook` CLI; subscribers read files instead of installing their own
-per-app hooks.
+`~/data/mux/` is the **protocol** state root: the shared, runtime-agnostic
+place where agents' native lifecycle hooks land, readable by any application
+— arcmux, mission-control, cmux, or future subscribers. It is deliberately
+named after the protocol (mux), not any one application: arcmux is today's
+producer, but the contract is the files, not the binary. Agents' hooks write
+here **once**, via the `arcmux hook` CLI; subscribers read files instead of
+installing their own per-app hooks.
+
+Application-private state stays application-named: `~/data/arcmux/` keeps
+arcmux's own substrate (profile registry, bbolt stores) and is not part of
+this contract.
 
 ## Layout
 
 | Path | What | Writer | Readers |
 |---|---|---|---|
-| `~/data/arcmux/sessions/<session_id>.json` | Per-session hook state doc (see schema) | `arcmux hook` (locked read-modify-write); seeded/archived by the daemon | hooks judge, mission-control, anyone |
-| `~/data/arcmux/sessions/archived/<session_id>.json` | State docs of ended sessions | daemon | anyone |
-| `<hook_output_dir>/arcmux-hooks-<session_id>.jsonl` | Raw per-session hook event audit (append-only JSONL) | generic hook script | daemon watcher, anyone |
-| `~/data/arcmux/profiles/index.json` | Daemon-profile registry (which daemons exist, sockets) | arcmux manager | anyone |
-| `~/data/arcmux/<project>/state.bolt`, `~/data/arcmux/_daemon/state.bolt` | bbolt stores (inbox/audit substrate) | daemon only | via gRPC (`arcmux-cli audit/inbox/ready`), not raw |
+| `~/data/mux/sessions/<session_id>.json` | Per-session hook state doc (see schema) | `arcmux hook` (locked read-modify-write) ; seeded/archived by the daemon | hooks judge, mission-control, anyone |
+| `~/data/mux/sessions/archived/<session_id>.json` | State docs of ended sessions | daemon | anyone |
+| `~/data/mux/hook-output/arcmux-hooks-<session_id>.jsonl` | Raw per-session hook event audit (append-only JSONL) | generic hook script | daemon watcher, anyone |
 | `/tmp/arcmux/<session_id>.env` | Per-session env handoff (0600, ARCMUX_* allowlist) | daemon | `arcmux hook-env` only — never source raw |
 
-`hook_output_dir` defaults to `/tmp/arcmux-hooks` (config `[hooks]
-hook_output_dir`); the session state dir defaults to `~/data/arcmux/sessions`
-(config `[hooks] session_state_dir`).
+Config keys: `[hooks] session_state_dir` (default `~/data/mux/sessions`) and
+`[hooks] hook_output_dir` (default `~/data/mux/hook-output`).
+
+**Not part of the protocol** (arcmux-private, read via gRPC not raw files):
+`~/data/arcmux/profiles/index.json` (daemon-profile registry),
+`~/data/arcmux/<project>/state.bolt` and `~/data/arcmux/_daemon/state.bolt`
+(inbox/audit substrate — `arcmux-cli audit/inbox/ready`).
+
+**Legacy migration:** state previously lived at `~/data/arcmux/sessions`; the
+daemon sweeps any remaining legacy docs into `~/data/mux/sessions` on every
+startup (idempotent, never overwrites the new location).
 
 ## Session state doc schema (`sessions/<id>.json`)
 

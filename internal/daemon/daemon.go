@@ -141,6 +141,19 @@ func (d *Daemon) Start(ctx context.Context) error {
 	if err := os.MkdirAll(d.cfg.Hooks.HookOutputDir, 0o755); err != nil {
 		return fmt.Errorf("create hook output dir: %w", err)
 	}
+	// Coded migration: the session-state contract moved from the
+	// application-named ~/data/arcmux/sessions to the protocol dir
+	// ~/data/mux/sessions. Sweep legacy docs across on every startup while
+	// running on defaults (idempotent, best-effort; overridden configs are
+	// the operator's business).
+	if d.cfg.Hooks.SessionStateDir == config.DefaultSessionStateDir() {
+		if n, err := hooks.MigrateLegacySessionState(config.LegacySessionStateDir(), d.cfg.Hooks.SessionStateDir); err != nil {
+			d.logger.Warn("legacy session-state migration incomplete (non-fatal)", "error", err)
+		} else if n > 0 {
+			d.logger.Info("migrated legacy session-state docs to protocol dir",
+				"moved", n, "from", config.LegacySessionStateDir(), "to", d.cfg.Hooks.SessionStateDir)
+		}
+	}
 	// Sweep legacy per-session hook scripts (arcmux-s-*.sh) left by the old
 	// generator, then materialize the single generic hook. Both are coded
 	// migrations, not one-off shell cleanup: they run on every startup,

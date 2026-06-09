@@ -21,8 +21,13 @@ func TestDeliveryDefaults(t *testing.T) {
 	if cfg.Hooks.SessionStateDir == "" || !filepath.IsAbs(cfg.Hooks.SessionStateDir) {
 		t.Fatalf("session_state_dir = %q, want absolute default", cfg.Hooks.SessionStateDir)
 	}
-	if !strings.HasSuffix(cfg.Hooks.SessionStateDir, filepath.Join("arcmux", "sessions")) {
-		t.Fatalf("session_state_dir = %q, want .../arcmux/sessions", cfg.Hooks.SessionStateDir)
+	// ~/data/mux is the PROTOCOL state root — shared by every subscriber,
+	// deliberately not named after this application.
+	if !strings.HasSuffix(cfg.Hooks.SessionStateDir, filepath.Join("mux", "sessions")) {
+		t.Fatalf("session_state_dir = %q, want .../mux/sessions", cfg.Hooks.SessionStateDir)
+	}
+	if !strings.HasSuffix(cfg.Hooks.HookOutputDir, filepath.Join("mux", "hook-output")) {
+		t.Fatalf("hook_output_dir = %q, want .../mux/hook-output", cfg.Hooks.HookOutputDir)
 	}
 }
 

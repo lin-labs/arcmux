@@ -28,9 +28,9 @@ const (
 	ExecDriverClaudePrintStreamJSON = "claude_print_stream_json"
 	ExecDriverGrokStreamJSON        = "grok_stream_json"
 
-	// Hook types. Hook-backed types feed the centralized session state under
-	// ~/data/arcmux (via the `arcmux hook` CLI) that the hooks judge and any
-	// external subscriber read.
+	// Hook types. Hook-backed types feed the centralized protocol session
+	// state under ~/data/mux (via the `arcmux hook` CLI) that the hooks judge
+	// and any external subscriber read.
 	HookTypeClaude           = "claude_hooks"
 	HookTypeCodexOutput      = "codex_output"
 	HookTypeGrok             = "grok_hooks"

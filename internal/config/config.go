@@ -111,7 +111,9 @@ type HooksConfig struct {
 	HookOutputDir string `toml:"hook_output_dir"`
 	// SessionStateDir holds per-session hook state docs
 	// (<dir>/<id>.json, archived under <dir>/archived/). Default
-	// ~/data/arcmux/sessions. Read by the hooks judge; written by the
+	// ~/data/mux/sessions — the PROTOCOL state dir shared by every mux
+	// subscriber (mission-control, cmux, ...), deliberately not named after
+	// this application. Read by the hooks judge; written by the
 	// `arcmux hook` CLI and seeded/archived by the daemon.
 	SessionStateDir string `toml:"session_state_dir"`
 	AutoInstall     bool   `toml:"auto_install"`
@@ -155,7 +157,7 @@ func Load(path string) (*Config, error) {
 			ClaudeHookDir:   defaultClaudeHookDir(),
 			CodexHookDir:    defaultCodexHookDir(),
 			GrokHookDir:     defaultGrokHookDir(),
-			HookOutputDir:   "/tmp/arcmux-hooks",
+			HookOutputDir:   defaultHookOutputDir(),
 			SessionStateDir: defaultSessionStateDir(),
 			AutoInstall:     true,
 		},
@@ -212,11 +214,14 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 
-	// Fill an empty session_state_dir from the default so a partial [hooks]
-	// table doesn't zero it. (Runs after expandConfigPaths, so the default is
-	// already absolute.)
+	// Fill an empty session_state_dir / hook_output_dir from the defaults so a
+	// partial [hooks] table doesn't zero them. (Runs after expandConfigPaths,
+	// so the defaults are already absolute.)
 	if cfg.Hooks.SessionStateDir == "" {
 		cfg.Hooks.SessionStateDir = defaultSessionStateDir()
+	}
+	if cfg.Hooks.HookOutputDir == "" {
+		cfg.Hooks.HookOutputDir = defaultHookOutputDir()
 	}
 
 	if err := cfg.Delivery.Validate(); err != nil {
@@ -354,17 +359,38 @@ func DefaultAgentProfiles() map[string]profile.Profile {
 	return profile.DefaultProfiles()
 }
 
+// DefaultSessionStateDir exposes the protocol session-state default so the
+// daemon can detect "running on defaults" for the legacy migration sweep.
+func DefaultSessionStateDir() string { return defaultSessionStateDir() }
+
+// LegacySessionStateDir is the pre-protocol, application-named location
+// (~/data/arcmux/sessions). Only consulted by the migration sweep.
+func LegacySessionStateDir() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "data", "arcmux", "sessions")
+}
+
 func defaultLogDir() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".config", "arcmux", "logs")
 }
 
-// defaultSessionStateDir returns ~/data/arcmux/sessions — the persistent home
-// for per-session hook state docs, alongside the manager's
-// ~/data/arcmux/<project>/state.bolt convention.
+// defaultSessionStateDir returns ~/data/mux/sessions — the persistent home for
+// per-session hook state docs. ~/data/mux is the PROTOCOL state root (shared
+// with every subscriber: mission-control, cmux, future tools), distinct from
+// ~/data/arcmux/<project>/ which remains this application's private substrate.
 func defaultSessionStateDir() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "data", "arcmux", "sessions")
+	return filepath.Join(home, "data", "mux", "sessions")
+}
+
+// defaultHookOutputDir returns ~/data/mux/hook-output — the per-session raw
+// hook-event JSONL audit. Lives beside the session state docs (it used to
+// default to /tmp/arcmux-hooks, which silently lost the event trail on
+// reboot and was named after the app rather than the protocol).
+func defaultHookOutputDir() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "data", "mux", "hook-output")
 }
 
 func mergeAgentProfiles(defaults, loaded map[string]profile.Profile) map[string]profile.Profile {

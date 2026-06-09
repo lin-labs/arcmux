@@ -81,10 +81,11 @@ staticcheck ./... 2>/dev/null    # if installed
 
 ## Delivery judge ([delivery].judge)
 
-`[delivery].judge` selects exactly one prompt-delivery judge: `typesafe`
-(default), `hooks`, or `heuristic`. No automatic fallback between typesafe and
-hooks — flip to `hooks` only after it's proven in test + a few prod runs. Boot
-proof with hooks (isolated config, tmp socket/dirs):
+`[delivery].judge` defaults to `auto` — the cascade hooks → typesafe →
+heuristic, where hook events are ground truth and always win when the agent
+emits them. Pin `typesafe`, `hooks`, or `heuristic` only to bypass tiers
+deliberately. Boot proof with a pinned judge (isolated config, tmp
+socket/dirs):
 
 ```bash
 ./bin/arcmux start --config /tmp/cfg.toml   # expect log: "delivery judge selected" judge=hooks
@@ -94,7 +95,7 @@ proof with hooks (isolated config, tmp socket/dirs):
 ```
 
 The hooks judge reads per-session state at `<session_state_dir>/<id>.json`
-(default ~/data/arcmux/sessions), mutated by `arcmux hook` from the agent
+(default ~/data/mux/sessions — the protocol state root), mutated by `arcmux hook` from the agent
 hooks; archived to `sessions/archived/<id>.json` on unwatch. Codex hook
 registration in `~/.codex/hooks.json` is manual + trusted via codex `/hooks`.
 
