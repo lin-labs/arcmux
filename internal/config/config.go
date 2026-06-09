@@ -122,6 +122,7 @@ type HooksConfig struct {
 	// `arcmux hook` CLI and seeded/archived by the daemon.
 	SessionStateDir string `toml:"session_state_dir"`
 	AutoInstall     bool   `toml:"auto_install"`
+	AutoRegister    bool   `toml:"auto_register"`
 }
 
 // DefaultConfigPath returns ~/.config/arcmux/config.toml.
@@ -165,6 +166,7 @@ func Load(path string) (*Config, error) {
 			HookOutputDir:   defaultHookOutputDir(),
 			SessionStateDir: defaultSessionStateDir(),
 			AutoInstall:     true,
+			AutoRegister:    false,
 		},
 		Delivery: DeliveryConfig{
 			Judge: "auto",

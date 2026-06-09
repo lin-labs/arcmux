@@ -25,11 +25,33 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.Hooks.AutoInstall != true {
 		t.Error("AutoInstall should default to true")
 	}
+	if cfg.Hooks.AutoRegister {
+		t.Error("AutoRegister should default to false")
+	}
 	if len(cfg.Agents) == 0 {
 		t.Error("expected default agent profiles")
 	}
 	if _, ok := cfg.Agents["codex"]; !ok {
 		t.Error("expected codex in default profiles")
+	}
+}
+
+func TestLoad_HooksAutoRegisterOptIn(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(configPath, []byte("[hooks]\nauto_register = true\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Hooks.AutoRegister {
+		t.Fatal("AutoRegister should honor [hooks].auto_register = true")
+	}
+	if !cfg.Hooks.AutoInstall {
+		t.Fatal("AutoInstall default should survive partial [hooks] override")
 	}
 }
 

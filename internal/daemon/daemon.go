@@ -208,14 +208,17 @@ func (d *Daemon) Start(ctx context.Context) error {
 				d.logger.Info("ensured generic session hook", "path", hooks.GenericHookPath(d.cfg.Hooks.ClaudeHookDir))
 			}
 		}
-		// Materialize the codex bridge script (registration in codex config
-		// stays manual — see docs/codex-hooks-findings.md). Best-effort.
+		// Materialize the codex bridge script. Registration in codex config is
+		// opt-in via [hooks].auto_register because it mutates user config.
 		if filepath.IsAbs(d.cfg.Hooks.CodexHookDir) {
 			if err := d.hooks.EnsureCodexHook(d.cfg.Hooks.CodexHookDir); err != nil {
 				d.logger.Warn("codex hook install failed (non-fatal)", "error", err)
 			} else {
 				d.logger.Info("ensured codex bridge hook", "path", hooks.CodexHookPath(d.cfg.Hooks.CodexHookDir))
 			}
+		}
+		if d.cfg.Hooks.AutoRegister {
+			d.registerAgentHooks()
 		}
 		// Materialize the grok hook script + drop-in registration. Grok merges
 		// ~/.grok/hooks/*.json at session start (always trusted), so this is
@@ -1037,6 +1040,34 @@ func (d *Daemon) emitStateChanged(sessionID string, state session.State, message
 	// the session has already moved away from idle.
 	if state == session.StateIdle {
 		go d.drainInboxOnIdle(sessionID)
+	}
+}
+
+func (d *Daemon) registerAgentHooks() {
+	if !d.cfg.Hooks.AutoRegister {
+		return
+	}
+
+	if !filepath.IsAbs(d.cfg.Hooks.ClaudeHookDir) {
+		d.logger.Warn("claude hook registration skipped: claude hook dir is not absolute",
+			"hook_dir", d.cfg.Hooks.ClaudeHookDir)
+	} else if changed, err := hooks.RegisterClaudeHooks(d.cfg.Hooks.ClaudeHookDir); err != nil {
+		d.logger.Warn("claude hook registration skipped (non-fatal)",
+			"path", hooks.ClaudeSettingsPath(d.cfg.Hooks.ClaudeHookDir), "error", err)
+	} else if changed {
+		d.logger.Info("registered claude hook config",
+			"path", hooks.ClaudeSettingsPath(d.cfg.Hooks.ClaudeHookDir))
+	}
+
+	if !filepath.IsAbs(d.cfg.Hooks.CodexHookDir) {
+		d.logger.Warn("codex hook registration skipped: codex hook dir is not absolute",
+			"hook_dir", d.cfg.Hooks.CodexHookDir)
+	} else if changed, err := hooks.RegisterCodexHooks(d.cfg.Hooks.CodexHookDir); err != nil {
+		d.logger.Warn("codex hook registration skipped (non-fatal)",
+			"path", hooks.CodexHooksConfigPath(d.cfg.Hooks.CodexHookDir), "error", err)
+	} else if changed {
+		d.logger.Info("registered codex hook config",
+			"path", hooks.CodexHooksConfigPath(d.cfg.Hooks.CodexHookDir))
 	}
 }
 
