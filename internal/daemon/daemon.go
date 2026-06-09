@@ -534,7 +534,13 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 	id := generateSessionID()
 	name := req.Name
 	if name == "" {
-		name = fmt.Sprintf("%s-%s", req.Agent, id[2:10])
+		// Full id suffix, matching the HTTP path: id[2:10] is only the first 8
+		// digits of the nanosecond timestamp (~100s resolution), so two
+		// same-agent creates in that window generated IDENTICAL names — and
+		// with the same owner_id the idempotency check then returned caller
+		// A's session to caller B (observed live: a second `arcmux-cli exec`
+		// dispatch was misrouted into the first one's session).
+		name = fmt.Sprintf("%s-%s", req.Agent, id[2:])
 	}
 
 	// Idempotency check: if a non-terminal session already exists with the

@@ -266,6 +266,47 @@ printf '%s\n' '{"type":"assistant","session_id":"test-session","message":{"conte
 	}
 }
 
+// TestCreateSessionGeneratedNamesNeverCollide regresses the misrouting bug
+// found live: generated names used id[2:10] (an 8-digit timestamp prefix with
+// ~100s resolution), so two same-agent, same-owner creates in that window got
+// IDENTICAL names and the idempotency check handed caller A's session to
+// caller B (created=false), queueing B's prompt into the wrong session.
+func TestCreateSessionGeneratedNamesNeverCollide(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.Config{
+		Daemon: config.DaemonConfig{
+			Socket: filepath.Join(tmpDir, "arcmux.sock"),
+			LogDir: filepath.Join(tmpDir, "logs"),
+		},
+		Hooks: config.HooksConfig{
+			HookOutputDir: filepath.Join(tmpDir, "hooks"),
+		},
+		Agents: config.DefaultAgentProfiles(),
+	}
+	d := New(cfg, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	d.ctx = context.Background()
+
+	req := CreateSessionRequest{Agent: "codex_exec", CWD: tmpDir, OwnerID: "same-owner"}
+	a, createdA, err := d.createSessionWithIdempotency(context.Background(), req)
+	if err != nil {
+		t.Fatalf("create A: %v", err)
+	}
+	b, createdB, err := d.createSessionWithIdempotency(context.Background(), req)
+	if err != nil {
+		t.Fatalf("create B: %v", err)
+	}
+	if !createdA || !createdB {
+		t.Fatalf("both creates must be fresh (createdA=%v createdB=%v) — B was deduped into A", createdA, createdB)
+	}
+	snapA, snapB := a.Snapshot(), b.Snapshot()
+	if snapA.ID == snapB.ID {
+		t.Fatalf("same session returned twice: %s", snapA.ID)
+	}
+	if snapA.Name == snapB.Name {
+		t.Fatalf("generated names collided: %q", snapA.Name)
+	}
+}
+
 func TestCreateSessionPersistsExecSessionImmediately(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := &config.Config{
