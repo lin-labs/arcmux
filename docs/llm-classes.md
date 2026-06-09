@@ -73,8 +73,9 @@ arcmux-cli exec --agent grok --json --timeout 30m "..."  # structured result / l
 `exec` creates an exec-transport session (AutoClose unless `--keep`), delivers
 the prompt (the daemon spawns `codex exec` / `claude -p` / `grok -p`, parses
 the structured stream, and records the backend session/thread id for resume),
-waits for completion, and prints the final assistant message. The same
-session can alternate turns; each resume reuses the captured backend id.
+waits for completion, and prints the final assistant message. Successive
+exec turns on the same kept session resume the same backend thread (codex
+thread id / claude session id / grok sessionId, captured from the stream).
 
 ## Validation
 
