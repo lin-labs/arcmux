@@ -129,7 +129,7 @@ var nameSafe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 const (
 	codexRemoteServerAgent   = "codex"
-	codexRemoteServerCommand = "cdx remote-server"
+	codexRemoteServerCommand = "cdx remote-control"
 )
 
 // agentStartCommand returns the shell command that launches a remote-control

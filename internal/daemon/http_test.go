@@ -14,7 +14,7 @@ func TestAgentStartCommand(t *testing.T) {
 		wantContains string
 	}{
 		{"claude", true, "cld --remote-control"},
-		{"codex", true, "cdx remote-server"},
+		{"codex", true, "cdx remote-control"},
 		{"gemini", false, ""},
 		{"", false, ""},
 	}
@@ -41,7 +41,7 @@ func TestIsCodexRemoteServerSnapshot(t *testing.T) {
 	}{
 		{
 			name: "codex remote server",
-			snap: session.Snapshot{Agent: "codex", CurrentCommand: "cdx remote-server"},
+			snap: session.Snapshot{Agent: "codex", CurrentCommand: "cdx remote-control"},
 			want: true,
 		},
 		{
