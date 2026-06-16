@@ -30,9 +30,11 @@ changes across the two repos:
    capability: while a screen is in voice mode, arcmux captures it every second,
    stitches consecutive captures into a **deduplicated, append-only transcript**
    (the mission-control algorithm, ported to Go), and writes it to a per-session
-   log file. voxtop's `capture_pane` reads **that file** off local disk instead
-   of polling arcmux — so the brain gets deduped *history*, not just the current
-   frame, and voxtop holds no live screen connection to arcmux.
+   log file. **voxtop owns none of the capture mechanics** — no capture "types,"
+   no history flags, no live polling. It treats the file as a plain, ever-growing
+   text transcript (newest lines at the bottom) and reads whatever **line window**
+   it needs: the tail for "what's on screen now," earlier ranges to understand
+   how the agent got there. voxtop holds no live screen connection to arcmux.
 
 Keystrokes continue to flow through arcmux's existing `/session/send` (what
 `send_to_pane` already calls). arcmux adds **recording**; everything voice stays
@@ -43,8 +45,8 @@ in voxtop's babysit mode.
 | | Today (babysit) | After this design |
 |---|---|---|
 | Scope | project (`/babysit/new?project=`) | project **or** single screen (`/babysit/new?name=`) |
-| Screen read | live HTTP `/session/capture` per call | read arcmux's deduped recording log file (fallback to live capture) |
-| Screen freshness | one frame per poll | continuous 1s deduped transcript while recording |
+| Screen read | live HTTP `/session/capture` per call | read a **line window** of arcmux's deduped log file (no capture types, no live polling) |
+| Screen freshness | one frame per poll | continuous 1s deduped transcript while recording; newest at the bottom |
 | Send keys | arcmux `/session/send` | unchanged |
 | Confirm gate | two-phase in voxtop | unchanged |
 | Test client | `voxtop/scripts/smoke-babysit-ws.py` | extend it for single-screen contexts |
@@ -62,7 +64,7 @@ one-pane scope and recording turned on for that pane.
 | Recording lifecycle (enable/cancel/status), decoupled from any client | **arcmux** |
 | Single-screen babysit context (`/babysit/new?name=`) + screen-log path in context | **arcmux** |
 | `arcmux-cli voice …` + `--voice` (start recording, mint context, hand off) | **arcmux** |
-| `capture_pane` reads the recording log; single-screen scope handling | voxtop (babysit) |
+| Screen-read tool: read a **line window** of the log file (tail / range); single-screen scope handling | voxtop (babysit) |
 | Voice call, relay, converse WS, command rewrite, confirm gate, sanitization | voxtop (babysit) |
 | WebSocket test client | voxtop — extend `scripts/smoke-babysit-ws.py` |
 | Sending keys | arcmux's **existing** `/session/send` (unchanged) |
@@ -118,6 +120,14 @@ One goroutine per recorded session:
 `s-<id>.json` records (i.e. `~/data/arcmux/sessions/`), resolved via the existing
 session-state-dir resolver. **Kept on stop**; a fresh `start` truncates. Pruning
 is manual / out of scope.
+
+**Log format contract (what voxtop depends on):** a plain UTF-8 text file, one
+screen line per file line, **append-only with the newest content at the bottom**.
+No headers, no framing, no per-tick markers — just the deduped transcript, so any
+consumer can `tail`/seek/slice it by line with zero knowledge of how it was
+produced. This is the *entire* arcmux→voxtop screen interface. (Whether to
+interleave lightweight timestamps is a deferred open item; the MVP is bare
+lines.)
 
 ### 3. Recording lifecycle — decoupled from any client (key constraint)
 
@@ -175,7 +185,7 @@ arcmux-cli voice <name>
 voxtop babysit mode (single-screen scope)
   ├─ on connect: GET /babysit/context?context=<token>   (resolve scope + screen_logs)
   ├─ opens xAI realtime voice call
-  ├─ capture_pane → reads  <id>.screen.log   ← summarize "what's happening" (no live arcmux conn)
+  ├─ read_screen(tail N | lines A..B) → reads  <id>.screen.log   ← summarize "what's happening" (no live arcmux conn)
   └─ on a spoken command:  rewrite → keys → two-phase confirm → sanitize
        └─ send_to_pane → arcmux POST /session/send?name=<name>&text=…&confirm=1   (EXISTING)
             └─ keys land → next 1s tick records the result
@@ -211,15 +221,19 @@ voxtop babysit mode (single-screen scope)
    client-/context-decoupling tests.
 4. **Single-screen context** — `/babysit/new?name=` + `screen_logs` field.
 5. **Control surface** — gRPC RPCs, HTTP shims, `arcmux-cli voice …` + `--voice`.
-6. **voxtop babysit changes** (companion repo): `capture_pane` reads the screen
-   log; single-screen scope; extend `smoke-babysit-ws.py`.
+6. **voxtop babysit changes** (companion repo): replace `capture_pane`'s
+   capture-flag semantics with a `read_screen` tool that reads a line window of
+   the log file (tail / range); single-screen scope; extend `smoke-babysit-ws.py`.
 
 ## Open items (resolve in the plan / during build)
 
 - Confirm the session-state dir for the log (`~/data/arcmux/sessions/` vs. the
   protocol dir `~/data/mux/sessions/`; the `s-<id>.json` records are the anchor).
-- `capture_pane` log-read semantics in voxtop: tail-N lines vs. whole transcript;
-  fallback to live `/session/capture` when no recording log exists.
+- voxtop `read_screen` tool surface: which line-window params to expose to the
+  voice model (e.g. `tail N` and `lines from..to`) and sensible defaults so the
+  brain opens by reading the tail, then pages backward on demand. (Semantics
+  settled: line windows over the log; no live capture, no capture types.)
+- Whether to interleave lightweight timestamps in the log (MVP: bare lines).
 - Handoff mechanism for `arcmux-cli voice <name>` → voxtop.
 - Whether `--voice` exists on `exec`/attach paths or only interactive spawns.
 - Post-MVP: persist recording intent across daemon restarts; log rotation / size
