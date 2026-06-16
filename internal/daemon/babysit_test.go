@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -118,5 +119,39 @@ func TestConnectURLScheme(t *testing.T) {
 	}
 	if got := connectURL("", "tok"); got != "" {
 		t.Errorf("empty server should be empty url: %q", got)
+	}
+}
+
+func TestBabysitNewByName(t *testing.T) {
+	d, cleanup := newCreateSessionTestDaemon(t)
+	defer cleanup()
+
+	sessName := "alpha"
+	seedSession(d, "s-bs-1", sessName)
+	d.cfg.DataRoot = t.TempDir()
+	d.captureHook = func(_ context.Context, _ string, _ bool) (string, error) {
+		return "stable anchor line one\nstable anchor line two\n", nil
+	}
+
+	h := &HTTPServer{daemon: d}
+
+	rec := httptest.NewRecorder()
+	h.handleBabysitNew(rec, httptest.NewRequest("POST", "/babysit/new?name="+sessName, nil))
+	if rec.Code != 200 {
+		t.Fatalf("code %d body %s", rec.Code, rec.Body.String())
+	}
+	var resp babysitNewResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Panes) != 1 || resp.Panes[0].Name != sessName {
+		t.Fatalf("expected exactly the named pane, got %+v", resp.Panes)
+	}
+	if resp.ScreenLogs[sessName] == "" {
+		t.Fatalf("expected a screen_logs entry for %s, got %+v", sessName, resp.ScreenLogs)
+	}
+	// Minting by name enabled recording (decoupled — stays on).
+	if on, _, _ := d.RecordingStatus(resp.Panes[0].SessionID); !on {
+		t.Fatal("expected recording enabled after by-name mint")
 	}
 }

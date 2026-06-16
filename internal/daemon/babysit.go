@@ -28,15 +28,16 @@ type BabysitPane struct {
 // on connect to bring up a tool-ready voice call. Persisted (JSON) to the
 // daemon bbolt store under its Token, with lazy TTL expiry on read.
 type BabysitContext struct {
-	ContextID string        `json:"context_id"`
-	Token     string        `json:"token"`
-	Project   string        `json:"project"`
-	RepoCWD   string        `json:"repo_cwd,omitempty"`
-	PlanRefs  []string      `json:"plan_refs"`
-	Panes     []BabysitPane `json:"panes"`
-	Server    string        `json:"server,omitempty"`
-	CreatedAt time.Time     `json:"created_at"`
-	ExpiresAt time.Time     `json:"expires_at"`
+	ContextID  string            `json:"context_id"`
+	Token      string            `json:"token"`
+	Project    string            `json:"project"`
+	RepoCWD    string            `json:"repo_cwd,omitempty"`
+	PlanRefs   []string          `json:"plan_refs"`
+	Panes      []BabysitPane     `json:"panes"`
+	ScreenLogs map[string]string `json:"screen_logs,omitempty"` // pane name → screen-recording log path
+	Server     string            `json:"server,omitempty"`
+	CreatedAt  time.Time         `json:"created_at"`
+	ExpiresAt  time.Time         `json:"expires_at"`
 }
 
 func randomToken() (string, error) {
@@ -88,21 +89,89 @@ func connectURL(server, token string) string {
 }
 
 type babysitNewResponse struct {
-	ContextID  string        `json:"context_id"`
-	Token      string        `json:"token"`
-	Project    string        `json:"project"`
-	ConnectURL string        `json:"connect_url,omitempty"`
-	RepoCWD    string        `json:"repo_cwd,omitempty"`
-	PlanRefs   []string      `json:"plan_refs"`
-	Panes      []BabysitPane `json:"panes"`
-	ExpiresAt  string        `json:"expires_at"`
+	ContextID  string            `json:"context_id"`
+	Token      string            `json:"token"`
+	Project    string            `json:"project"`
+	ConnectURL string            `json:"connect_url,omitempty"`
+	RepoCWD    string            `json:"repo_cwd,omitempty"`
+	PlanRefs   []string          `json:"plan_refs"`
+	Panes      []BabysitPane     `json:"panes"`
+	ScreenLogs map[string]string `json:"screen_logs,omitempty"`
+	ExpiresAt  string            `json:"expires_at"`
 }
 
-// handleBabysitNew mints a project-scoped call context, persists it to the
-// daemon bbolt store with a TTL, and returns a connect handle. Query params:
-// project (required), server (optional voxtop host for connect_url), ttl
-// (optional seconds, default 600).
+// handleBabysitNew mints a call context, persists it to the daemon bbolt store
+// with a TTL, and returns a connect handle. Query params:
+//   - name (single-screen alternative): mints a context scoped to one named pane and enables recording.
+//   - project (project-scoped): mints a context for all panes matching the project slug.
+//   - server (optional voxtop host for connect_url), ttl (optional seconds, default 600).
 func (h *HTTPServer) handleBabysitNew(w http.ResponseWriter, r *http.Request) {
+	if name := r.URL.Query().Get("name"); name != "" {
+		sess := h.findByName(name)
+		if sess == nil {
+			writeJSON(w, http.StatusNotFound, errorResponse{Error: fmt.Sprintf("session not found: %s", name)})
+			return
+		}
+		snap := sess.Snapshot()
+		// Enable recording for this screen (decoupled from any voice client).
+		logPath, err := h.daemon.SetRecording(snap.ID, true)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: fmt.Sprintf("enable recording: %v", err)})
+			return
+		}
+		st := h.daemon.State()
+		if st == nil {
+			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "daemon state store unavailable"})
+			return
+		}
+		ttl := DefaultBabysitTTL
+		if v := r.URL.Query().Get("ttl"); v != "" {
+			if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+				ttl = time.Duration(secs) * time.Second
+			}
+		}
+		token, err := randomToken()
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "token generation failed"})
+			return
+		}
+		now := time.Now()
+		pane := BabysitPane{Name: snap.Name, SessionID: snap.ID, TmuxTarget: snap.TmuxTarget, State: string(snap.State), CWD: snap.CWD}
+		ctx := BabysitContext{
+			ContextID:  "ctx-" + token[:12],
+			Token:      token,
+			Project:    "screen:" + snap.Name,
+			RepoCWD:    snap.CWD,
+			Panes:      []BabysitPane{pane},
+			ScreenLogs: map[string]string{snap.Name: logPath},
+			Server:     r.URL.Query().Get("server"),
+			CreatedAt:  now,
+			ExpiresAt:  now.Add(ttl),
+		}
+		blob, err := json.Marshal(ctx)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "marshal context failed"})
+			return
+		}
+		if err := st.PutBabysitContext(token, blob); err != nil {
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: fmt.Sprintf("persist context: %v", err)})
+			return
+		}
+		h.daemon.logger.Info("babysit context minted (single screen)", "screen", snap.Name, "context_id", ctx.ContextID, "log", logPath)
+		writeJSON(w, http.StatusOK, babysitNewResponse{
+			ContextID:  ctx.ContextID,
+			Token:      token,
+			Project:    ctx.Project,
+			ConnectURL: connectURL(ctx.Server, token),
+			RepoCWD:    ctx.RepoCWD,
+			PlanRefs:   []string{},
+			Panes:      ctx.Panes,
+			ScreenLogs: ctx.ScreenLogs,
+			ExpiresAt:  ctx.ExpiresAt.Format(time.RFC3339),
+		})
+		return
+	}
+
 	st := h.daemon.State()
 	if st == nil {
 		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "daemon state store unavailable"})
