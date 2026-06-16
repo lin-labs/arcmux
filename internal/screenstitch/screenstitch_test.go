@@ -2,6 +2,7 @@ package screenstitch
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -55,5 +56,21 @@ func TestNewLinesScroll(t *testing.T) {
 	want := []string{"delta delta delta line"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %#v want %#v", got, want)
+	}
+}
+
+func TestMaskVolatileAndStatus(t *testing.T) {
+	if got := MaskVolatile("same line here", "same line here"); got != "same line here" {
+		t.Fatalf("equal lines unchanged, got %q", got)
+	}
+	m := MaskVolatile("Thinking (12s)", "Thinking (17s)")
+	if !strings.Contains(m, "§") || !strings.HasPrefix(m, "Thinking (") {
+		t.Fatalf("expected masked span with stable prefix, got %q", m)
+	}
+	if !isStatusUpdate("Working (1m9s 3.4k tokens)", "Working (1m14s 3.7k tokens)") {
+		t.Fatal("ticking status line should be a status update")
+	}
+	if isStatusUpdate("Working (1m9s 3.4k tokens)", "Let me look at the auth module instead") {
+		t.Fatal("a different line is not a status update")
 	}
 }

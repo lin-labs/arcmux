@@ -183,3 +183,76 @@ func NewLines(prev, cap []string) []string {
 	copy(out, cap)
 	return out
 }
+
+// MaskVolatile masks the differing span between two proven-same logical lines
+// with § (prefix§suffix). Equal lines pass through. Learned by diff — never a
+// hardcoded \d+s catalog.
+func MaskVolatile(a, b string) string {
+	if a == b {
+		return a
+	}
+	av := []rune(a)
+	bv := []rune(b)
+	p := 0
+	for p < len(av) && p < len(bv) && av[p] == bv[p] {
+		p++
+	}
+	sa, sb := len(av), len(bv)
+	for sa > p && sb > p && av[sa-1] == bv[sb-1] {
+		sa--
+		sb--
+	}
+	return string(av[:p]) + "§" + string(av[sa:])
+}
+
+// stableRatio: how much of a mask is stable (non-§) alphanumeric content.
+func stableRatio(mask string) float64 {
+	alnum, total := 0, 0
+	for _, c := range mask {
+		if !unicode.IsSpace(c) {
+			total++
+		}
+		if c < 128 && (unicode.IsLetter(c) || unicode.IsDigit(c)) {
+			alnum++
+		}
+	}
+	if total == 0 {
+		total = 1
+	}
+	return float64(alnum) / float64(total)
+}
+
+// isStatusUpdate: cur is the live status line if, vs prev's tail, it changed
+// only in volatile spans (shared skeleton).
+func isStatusUpdate(prevTail, curTail string) bool {
+	if prevTail == curTail {
+		return false
+	}
+	mask := MaskVolatile(prevTail, curTail)
+	return strings.Contains(mask, "§") && stableRatio(mask) >= 0.5
+}
+
+// lastNonblank returns the index of the last non-blank line, or -1.
+func lastNonblank(lines []string) int {
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) != "" {
+			return i
+		}
+	}
+	return -1
+}
+
+// sameSkeleton reports whether line is another tick of the status line whose
+// volatile skeleton is `prefix§suffix`.
+func sameSkeleton(line, skeleton string) bool {
+	prefix, suffix, found := strings.Cut(skeleton, "§")
+	if !found {
+		return false
+	}
+	lt := strings.TrimSpace(line)
+	pre := strings.TrimLeft(prefix, " \t")
+	suf := strings.TrimRight(suffix, " \t")
+	okPrefix := pre == "" || strings.HasPrefix(lt, pre)
+	okSuffix := suf == "" || strings.HasSuffix(lt, suf)
+	return okPrefix && okSuffix && len([]rune(lt)) >= len([]rune(strings.TrimSpace(prefix)))
+}
