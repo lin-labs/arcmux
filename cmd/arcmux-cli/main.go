@@ -33,13 +33,15 @@ func die(err error) {
 
 func main() {
 	if len(os.Args) < 2 {
-		die(fmt.Errorf("usage: arcmux-cli create|exec|agents|list|send|capture|status|kill|audit|inbox|ready [args]"))
+		die(fmt.Errorf("usage: arcmux-cli create|exec|agents|list|send|capture|status|kill|audit|inbox|ready|voice [args]"))
 	}
 	cmd := os.Args[1]
 
 	// Post-F11: audit/inbox/ready route through the daemon's gRPC. The
 	// dispatch lives inside each subcommand (its own --socket flag, its
 	// own dial helper) so it composes cleanly with the rest of the CLI.
+	// voice uses HTTP (not gRPC) and must be dispatched before the gRPC
+	// client is created.
 	switch cmd {
 	case "audit":
 		if err := cmdAudit(os.Args[2:], os.Stdout); err != nil {
@@ -53,6 +55,11 @@ func main() {
 		return
 	case "ready":
 		if err := cmdReady(os.Args[2:], os.Stdout); err != nil {
+			die(err)
+		}
+		return
+	case "voice":
+		if err := runVoice(os.Args[2:], voiceHTTPBase(), os.Stdout); err != nil {
 			die(err)
 		}
 		return
