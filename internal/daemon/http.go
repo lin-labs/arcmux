@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
@@ -33,6 +34,9 @@ func NewHTTPServer(d *Daemon, addr string) *HTTPServer {
 	mux.HandleFunc("/session/close", h.handleSessionClose)
 	mux.HandleFunc("/session/capture", h.handleSessionCapture)
 	mux.HandleFunc("/session/send", h.handleSessionSend)
+	mux.HandleFunc("/voice/record/start", h.handleVoiceRecordStart)
+	mux.HandleFunc("/voice/record/stop", h.handleVoiceRecordStop)
+	mux.HandleFunc("/voice/record/status", h.handleVoiceRecordStatus)
 	mux.HandleFunc("/sessions", h.handleSessionsList)
 	mux.HandleFunc("/babysit/new", h.handleBabysitNew)
 	mux.HandleFunc("/babysit/context", h.handleBabysitContext)
@@ -507,4 +511,76 @@ func (h *HTTPServer) findActiveCodexRemoteServer(ctx context.Context) *session.S
 
 func isCodexRemoteServerSnapshot(snap session.Snapshot) bool {
 	return snap.Agent == codexRemoteServerAgent && snap.CurrentCommand == codexRemoteServerCommand
+}
+
+type voiceRecordResponse struct {
+	Name      string `json:"name,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+	Recording bool   `json:"recording"`
+	LogPath   string `json:"log_path,omitempty"`
+	Since     string `json:"since,omitempty"`
+}
+
+func (h *HTTPServer) voiceSetRecording(w http.ResponseWriter, r *http.Request, on bool) {
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "missing name"})
+		return
+	}
+	sess := h.findByName(name)
+	if sess == nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: fmt.Sprintf("session not found: %s", name)})
+		return
+	}
+	snap := sess.Snapshot()
+	logPath, err := h.daemon.SetRecording(snap.ID, on)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: err.Error()})
+		return
+	}
+	recOn, _, since := h.daemon.RecordingStatus(snap.ID)
+	resp := voiceRecordResponse{Name: name, SessionID: snap.ID, Recording: recOn, LogPath: logPath}
+	if !since.IsZero() {
+		resp.Since = since.Format(time.RFC3339)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *HTTPServer) handleVoiceRecordStart(w http.ResponseWriter, r *http.Request) {
+	h.voiceSetRecording(w, r, true)
+}
+
+func (h *HTTPServer) handleVoiceRecordStop(w http.ResponseWriter, r *http.Request) {
+	h.voiceSetRecording(w, r, false)
+}
+
+func (h *HTTPServer) handleVoiceRecordStatus(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		// No name → list all recording sessions.
+		ids := h.daemon.recordingSessions()
+		out := make([]voiceRecordResponse, 0, len(ids))
+		for _, id := range ids {
+			on, lp, since := h.daemon.RecordingStatus(id)
+			vr := voiceRecordResponse{SessionID: id, Recording: on, LogPath: lp}
+			if !since.IsZero() {
+				vr.Since = since.Format(time.RFC3339)
+			}
+			out = append(out, vr)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"recording": out})
+		return
+	}
+	sess := h.findByName(name)
+	if sess == nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: fmt.Sprintf("session not found: %s", name)})
+		return
+	}
+	snap := sess.Snapshot()
+	on, lp, since := h.daemon.RecordingStatus(snap.ID)
+	resp := voiceRecordResponse{Name: name, SessionID: snap.ID, Recording: on, LogPath: lp}
+	if !since.IsZero() {
+		resp.Since = since.Format(time.RFC3339)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
