@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -361,6 +362,23 @@ func TestScreenLogDir(t *testing.T) {
 		}
 		cfg := &Config{}
 		got := cfg.ScreenLogDir()
+		want := filepath.Join(home, "data", "arcmux", "sessions")
+		if got != want {
+			t.Errorf("ScreenLogDir = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("tilde DataRoot is expanded by expandConfigPaths", func(t *testing.T) {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			t.Fatalf("UserHomeDir: %v", err)
+		}
+		cfg := &Config{DataRoot: "~/data"}
+		expandConfigPaths(cfg)
+		got := cfg.ScreenLogDir()
+		if strings.Contains(got, "~") {
+			t.Errorf("ScreenLogDir still contains literal ~: %q", got)
+		}
 		want := filepath.Join(home, "data", "arcmux", "sessions")
 		if got != want {
 			t.Errorf("ScreenLogDir = %q, want %q", got, want)

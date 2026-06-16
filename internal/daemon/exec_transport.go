@@ -341,6 +341,10 @@ func (d *Daemon) killExecSession(ctx context.Context, sess *session.Session, gra
 	d.mu.Lock()
 	delete(d.processes, snap.ID)
 	delete(d.monitors, snap.ID)
+	if r, ok := d.recorders[snap.ID]; ok {
+		delete(d.recorders, snap.ID)
+		go r.stop()
+	}
 	d.mu.Unlock()
 
 	sess.SetPID(0)

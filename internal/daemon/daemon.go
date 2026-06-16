@@ -1063,8 +1063,8 @@ func (d *Daemon) SetRecording(sessionID string, on bool) (string, error) {
 
 // RecordingStatus reports whether a session is being recorded and its log path.
 func (d *Daemon) RecordingStatus(sessionID string) (bool, string, time.Time) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	if r, ok := d.recorders[sessionID]; ok {
 		return true, r.logPath, r.startedAt
 	}
@@ -1073,8 +1073,8 @@ func (d *Daemon) RecordingStatus(sessionID string) (bool, string, time.Time) {
 
 // recordingSessions returns the IDs of all sessions currently recording.
 func (d *Daemon) recordingSessions() []string {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	out := make([]string, 0, len(d.recorders))
 	for id := range d.recorders {
 		out = append(out, id)

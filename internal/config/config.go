@@ -277,6 +277,7 @@ func expandConfigPaths(cfg *Config) {
 	cfg.Hooks.GrokHookDir = expandTilde(cfg.Hooks.GrokHookDir)
 	cfg.Hooks.HookOutputDir = expandTilde(cfg.Hooks.HookOutputDir)
 	cfg.Hooks.SessionStateDir = expandTilde(cfg.Hooks.SessionStateDir)
+	cfg.DataRoot = expandTilde(cfg.DataRoot)
 	cfg.Pulse.DataRoot = expandTilde(cfg.Pulse.DataRoot)
 	for name, prof := range cfg.Agents {
 		prof.HookDir = expandTilde(prof.HookDir)
