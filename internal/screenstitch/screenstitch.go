@@ -118,3 +118,68 @@ func isAnchor(line string) bool {
 	}
 	return len(distinct) >= AnchorMinDistinct
 }
+
+// uniqueAnchorIndex maps each anchor line that occurs exactly once → its index.
+// Repeated anchors are dropped (they can't cast an unambiguous vote).
+func uniqueAnchorIndex(frame []string) map[string]int {
+	count := map[string]int{}
+	idx := map[string]int{}
+	for i, line := range frame {
+		if !isAnchor(line) {
+			continue
+		}
+		count[line]++
+		idx[line] = i
+	}
+	for k := range idx {
+		if count[k] != 1 {
+			delete(idx, k)
+		}
+	}
+	return idx
+}
+
+// ScrollDelta returns how many lines cap advanced past prev, by anchor voting.
+// ok=false means no confident overlap (a gap, or unrelated frames).
+func ScrollDelta(prev, cap []string) (delta int, ok bool, votes int) {
+	pidx := uniqueAnchorIndex(prev)
+	cidx := uniqueAnchorIndex(cap)
+	tally := map[int]int{}
+	for line, i := range pidx {
+		if j, found := cidx[line]; found {
+			tally[i-j]++
+		}
+	}
+	bestD, bestN := 0, 0
+	for d, n := range tally {
+		if n > bestN {
+			bestD, bestN = d, n
+		}
+	}
+	if bestN >= MinAgreeingAnchors {
+		return bestD, true, bestN
+	}
+	return 0, false, 0
+}
+
+// NewLines returns the lines that scrolled in. No confident overlap → the whole
+// frame is new (a gap). delta 0 → nothing new. delta d>0 → the last d lines.
+func NewLines(prev, cap []string) []string {
+	d, ok, _ := ScrollDelta(prev, cap)
+	if !ok {
+		out := make([]string, len(cap))
+		copy(out, cap)
+		return out
+	}
+	if d == 0 {
+		return nil
+	}
+	if d > 0 && d <= len(cap) {
+		out := make([]string, d)
+		copy(out, cap[len(cap)-d:])
+		return out
+	}
+	out := make([]string, len(cap))
+	copy(out, cap)
+	return out
+}

@@ -27,3 +27,33 @@ func TestTranscriptRegionDropsComposer(t *testing.T) {
 		t.Fatalf("got %#v want %#v", got, want)
 	}
 }
+
+func TestScrollDeltaIdleTick(t *testing.T) {
+	prev := []string{
+		"the bug is a missing await in auth",
+		"patched the logout handler as well",
+		"working 1m9s 3.4k tokens",
+	}
+	cap := []string{
+		"the bug is a missing await in auth",
+		"patched the logout handler as well",
+		"working 1m14s 3.4k tokens",
+	}
+	d, ok, _ := ScrollDelta(prev, cap)
+	if !ok || d != 0 {
+		t.Fatalf("idle tick: got d=%d ok=%v, want 0,true", d, ok)
+	}
+	if got := NewLines(prev, cap); len(got) != 0 {
+		t.Fatalf("idle tick should yield no new lines, got %#v", got)
+	}
+}
+
+func TestNewLinesScroll(t *testing.T) {
+	prev := []string{"alpha alpha alpha line", "bravo bravo bravo line", "charlie charlie line"}
+	cap := []string{"bravo bravo bravo line", "charlie charlie line", "delta delta delta line"}
+	got := NewLines(prev, cap)
+	want := []string{"delta delta delta line"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %#v want %#v", got, want)
+	}
+}
