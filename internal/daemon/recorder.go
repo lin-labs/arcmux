@@ -5,7 +5,6 @@ import (
 	"context"
 	"log/slog"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -23,12 +22,11 @@ type recorder struct {
 	logger   *slog.Logger
 	merger   *screenstitch.Merger
 
-	mu         sync.Mutex
-	f          *os.File
-	w          *bufio.Writer
-	cancel     context.CancelFunc
-	done       chan struct{}
-	prevStatus string
+	mu     sync.Mutex
+	f      *os.File
+	w      *bufio.Writer
+	cancel context.CancelFunc
+	done   chan struct{}
 
 	startedAt time.Time
 }
@@ -83,32 +81,19 @@ func (r *recorder) tick(ctx context.Context) {
 		return
 	}
 	lines := r.merger.Ingest(raw)
-	status := r.merger.Status()
+	if len(lines) == 0 {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.w == nil {
 		return
 	}
-	wrote := false
 	for _, l := range lines {
-		if strings.TrimSpace(l) == "" {
-			continue
-		}
 		r.w.WriteString(l)
 		r.w.WriteByte('\n')
-		wrote = true
 	}
-	// Also emit the live status line when it transitions to a new value
-	// (the Merger tracks it separately when the heuristic fires).
-	if status != "" && status != r.prevStatus {
-		r.w.WriteString(status)
-		r.w.WriteByte('\n')
-		r.prevStatus = status
-		wrote = true
-	}
-	if wrote {
-		r.w.Flush()
-	}
+	r.w.Flush()
 }
 
 func (r *recorder) stop() {

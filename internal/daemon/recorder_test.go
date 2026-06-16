@@ -18,9 +18,9 @@ func TestRecorderAppendsDedupedLines(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "s-test.screen.log")
 	var tick int64
 	frames := []string{
-		"alpha alpha alpha line\nbravo bravo bravo line\n",           // frame 0: 2 new
-		"alpha alpha alpha line\nbravo bravo bravo line\n",           // frame 1: idle → 0 new
-		"bravo bravo bravo line\ncharlie charlie charlie line\n",     // frame 2: scroll → 1 new
+		"implement the auth handler\nfix the broken logout flow\nreview pending database migration\n",         // frame 0: 3 new
+		"implement the auth handler\nfix the broken logout flow\nreview pending database migration\n",         // frame 1: idle → 0 new
+		"fix the broken logout flow\nreview pending database migration\ndeploy the staging environment now\n", // frame 2: scroll-by-1 → 1 new
 	}
 	capture := func(context.Context) (string, error) {
 		i := atomic.AddInt64(&tick, 1) - 1
@@ -41,7 +41,12 @@ func TestRecorderAppendsDedupedLines(t *testing.T) {
 		t.Fatalf("read log: %v", err)
 	}
 	got := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
-	want := []string{"alpha alpha alpha line", "bravo bravo bravo line", "charlie charlie charlie line"}
+	want := []string{
+		"implement the auth handler",
+		"fix the broken logout flow",
+		"review pending database migration",
+		"deploy the staging environment now",
+	}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("log got %#v want %#v", got, want)
 	}

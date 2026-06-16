@@ -45,9 +45,14 @@ func StripUniversal(line string) string {
 	return strings.TrimRight(b.String(), " \t\r\n")
 }
 
-// Normalize splits a raw capture into stripped lines.
+// Normalize splits a raw capture into stripped lines. A trailing newline does
+// not yield a final empty element (matching Rust str::lines()), so the
+// transcript carries no phantom blank line.
 func Normalize(raw string) []string {
 	lines := strings.Split(raw, "\n")
+	if n := len(lines); n > 0 && lines[n-1] == "" {
+		lines = lines[:n-1]
+	}
 	out := make([]string, len(lines))
 	for i, l := range lines {
 		out[i] = StripUniversal(l)
