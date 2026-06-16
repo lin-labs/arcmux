@@ -256,3 +256,85 @@ func sameSkeleton(line, skeleton string) bool {
 	okSuffix := suf == "" || strings.HasSuffix(lt, suf)
 	return okPrefix && okSuffix && len([]rune(lt)) >= len([]rune(strings.TrimSpace(prefix)))
 }
+
+// Merger is a stateful accumulator: feed it raw captures, it returns only the
+// genuinely-new transcript lines and tracks the live status line separately.
+type Merger struct {
+	prevBody       []string
+	havePrev       bool
+	prevTail       string
+	havePrevTail   bool
+	statusSkeleton string
+	haveSkeleton   bool
+	transcript     []string
+	status         string
+	maxLines       int
+}
+
+// NewMerger returns a Merger retaining at most maxLines transcript lines
+// (0 = unbounded).
+func NewMerger(maxLines int) *Merger { return &Merger{maxLines: maxLines} }
+
+// Transcript returns the accumulated, deduplicated transcript.
+func (m *Merger) Transcript() []string { return m.transcript }
+
+// Status returns the current live status line, if any.
+func (m *Merger) Status() string { return m.status }
+
+// Ingest ingests one raw capture and returns the new transcript lines appended
+// this tick (nil on an idle tick).
+func (m *Merger) Ingest(raw string) []string {
+	region := TranscriptRegion(Normalize(raw))
+	body, status, haveStatus := m.splitStatus(region)
+
+	var appended []string
+	if !m.havePrev {
+		appended = append(appended, body...)
+	} else {
+		appended = NewLines(m.prevBody, body)
+	}
+
+	// Drop any stale copy of the live status line that scrolled up into history.
+	var kept []string
+	for _, l := range appended {
+		if m.haveSkeleton && sameSkeleton(l, m.statusSkeleton) {
+			continue
+		}
+		kept = append(kept, l)
+	}
+
+	m.transcript = append(m.transcript, kept...)
+	m.trim()
+
+	if li := lastNonblank(body); li >= 0 {
+		m.prevTail, m.havePrevTail = body[li], true
+	} else {
+		m.havePrevTail = false
+	}
+	m.prevBody, m.havePrev = body, true
+	m.status = status
+	_ = haveStatus
+	return kept
+}
+
+// splitStatus peels the live status line off the tail using the learned-volatile
+// test against the previous frame's tail.
+func (m *Merger) splitStatus(region []string) (body []string, status string, ok bool) {
+	li := lastNonblank(region)
+	if li < 0 {
+		return region, "", false
+	}
+	tail := region[li]
+	if m.havePrevTail && isStatusUpdate(m.prevTail, tail) {
+		m.statusSkeleton, m.haveSkeleton = MaskVolatile(m.prevTail, tail), true
+		return append([]string{}, region[:li]...), tail, true
+	}
+	return region, "", false
+}
+
+func (m *Merger) trim() {
+	if m.maxLines > 0 && len(m.transcript) > m.maxLines {
+		excess := len(m.transcript) - m.maxLines
+		m.transcript = append([]string{}, m.transcript[excess:]...)
+	}
+}
