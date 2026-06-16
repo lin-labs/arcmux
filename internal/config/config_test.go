@@ -341,3 +341,29 @@ func TestLoad_MuxBackend(t *testing.T) {
 		}
 	})
 }
+
+// TestScreenLogDir verifies that ScreenLogDir returns <DataRoot>/arcmux/sessions,
+// falling back to ~/data when DataRoot is empty.
+func TestScreenLogDir(t *testing.T) {
+	t.Run("explicit DataRoot", func(t *testing.T) {
+		cfg := &Config{DataRoot: "/custom/data"}
+		got := cfg.ScreenLogDir()
+		want := "/custom/data/arcmux/sessions"
+		if got != want {
+			t.Errorf("ScreenLogDir = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("empty DataRoot falls back to home/data", func(t *testing.T) {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			t.Fatalf("UserHomeDir: %v", err)
+		}
+		cfg := &Config{}
+		got := cfg.ScreenLogDir()
+		want := filepath.Join(home, "data", "arcmux", "sessions")
+		if got != want {
+			t.Errorf("ScreenLogDir = %q, want %q", got, want)
+		}
+	})
+}

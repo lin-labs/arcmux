@@ -21,6 +21,12 @@ type Config struct {
 	Pulse    PulseConfig                `toml:"pulse"`
 	Delivery DeliveryConfig             `toml:"delivery"`
 	Agents   map[string]profile.Profile `toml:"agents"`
+	// DataRoot is the local data root used for per-session artifacts
+	// (e.g. screen-recording logs). Defaults to ~/data when empty.
+	// Mirrors Pulse.DataRoot but lives at the top level so non-pulse
+	// features (recording, future tools) can share the same root without
+	// depending on the pulse sub-config.
+	DataRoot string `toml:"data_root"`
 }
 
 // DeliveryConfig selects which prompt-delivery judge the daemon uses. The
@@ -375,6 +381,18 @@ func DefaultSessionStateDir() string { return defaultSessionStateDir() }
 func LegacySessionStateDir() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, "data", "arcmux", "sessions")
+}
+
+// ScreenLogDir is where per-session voice screen-recording logs live:
+// <DataRoot>/arcmux/sessions/. The startup migration sweep only moves *.json,
+// so *.screen.log files here are untouched.
+func (c *Config) ScreenLogDir() string {
+	root := c.DataRoot
+	if root == "" {
+		home, _ := os.UserHomeDir()
+		root = filepath.Join(home, "data")
+	}
+	return filepath.Join(root, "arcmux", "sessions")
 }
 
 func defaultLogDir() string {

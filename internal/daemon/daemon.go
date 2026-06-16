@@ -42,6 +42,7 @@ type Daemon struct {
 	sessions  map[string]*session.Session
 	monitors  map[string]context.CancelFunc
 	processes map[string]*os.Process
+	recorders map[string]*recorder // sessionID → active screen recorder
 
 	healthEvents chan health.HealthEvent
 	eventBus     *EventBus
@@ -121,6 +122,7 @@ func New(cfg *config.Config, logger *slog.Logger) *Daemon {
 		sessions:     make(map[string]*session.Session),
 		monitors:     make(map[string]context.CancelFunc),
 		processes:    make(map[string]*os.Process),
+		recorders:    make(map[string]*recorder),
 		healthEvents: make(chan health.HealthEvent, 64),
 		eventBus:     NewEventBus(),
 		delivery:     delivery.NewController(newDeliveryJudge(cfg, logger), delivery.DefaultControllerConfig()),
@@ -935,11 +937,15 @@ func (d *Daemon) Kill(ctx context.Context, sessionID string, graceful bool, time
 		return d.killExecSession(ctx, sess, graceful, timeout)
 	}
 
-	// Stop monitor
+	// Stop monitor and any active screen recorder.
 	d.mu.Lock()
 	if cancel, ok := d.monitors[sessionID]; ok {
 		cancel()
 		delete(d.monitors, sessionID)
+	}
+	if r, ok := d.recorders[sessionID]; ok {
+		delete(d.recorders, sessionID)
+		go r.stop()
 	}
 	d.mu.Unlock()
 
@@ -1010,6 +1016,70 @@ func (d *Daemon) GetSession(id string) (*session.Session, bool) {
 // OutputFilePath returns the output log path for a session.
 func (d *Daemon) outputFilePath(id string) string {
 	return filepath.Join(d.cfg.Hooks.HookOutputDir, fmt.Sprintf("arcmux-output-%s.log", id))
+}
+
+// ScreenLogPath returns the screen-recording log path for a session.
+func (d *Daemon) ScreenLogPath(sessionID string) string {
+	return filepath.Join(d.cfg.ScreenLogDir(), sessionID+".screen.log")
+}
+
+// SetRecording enables (on=true) or cancels (on=false) aggressive screen
+// recording for a session. Enable is idempotent. Recording is decoupled from
+// any client: it stops only via this cancel or session close — never on a
+// client/context disconnect.
+func (d *Daemon) SetRecording(sessionID string, on bool) (string, error) {
+	if _, ok := d.GetSession(sessionID); !ok {
+		return "", fmt.Errorf("session not found: %s", sessionID)
+	}
+	logPath := d.ScreenLogPath(sessionID)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.recorders == nil {
+		d.recorders = map[string]*recorder{}
+	}
+	if on {
+		if _, exists := d.recorders[sessionID]; exists {
+			return logPath, nil // idempotent
+		}
+		if err := os.MkdirAll(d.cfg.ScreenLogDir(), 0o755); err != nil {
+			return "", err
+		}
+		capture := func(ctx context.Context) (string, error) {
+			return d.Capture(ctx, sessionID, false)
+		}
+		r := newRecorder(logPath, capture, time.Second, d.logger)
+		r.start(d.ctx)
+		d.recorders[sessionID] = r
+		d.logger.Info("voice recording started", "session_id", sessionID, "log", logPath)
+		return logPath, nil
+	}
+	if r, exists := d.recorders[sessionID]; exists {
+		delete(d.recorders, sessionID)
+		go r.stop() // stop outside the lock-sensitive path; file is kept
+		d.logger.Info("voice recording stopped", "session_id", sessionID)
+	}
+	return logPath, nil
+}
+
+// RecordingStatus reports whether a session is being recorded and its log path.
+func (d *Daemon) RecordingStatus(sessionID string) (bool, string, time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if r, ok := d.recorders[sessionID]; ok {
+		return true, r.logPath, r.startedAt
+	}
+	return false, d.ScreenLogPath(sessionID), time.Time{}
+}
+
+// recordingSessions returns the IDs of all sessions currently recording.
+func (d *Daemon) recordingSessions() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make([]string, 0, len(d.recorders))
+	for id := range d.recorders {
+		out = append(out, id)
+	}
+	return out
 }
 
 // Subscribe returns a channel of events. Call Unsubscribe to stop.
