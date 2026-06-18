@@ -262,79 +262,105 @@ func sameSkeleton(line, skeleton string) bool {
 	return okPrefix && okSuffix && len([]rune(lt)) >= len([]rune(strings.TrimSpace(prefix)))
 }
 
-// Merger is a stateful accumulator: feed it raw captures, it returns only the
-// genuinely-new transcript lines and tracks the live status line separately.
+// DedupLookback is how many recent transcript lines a new frame is compared
+// against ("compare back up a little more") so pinned / re-rendered content is
+// logged once rather than every tick.
+const DedupLookback = 200
+
+// Merger is a stateful accumulator: feed it raw captures and it appends every
+// genuinely-new screen line — faithfully, INCLUDING pinned UI (questions, option
+// menus, prompts), not just the scrolling transcript. Dedup aligns each frame to
+// the previous one via the anchor-voted scroll delta: a line unchanged — or whose
+// only a volatile span changed (a ticking timer/spinner/clock) — at its aligned
+// position is skipped; a freshly-rendered line is appended. A lookback set guards
+// against re-logging pinned content across small scrolls.
 type Merger struct {
-	prevBody       []string
-	havePrev       bool
-	prevTail       string
-	havePrevTail   bool
-	statusSkeleton string
-	haveSkeleton   bool
-	transcript     []string
-	status         string
-	maxLines       int
+	prev       []string
+	havePrev   bool
+	transcript []string
+	maxLines   int
+	lookback   int
 }
 
 // NewMerger returns a Merger retaining at most maxLines transcript lines
 // (0 = unbounded).
-func NewMerger(maxLines int) *Merger { return &Merger{maxLines: maxLines} }
+func NewMerger(maxLines int) *Merger { return &Merger{maxLines: maxLines, lookback: DedupLookback} }
 
-// Transcript returns the accumulated, deduplicated transcript.
+// Transcript returns the accumulated transcript.
 func (m *Merger) Transcript() []string { return m.transcript }
 
-// Status returns the current live status line, if any.
-func (m *Merger) Status() string { return m.status }
+// Status is retained for API compatibility; volatile lines are now skipped
+// inline rather than peeled into a separate status field.
+func (m *Merger) Status() string { return "" }
 
-// Ingest ingests one raw capture and returns the new transcript lines appended
+// dedupKey normalizes a line for comparison (trailing whitespace only).
+func dedupKey(s string) string { return strings.TrimRight(s, " \t") }
+
+// Ingest ingests one raw capture and returns the genuinely-new lines appended
 // this tick (nil on an idle tick).
 func (m *Merger) Ingest(raw string) []string {
-	region := TranscriptRegion(Normalize(raw))
-	body, status, haveStatus := m.splitStatus(region)
+	cur := Normalize(raw)
 
-	var appended []string
-	if !m.havePrev {
-		appended = append(appended, body...)
-	} else {
-		appended = NewLines(m.prevBody, body)
+	// Recent transcript window — the dedup memory.
+	start := 0
+	if len(m.transcript) > m.lookback {
+		start = len(m.transcript) - m.lookback
+	}
+	recent := make(map[string]struct{}, m.lookback)
+	for _, l := range m.transcript[start:] {
+		recent[dedupKey(l)] = struct{}{}
 	}
 
-	// Drop any stale copy of the live status line that scrolled up into history.
 	var kept []string
-	for _, l := range appended {
-		if m.haveSkeleton && sameSkeleton(l, m.statusSkeleton) {
-			continue
+	add := func(l string) {
+		k := dedupKey(l)
+		if k == "" {
+			return // skip blank lines
 		}
+		if _, ok := recent[k]; ok {
+			return // already logged recently (pinned / re-rendered content)
+		}
+		recent[k] = struct{}{}
 		kept = append(kept, l)
+	}
+
+	switch {
+	case !m.havePrev:
+		for _, l := range cur {
+			add(l)
+		}
+	default:
+		d, ok, _ := ScrollDelta(m.prev, cur)
+		if !ok {
+			// No confident overlap (screen clear / unrelated frame): the whole
+			// frame is new, still deduped against recent history.
+			for _, l := range cur {
+				add(l)
+			}
+		} else {
+			// Aligned diff: cur[i] sat at prev[i+d]. Skip lines unchanged — or
+			// only a volatile span changed — at their aligned position; append
+			// everything else (scrolled-in lines and freshly-rendered UI).
+			for i, l := range cur {
+				pj := i + d
+				if pj >= 0 && pj < len(m.prev) {
+					p := m.prev[pj]
+					if dedupKey(p) == dedupKey(l) {
+						continue // unchanged
+					}
+					if isStatusUpdate(p, l) {
+						continue // volatile tick (timer/spinner/clock) at this position
+					}
+				}
+				add(l)
+			}
+		}
 	}
 
 	m.transcript = append(m.transcript, kept...)
 	m.trim()
-
-	if li := lastNonblank(body); li >= 0 {
-		m.prevTail, m.havePrevTail = body[li], true
-	} else {
-		m.havePrevTail = false
-	}
-	m.prevBody, m.havePrev = body, true
-	m.status = status
-	_ = haveStatus
+	m.prev, m.havePrev = cur, true
 	return kept
-}
-
-// splitStatus peels the live status line off the tail using the learned-volatile
-// test against the previous frame's tail.
-func (m *Merger) splitStatus(region []string) (body []string, status string, ok bool) {
-	li := lastNonblank(region)
-	if li < 0 {
-		return region, "", false
-	}
-	tail := region[li]
-	if m.havePrevTail && isStatusUpdate(m.prevTail, tail) {
-		m.statusSkeleton, m.haveSkeleton = MaskVolatile(m.prevTail, tail), true
-		return append([]string{}, region[:li]...), tail, true
-	}
-	return region, "", false
 }
 
 func (m *Merger) trim() {
