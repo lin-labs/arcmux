@@ -54,10 +54,18 @@ type Session struct {
 	StartedAt        time.Time
 	LastActivityAt   time.Time
 	IdleSince        *time.Time
-	NudgeCount       int
-	Env              map[string]string
-	AutoClose        bool   // for exec transport: transition to StateExited on subprocess exit
-	OwnerID          string // C1: free-form caller attribution tag (e.g. "elonco:my-project"); empty for legacy callers
+	// WorkingSince marks when the session most recently entered the working
+	// state (a prompt was delivered and confirmed ingested). The health
+	// monitor uses it as the per-turn reference for hook-driven idle
+	// detection: a turn_end hook is trusted as "this turn finished" only
+	// when it landed after WorkingSince, so a stale turn_end from a prior
+	// turn — or a dropped hook — can never mark the current turn idle
+	// prematurely. The mirror of IdleSince.
+	WorkingSince *time.Time
+	NudgeCount   int
+	Env          map[string]string
+	AutoClose    bool   // for exec transport: transition to StateExited on subprocess exit
+	OwnerID      string // C1: free-form caller attribution tag (e.g. "elonco:my-project"); empty for legacy callers
 }
 
 // NewSession creates a session in starting state.
@@ -80,12 +88,17 @@ func (s *Session) SetState(state State) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.State = state
-	s.LastActivityAt = time.Now()
+	now := time.Now()
+	s.LastActivityAt = now
 	if state == StateIdle {
-		now := time.Now()
 		s.IdleSince = &now
 	} else {
 		s.IdleSince = nil
+	}
+	if state == StateWorking {
+		s.WorkingSince = &now
+	} else {
+		s.WorkingSince = nil
 	}
 }
 
@@ -194,6 +207,7 @@ type Snapshot struct {
 	StartedAt        time.Time
 	LastActivityAt   time.Time
 	IdleSince        *time.Time
+	WorkingSince     *time.Time
 	NudgeCount       int
 	AutoClose        bool
 	OwnerID          string
@@ -219,6 +233,7 @@ func (s *Session) Snapshot() Snapshot {
 		StartedAt:        s.StartedAt,
 		LastActivityAt:   s.LastActivityAt,
 		IdleSince:        s.IdleSince,
+		WorkingSince:     s.WorkingSince,
 		NudgeCount:       s.NudgeCount,
 		AutoClose:        s.AutoClose,
 		OwnerID:          s.OwnerID,

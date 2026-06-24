@@ -814,7 +814,7 @@ func (d *Daemon) startMonitor(id string, sess *session.Session, prof profile.Pro
 	d.mu.Unlock()
 
 	captureInterval := d.cfg.CaptureInterval()
-	monitor := health.NewMonitor(d.tmux, captureInterval, d.healthEvents)
+	monitor := health.NewMonitor(d.tmux, captureInterval, d.healthEvents, d.cfg.Hooks.SessionStateDir)
 	go monitor.Run(monitorCtx, sess, prof)
 }
 
