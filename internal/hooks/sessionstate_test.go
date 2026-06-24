@@ -56,6 +56,53 @@ func TestApplyEventUnknownEvent(t *testing.T) {
 	}
 }
 
+func TestApplyEventWithContractConsolidates(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	id := "s-contract"
+	now := time.Date(2026, 6, 24, 18, 0, 0, 0, time.UTC)
+
+	first := TurnContractUpdate{
+		Goal:                "  Build   the arcmux hook contract  ",
+		SuccessVerification: "go test ./internal/hooks ./cmd/arcmux passes",
+		Path:                "Inspect hook state, patch schema, add tests.",
+		Source:              "UserPromptSubmit",
+	}
+	if err := ApplyEventWithContract(dir, id, "codex", EventPromptSubmit, "", first, now); err != nil {
+		t.Fatalf("first update: %v", err)
+	}
+	second := TurnContractUpdate{
+		Path:   "Patched schema and CLI; running focused tests.",
+		Source: "Stop",
+	}
+	if err := ApplyEventWithContract(dir, id, "codex", EventTurnEnd, "", second, now.Add(time.Minute)); err != nil {
+		t.Fatalf("second update: %v", err)
+	}
+
+	st, err := ReadSessionState(dir, id)
+	if err != nil || st == nil {
+		t.Fatalf("read: %v st=%v", err, st)
+	}
+	if st.TurnContract == nil {
+		t.Fatal("turn contract missing")
+	}
+	if st.TurnContract.Goal != "Build the arcmux hook contract" {
+		t.Fatalf("goal = %q", st.TurnContract.Goal)
+	}
+	if st.TurnContract.SuccessVerification != "go test ./internal/hooks ./cmd/arcmux passes" {
+		t.Fatalf("verification = %q", st.TurnContract.SuccessVerification)
+	}
+	if st.TurnContract.Path != "Patched schema and CLI; running focused tests." {
+		t.Fatalf("path = %q", st.TurnContract.Path)
+	}
+	if st.TurnContract.Source != "Stop" {
+		t.Fatalf("source = %q", st.TurnContract.Source)
+	}
+	if !st.TurnContract.UpdatedAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("updated_at = %v", st.TurnContract.UpdatedAt)
+	}
+}
+
 func TestReadSessionStateMissing(t *testing.T) {
 	t.Parallel()
 	st, err := ReadSessionState(t.TempDir(), "s-none")

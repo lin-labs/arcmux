@@ -54,6 +54,44 @@ func TestCmdHookReadsEnv(t *testing.T) {
 	}
 }
 
+func TestCmdHookUpdatesTurnContract(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("ARCMUX_SESSION_ID", "")
+	t.Setenv("ARCMUX_HOOK_AGENT", "")
+	t.Setenv("ARCMUX_SESSION_STATE_DIR", "")
+
+	args := []string{
+		"--session", "s-contract", "--agent", "codex",
+		"--event", "prompt_submit", "--state-dir", dir,
+		"--goal", "Install arcmux turn contract",
+		"--verification", "state JSON has turn_contract.goal, success_verification, and path",
+		"--path", "Patch arcmux hook state, CLI flags, and hook scripts.",
+		"--contract-source", "UserPromptSubmit",
+	}
+	if err := cmdHook(args); err != nil {
+		t.Fatalf("cmdHook: %v", err)
+	}
+	st, err := hooks.ReadSessionState(dir, "s-contract")
+	if err != nil || st == nil {
+		t.Fatalf("read: %v st=%v", err, st)
+	}
+	if st.TurnContract == nil {
+		t.Fatal("turn contract missing")
+	}
+	if st.TurnContract.Goal != "Install arcmux turn contract" {
+		t.Fatalf("goal = %q", st.TurnContract.Goal)
+	}
+	if st.TurnContract.SuccessVerification != "state JSON has turn_contract.goal, success_verification, and path" {
+		t.Fatalf("verification = %q", st.TurnContract.SuccessVerification)
+	}
+	if st.TurnContract.Path != "Patch arcmux hook state, CLI flags, and hook scripts." {
+		t.Fatalf("path = %q", st.TurnContract.Path)
+	}
+	if st.TurnContract.Source != "UserPromptSubmit" {
+		t.Fatalf("source = %q", st.TurnContract.Source)
+	}
+}
+
 func TestCmdHookRequiresEventAndStateDir(t *testing.T) {
 	t.Setenv("ARCMUX_SESSION_ID", "")
 	t.Setenv("ARCMUX_SESSION_STATE_DIR", "")

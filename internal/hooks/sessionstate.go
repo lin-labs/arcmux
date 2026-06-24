@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -41,8 +42,31 @@ type SessionState struct {
 	// LastPromptSubmitAt is the timestamp of the most recent prompt_submit
 	// event. The hooks judge compares it to Evidence.DeliveryStartedAt to
 	// confirm a specific delivery was ingested.
-	LastPromptSubmitAt time.Time `json:"last_prompt_submit_at,omitempty"`
-	LastTurnEndAt      time.Time `json:"last_turn_end_at,omitempty"`
+	LastPromptSubmitAt time.Time     `json:"last_prompt_submit_at,omitempty"`
+	LastTurnEndAt      time.Time     `json:"last_turn_end_at,omitempty"`
+	TurnContract       *TurnContract `json:"turn_contract,omitempty"`
+}
+
+// TurnContract is the compact, current per-session contract that arcmux-parent
+// agents refresh every turn: what they are trying to do, how success will be
+// verified, and the consolidated path taken or planned. It is a snapshot, not
+// an append-only log.
+type TurnContract struct {
+	Goal                string    `json:"goal,omitempty"`
+	SuccessVerification string    `json:"success_verification,omitempty"`
+	Path                string    `json:"path,omitempty"`
+	Source              string    `json:"source,omitempty"`
+	UpdatedAt           time.Time `json:"updated_at,omitempty"`
+}
+
+// TurnContractUpdate carries optional replacements for the current contract.
+// Empty fields mean "leave the current value unchanged" so hook callers can
+// refresh one dimension without erasing the others.
+type TurnContractUpdate struct {
+	Goal                string
+	SuccessVerification string
+	Path                string
+	Source              string
 }
 
 // SessionStatePath returns the live state file path for a session.
@@ -98,6 +122,13 @@ func InitSessionState(stateDir, sessionID, agent string, now time.Time) error {
 // `arcmux hook`. Returns an error for an unknown event so a miswired hook
 // fails loudly.
 func ApplyEvent(stateDir, sessionID, agent, event, tool string, now time.Time) error {
+	return ApplyEventWithContract(stateDir, sessionID, agent, event, tool, TurnContractUpdate{}, now)
+}
+
+// ApplyEventWithContract records a canonical hook event and, when provided,
+// replaces the current compact turn contract fields. The contract is stored as
+// one snapshot so repeated turn updates consolidate instead of bloating state.
+func ApplyEventWithContract(stateDir, sessionID, agent, event, tool string, contract TurnContractUpdate, now time.Time) error {
 	switch event {
 	case EventPromptSubmit, EventToolStart, EventToolEnd, EventTurnEnd, EventNotification:
 	default:
@@ -136,7 +167,49 @@ func ApplyEvent(stateDir, sessionID, agent, event, tool string, now time.Time) e
 		case EventNotification:
 			// record-only
 		}
+
+		applyTurnContractUpdate(st, contract, now)
 	})
+}
+
+func applyTurnContractUpdate(st *SessionState, update TurnContractUpdate, now time.Time) {
+	goal := compactContractText(update.Goal)
+	verification := compactContractText(update.SuccessVerification)
+	path := compactContractText(update.Path)
+	source := compactContractText(update.Source)
+	if goal == "" && verification == "" && path == "" && source == "" {
+		return
+	}
+
+	if st.TurnContract == nil {
+		st.TurnContract = &TurnContract{}
+	}
+	if goal != "" {
+		st.TurnContract.Goal = goal
+	}
+	if verification != "" {
+		st.TurnContract.SuccessVerification = verification
+	}
+	if path != "" {
+		st.TurnContract.Path = path
+	}
+	if source != "" {
+		st.TurnContract.Source = source
+	}
+	st.TurnContract.UpdatedAt = now
+}
+
+func compactContractText(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	if value == "" {
+		return ""
+	}
+	const maxRunes = 600
+	runes := []rune(value)
+	if len(runes) <= maxRunes {
+		return value
+	}
+	return string(runes[:maxRunes])
 }
 
 // ArchiveSessionState moves a session's live state file into the archived/

@@ -24,6 +24,9 @@ import (
 //	--event <canonical event>   prompt_submit|tool_start|tool_end|turn_end|notification
 //	--tool <name>      (optional, for tool_* events)
 //	--state-dir <dir>  (defaults to $ARCMUX_SESSION_STATE_DIR)
+//	--goal <text>      (optional, current concrete goal snapshot)
+//	--verification <text> (optional, current concrete success check)
+//	--path <text>      (optional, consolidated path taken/planned)
 func cmdHook(args []string) error {
 	var (
 		sessionID = os.Getenv("ARCMUX_SESSION_ID")
@@ -31,6 +34,7 @@ func cmdHook(args []string) error {
 		stateDir  = os.Getenv("ARCMUX_SESSION_STATE_DIR")
 		event     string
 		tool      string
+		contract  hooks.TurnContractUpdate
 	)
 
 	for i := 0; i < len(args); i++ {
@@ -58,6 +62,14 @@ func cmdHook(args []string) error {
 			tool, err = next()
 		case "--state-dir":
 			stateDir, err = next()
+		case "--goal":
+			contract.Goal, err = next()
+		case "--verification", "--success-verification":
+			contract.SuccessVerification, err = next()
+		case "--path":
+			contract.Path, err = next()
+		case "--contract-source":
+			contract.Source, err = next()
 		default:
 			return fmt.Errorf("arcmux hook: unknown argument %q", args[i])
 		}
@@ -77,7 +89,11 @@ func cmdHook(args []string) error {
 		return fmt.Errorf("arcmux hook: no state dir (set --state-dir or ARCMUX_SESSION_STATE_DIR)")
 	}
 
-	if err := hooks.ApplyEvent(stateDir, sessionID, agent, event, tool, time.Now()); err != nil {
+	if contract.Source == "" && (contract.Goal != "" || contract.SuccessVerification != "" || contract.Path != "") {
+		contract.Source = event
+	}
+
+	if err := hooks.ApplyEventWithContract(stateDir, sessionID, agent, event, tool, contract, time.Now()); err != nil {
 		return fmt.Errorf("arcmux hook: %w", err)
 	}
 	return nil

@@ -49,7 +49,14 @@ Written atomically under a per-session lock; safe to poll-read.
   "turn_count": 1,
   "events_seen": 2,
   "last_prompt_submit_at": "2026-06-09T13:36:02-07:00",
-  "last_turn_end_at": "2026-06-09T13:36:08-07:00"
+  "last_turn_end_at": "2026-06-09T13:36:08-07:00",
+  "turn_contract": {
+    "goal": "Add arcmux hook state for the active turn objective contract",
+    "success_verification": "Focused hook-state tests pass and the session JSON shows goal, success_verification, and path",
+    "path": "Patch the hook state schema, extend arcmux hook flags, update hook bridges, run focused tests.",
+    "source": "Stop",
+    "updated_at": "2026-06-09T13:36:08-07:00"
+  }
 }
 ```
 
@@ -57,6 +64,18 @@ Canonical events (`last_event`): `prompt_submit`, `tool_start`, `tool_end`,
 `turn_end`, `notification`. `working` is true between `prompt_submit` and
 `turn_end`. Zero timestamps render as `0001-01-01T00:00:00Z` — treat as
 "never", not as evidence.
+
+`turn_contract` is a compact snapshot for arcmux-parent agent sessions. It has
+exactly the three steer dimensions operators use most often:
+
+- `goal` — the concrete current objective.
+- `success_verification` — the observable check that proves the objective is
+  done.
+- `path` — the consolidated path taken or planned.
+
+This is not a transcript or step log. Hook writers replace the snapshot fields
+as the turn develops, preserving omitted fields and updating `updated_at`, so
+subscribers can read one current contract without trimming historical bloat.
 
 ## How events get here (one hook, many subscribers)
 
@@ -67,6 +86,11 @@ which (1) appends the raw event to the JSONL audit and (2) calls
 The per-session identity comes from `ARCMUX_SESSION_ID` /
 `ARCMUX_SESSION_STATE_DIR` env injected into the agent's pane at launch; the
 script no-ops for non-arcmux sessions, so global registration is safe.
+
+Hook bridges may also pass `--goal`, `--verification`, and `--path` to
+`arcmux hook`; these update `turn_contract` in the same locked read-modify-write
+as the event. On prompt submission, the bridges emit agent context reminding the
+agent to keep those three fields concrete and consolidated.
 
 A subscriber that wants "is session X working? when did it last finish a
 turn?" should read `sessions/<id>.json`. A subscriber that wants the full

@@ -55,22 +55,37 @@ TOOL_NAME="${CLAUDE_TOOL_NAME:-}"
 if command -v python3 >/dev/null 2>&1; then
   parsed=$(printf '%s' "$payload" | python3 -c 'import json,sys
 raw=sys.stdin.read()
-e="";t=""
+e="";t="";goal="";verification="";path=""
+def first_text(d, keys):
+    for key in keys:
+        value=d.get(key)
+        if isinstance(value,str) and value.strip():
+            return " ".join(value.split())
+    return ""
 try:
     d=json.loads(raw) if raw.strip() else {}
     if isinstance(d,dict):
         e=d.get("hook_event_name") or d.get("hookEventName") or ""
         t=d.get("tool_name") or d.get("toolName") or ""
+        goal=first_text(d, ("arcmux_goal","goal","objective","prompt","message","text"))
+        verification=first_text(d, ("arcmux_success_verification","success_verification","verification","success_check"))
+        path=first_text(d, ("arcmux_path","path","plan","approach"))
 except Exception:
     pass
-print(e);print(t)' 2>/dev/null)
+print(e);print(t);print(goal);print(verification);print(path)' 2>/dev/null)
   je=$(printf '%s\n' "$parsed" | sed -n '1p')
   jt=$(printf '%s\n' "$parsed" | sed -n '2p')
+  jgoal=$(printf '%s\n' "$parsed" | sed -n '3p')
+  jverification=$(printf '%s\n' "$parsed" | sed -n '4p')
+  jpath=$(printf '%s\n' "$parsed" | sed -n '5p')
 else
   je=$(printf '%s' "$payload" | sed -n 's/.*"hook_event_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n '1p')
   [ -n "$je" ] || je=$(printf '%s' "$payload" | sed -n 's/.*"hookEventName"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n '1p')
   jt=$(printf '%s' "$payload" | sed -n 's/.*"tool_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n '1p')
   [ -n "$jt" ] || jt=$(printf '%s' "$payload" | sed -n 's/.*"toolName"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n '1p')
+  jgoal=""
+  jverification=""
+  jpath=""
 fi
 [ -n "$je" ] && EVENT_TYPE="$je"
 [ -n "$jt" ] && TOOL_NAME="$jt"
@@ -94,7 +109,32 @@ case "$EVENT_TYPE" in
   *)                                   CANON=notification ;;
 esac
 ARCMUX_BIN="${ARCMUX_BIN:-arcmux}"
-"$ARCMUX_BIN" hook --agent "${ARCMUX_HOOK_AGENT:-claude}" --event "$CANON" --tool "$TOOL_NAME" >/dev/null 2>&1 || true
+set -- hook --agent "${ARCMUX_HOOK_AGENT:-claude}" --event "$CANON" --tool "$TOOL_NAME"
+[ -n "$jgoal" ] && set -- "$@" --goal "$jgoal"
+[ -n "$jverification" ] && set -- "$@" --verification "$jverification"
+[ -n "$jpath" ] && set -- "$@" --path "$jpath"
+if [ -n "$jgoal$jverification$jpath" ]; then
+  set -- "$@" --contract-source "$EVENT_TYPE"
+fi
+"$ARCMUX_BIN" "$@" >/dev/null 2>&1 || true
+
+if [ "$CANON" = "prompt_submit" ] && command -v python3 >/dev/null 2>&1; then
+  python3 - <<'PY' 2>/dev/null || true
+import json
+msg = (
+    "Arcmux turn contract: keep the current goal, success verification, and "
+    "path concrete. Consolidate path updates instead of appending a log; "
+    "treat user or agent steers as edits to one of those three fields."
+)
+print(json.dumps({
+    "systemMessage": msg,
+    "hookSpecificOutput": {
+        "hookEventName": "UserPromptSubmit",
+        "additionalContext": msg,
+    },
+}))
+PY
+fi
 `
 
 // Installer auto-configures the generic agent hook for sessions.

@@ -193,14 +193,20 @@ func TestGenericHook_ParsesStdinJSON(t *testing.T) {
 		t.Fatalf("Install: %v", err)
 	}
 	script := GenericHookPath(hookDir)
+	argvFile := filepath.Join(tmpDir, "argv.txt")
+	fakeArcmux := filepath.Join(tmpDir, "arcmux")
+	if err := os.WriteFile(fakeArcmux, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> "+argvFile+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	cmd := exec.Command("/bin/sh", script)
 	// No CLAUDE_* env — the event must come from stdin.
 	cmd.Env = append(os.Environ(),
 		"ARCMUX_SESSION_ID=s-stdin",
 		"ARCMUX_HOOK_OUTPUT_DIR="+outDir,
+		"ARCMUX_BIN="+fakeArcmux,
 	)
-	cmd.Stdin = strings.NewReader(`{"hook_event_name":"UserPromptSubmit","tool_name":"","session_id":"x"}`)
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"UserPromptSubmit","tool_name":"","session_id":"x","prompt":"Fix arcmux goal routing","success_verification":"state JSON has a turn_contract object","plan":"Patch hook writer and tests"}`)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("run hook: %v (%s)", err, out)
 	}
@@ -214,6 +220,21 @@ func TestGenericHook_ParsesStdinJSON(t *testing.T) {
 	}
 	if ev.Event != "UserPromptSubmit" {
 		t.Fatalf("event = %q, want UserPromptSubmit (parsed from stdin)", ev.Event)
+	}
+	argv, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("fake arcmux never invoked: %v", err)
+	}
+	call := string(argv)
+	for _, want := range []string{
+		"--goal Fix arcmux goal routing",
+		"--verification state JSON has a turn_contract object",
+		"--path Patch hook writer and tests",
+		"--contract-source UserPromptSubmit",
+	} {
+		if !strings.Contains(call, want) {
+			t.Fatalf("arcmux call %q missing %q", call, want)
+		}
 	}
 }
 
