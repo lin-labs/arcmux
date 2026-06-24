@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lin-labs/arcmux/internal/hooks"
 	"github.com/lin-labs/arcmux/internal/profile"
 	"github.com/lin-labs/arcmux/internal/session"
 	"github.com/lin-labs/arcmux/internal/tmux"
@@ -45,6 +46,59 @@ func quiescentIdle(state session.State, stuckMatch string, workingVisible bool, 
 	return sinceChange >= quiescence
 }
 
+// idleDecision is the authoritative-vs-inferred verdict the hook signal can
+// give about a working session's turn boundary.
+type idleDecision int
+
+const (
+	// idleUndecided: no trustworthy hook signal for this turn — the monitor
+	// must fall back to screen-quiescence inference (legacy behavior, and the
+	// only path for non-hook-backed agents).
+	idleUndecided idleDecision = iota
+	// idleConfirmed: the agent itself reported turn_end after the current
+	// turn began. Ground truth — idle immediately, no quiescence wait.
+	idleConfirmed
+	// idleWorking: the agent itself reports it is still working on the current
+	// turn. Suppress quiescence-based idle so a long silent think/tool call is
+	// not mistaken for "done".
+	idleWorking
+)
+
+// hookIdleDecision interprets a session's cached hook state relative to the
+// per-turn WorkingSince reference. It is intentionally pure (no I/O) so the
+// turn-boundary logic is unit-testable without a daemon, hook files, or tmux.
+//
+// The contract:
+//   - st nil or no prompt yet           -> idleUndecided (use quiescence)
+//   - workingSince unknown              -> idleUndecided (no per-turn anchor)
+//   - turn_end landed after WorkingSince -> idleConfirmed (this turn finished)
+//   - agent reports working             -> idleWorking (suppress false idle)
+//   - otherwise                         -> idleUndecided
+//
+// Anchoring on WorkingSince is what makes a stale turn_end (from a previous
+// turn) or a dropped hook safe: neither advances LastTurnEndAt past the
+// current turn's start, so neither yields idleConfirmed.
+func hookIdleDecision(st *hooks.SessionState, workingSince time.Time) idleDecision {
+	if st == nil || st.LastPromptSubmitAt.IsZero() || workingSince.IsZero() {
+		return idleUndecided
+	}
+	if !st.Working && st.LastTurnEndAt.After(workingSince) {
+		return idleConfirmed
+	}
+	if st.Working {
+		return idleWorking
+	}
+	return idleUndecided
+}
+
+// hookStaleBackstop is how long a hook-"working" session may sit with a
+// completely static screen before the monitor declares it idle anyway, as a
+// safety net against a dropped turn_end hook. Deliberately several times the
+// quiescence window so a legitimately thinking agent is never cut off early.
+func hookStaleBackstop(interval time.Duration) time.Duration {
+	return 3 * idleQuiescence(interval)
+}
+
 // HealthEvent is emitted when the monitor detects a state change.
 type HealthEvent struct {
 	SessionID string
@@ -59,14 +113,21 @@ type Monitor struct {
 	tmux     *tmux.Client
 	interval time.Duration
 	events   chan<- HealthEvent
+	// stateDir is the per-session hook state directory. When set, the monitor
+	// prefers the agent's own turn_end hook over screen-quiescence inference
+	// to decide idle. Empty disables hook-driven idle (quiescence only).
+	stateDir string
 }
 
-// NewMonitor creates a health monitor.
-func NewMonitor(tmuxClient *tmux.Client, interval time.Duration, events chan<- HealthEvent) *Monitor {
+// NewMonitor creates a health monitor. stateDir is the hook session-state
+// directory (config Hooks.SessionStateDir); pass "" to rely on screen
+// quiescence alone (e.g. agents with no hook integration).
+func NewMonitor(tmuxClient *tmux.Client, interval time.Duration, events chan<- HealthEvent, stateDir string) *Monitor {
 	return &Monitor{
 		tmux:     tmuxClient,
 		interval: interval,
 		events:   events,
+		stateDir: stateDir,
 	}
 }
 
@@ -117,6 +178,21 @@ func (m *Monitor) Check(ctx context.Context, sess *session.Session, prof profile
 	}
 
 	return result
+}
+
+// hookDecision consults the agent's own hook state for an authoritative turn
+// boundary. Returns idleUndecided for non-hook agents, when the monitor has no
+// state dir, when there is no per-turn anchor yet, or when the state file can't
+// be read — callers then fall back to screen quiescence.
+func (m *Monitor) hookDecision(snap session.Snapshot, prof profile.Profile) idleDecision {
+	if m.stateDir == "" || !prof.HookBacked() || snap.WorkingSince == nil {
+		return idleUndecided
+	}
+	st, err := hooks.ReadSessionState(m.stateDir, snap.ID)
+	if err != nil {
+		return idleUndecided
+	}
+	return hookIdleDecision(st, *snap.WorkingSince)
 }
 
 // Nudge sends the configured nudge command to a stuck session.
@@ -214,13 +290,50 @@ func (m *Monitor) tick(ctx context.Context, sess *session.Session, prof profile.
 		return
 	}
 
-	// Working -> idle: the agent's turn has ended. We infer this from the
-	// pane going quiescent — visible output unchanged for the quiescence
-	// window — with no working indicator on screen and no stuck pattern.
-	// This is the only working->idle path for the tmux transport; without
-	// it a session set to "working" on prompt delivery would stay "working"
-	// forever (the hook watcher records Stop events but nothing consumed
-	// them to drive state). See arcmux-u1c.
+	// Working -> idle. Prefer the agent's own turn_end hook (ground truth)
+	// over screen-quiescence inference; the hook makes idle both faster (no
+	// quiescence wait) and authoritative. Quiescence remains the path for
+	// non-hook agents and the backstop if a turn_end hook is dropped. See
+	// arcmux-u1c (quiescence) and arcmux-hc3 (hook-authoritative idle).
+	if snap.State == session.StateWorking {
+		switch m.hookDecision(snap, prof) {
+		case idleConfirmed:
+			// The agent reported turn_end for this turn. Trust it now,
+			// regardless of what the screen is still rendering.
+			sess.SetState(session.StateIdle)
+			sess.ResetNudge()
+			m.emit(HealthEvent{
+				SessionID: snap.ID,
+				Type:      EventIdleDetected,
+				Reason:    "hook:turn_end",
+				Timestamp: now,
+			})
+			return
+		case idleWorking:
+			// The agent reports it is still working. Do not let screen
+			// quiescence declare a false idle on a long silent think/tool
+			// call. Backstop: if the screen has also been completely static
+			// for well beyond the quiescence window, a turn_end hook was
+			// likely dropped — declare idle so the session can't wedge.
+			if now.Sub(rs.lastChangeAt) >= hookStaleBackstop(m.interval) {
+				sess.SetState(session.StateIdle)
+				sess.ResetNudge()
+				m.emit(HealthEvent{
+					SessionID: snap.ID,
+					Type:      EventIdleDetected,
+					Reason:    "output quiescent (no turn_end hook)",
+					Timestamp: now,
+				})
+			}
+			return
+		case idleUndecided:
+			// No trustworthy hook signal — fall through to quiescence.
+		}
+	}
+
+	// Screen-quiescence inference: a working pane whose visible output has
+	// been unchanged for the quiescence window — with no working indicator on
+	// screen and no stuck pattern — has finished its turn.
 	workingVisible := prof.WorkingIndicator != "" &&
 		strings.Contains(strings.ToLower(result.Output), strings.ToLower(prof.WorkingIndicator))
 	if quiescentIdle(snap.State, result.StuckMatch, workingVisible, now.Sub(rs.lastChangeAt), idleQuiescence(m.interval)) {
