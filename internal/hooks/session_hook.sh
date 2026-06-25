@@ -298,7 +298,14 @@ except Exception:
     printf '%s\n' "Return the UPDATED overall goal. Normally ONE succinct line. If the conversation has clearly shifted into multiple separate themes, return a short markdown checklist instead: completed or abandoned earlier goals as '- [x] ...' and the active one(s) as '- [ ] ...'. Output ONLY the goal text — no preamble, no quotes, no explanation."
   } > "$pf"
 
-  new=$("$goal_bin" --no-alt-screen --disable-web-search -m "${ARCMUX_GOAL_MODEL:-grok-4.3}" --prompt-file "$pf" 2>/dev/null)
+  # Bound the call and detach stdin: an unauthenticated/slow grok must degrade
+  # (overall_goal keeps its prior value) rather than hang as a lingering process
+  # or block on an interactive auth prompt.
+  if command -v timeout >/dev/null 2>&1; then
+    new=$(timeout "${ARCMUX_GOAL_TIMEOUT:-90}" "$goal_bin" --no-alt-screen --disable-web-search -m "${ARCMUX_GOAL_MODEL:-grok-4.3}" --prompt-file "$pf" </dev/null 2>/dev/null)
+  else
+    new=$("$goal_bin" --no-alt-screen --disable-web-search -m "${ARCMUX_GOAL_MODEL:-grok-4.3}" --prompt-file "$pf" </dev/null 2>/dev/null)
+  fi
   rm -f "$pf"
   # Trim leading/trailing blank lines.
   new=$(printf '%s\n' "$new" | sed -e '/./,$!d' | sed -e ':a' -e '/^\n*$/{$d;N;ba}' 2>/dev/null)
