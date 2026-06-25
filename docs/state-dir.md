@@ -51,9 +51,10 @@ Written atomically under a per-session lock; safe to poll-read.
   "last_prompt_submit_at": "2026-06-09T13:36:02-07:00",
   "last_turn_end_at": "2026-06-09T13:36:08-07:00",
   "turn_contract": {
-    "goal": "Add arcmux hook state for the active turn objective contract",
-    "success_verification": "Focused hook-state tests pass and the session JSON shows goal, success_verification, and path",
-    "path": "Patch the hook state schema, extend arcmux hook flags, update hook bridges, run focused tests.",
+    "goal": "add the vault link field to the state doc",
+    "overall_goal": "Make arcmux's session JSON an accurate per-turn recording",
+    "last_user_message": "now also record where the convo is saved\n…",
+    "vault_link": "/home/blin/agents/histories/2026-06-25-09-arcmux-hooks.md",
     "source": "Stop",
     "updated_at": "2026-06-09T13:36:08-07:00"
   }
@@ -65,32 +66,46 @@ Canonical events (`last_event`): `prompt_submit`, `tool_start`, `tool_end`,
 `turn_end`. Zero timestamps render as `0001-01-01T00:00:00Z` — treat as
 "never", not as evidence.
 
-`turn_contract` is a compact snapshot for arcmux-parent agent sessions. It has
-exactly the three steer dimensions operators use most often:
+`turn_contract` is a compact, evolving **recording** for arcmux-parent agent
+sessions (recording, not steering — nothing here changes the agent's behavior).
+It captures three valued views:
 
-- `goal` — the concrete current objective.
-- `success_verification` — the observable check that proves the objective is
-  done.
-- `path` — the consolidated path taken or planned.
+- `goal` — the **latest** gauged goal: the agent's most recent "Your ask:"
+  restatement (the AGENTS.md rule), i.e. the current sub-task being steered.
+- `overall_goal` — the **whole conversation's** objective, **continuously
+  evolving**. Seeded from the launch prompt, then re-derived each turn by a
+  background pass that sends the kept user turns + the current overall goal to a
+  summarizer (xAI grok). Normally one succinct line; when the conversation has
+  clearly split into separate themes, a short checklist with completed/abandoned
+  earlier goals checked off (`- [x] …`) and active ones unchecked (`- [ ] …`).
+- `last_user_message` — the **raw** last user turn, verbatim, truncated to 3
+  lines. Recorded alongside the gauged goal, never as a substitute.
+- `vault_link` — best-effort path to where the conversation is saved in the
+  vault (`~/agents/histories/<…>.md`), matched by session cwd/host.
 
-This is not a transcript or step log. Hook writers replace the snapshot fields
-as the turn develops, preserving omitted fields and updating `updated_at`, so
-subscribers can read one current contract without trimming historical bloat.
+Optional `success_verification` / `path` fields are retained for callers that
+set them, but the unified hook no longer scrapes them. This is not a transcript
+or step log: hook writers replace the snapshot fields, preserving omitted ones
+and updating `updated_at`, so subscribers read one current contract.
 
 ## How events get here (one hook, many subscribers)
 
-Each LLM's native lifecycle hooks (claude settings hook, codex bridge, grok
-drop-in — see [llm-classes.md](llm-classes.md)) run the same generic script,
+Each LLM's native lifecycle hooks (claude settings hook, codex `hooks.json`,
+grok drop-in — see [llm-classes.md](llm-classes.md)) run the **same unified
+script** (`arcmux-session-hook.sh`; codex no longer has a divergent bridge),
 which (1) appends the raw event to the JSONL audit and (2) calls
-`arcmux hook --agent <agent> --event <canonical>` to mutate the state doc.
-The per-session identity comes from `ARCMUX_SESSION_ID` /
-`ARCMUX_SESSION_STATE_DIR` env injected into the agent's pane at launch; the
-script no-ops for non-arcmux sessions, so global registration is safe.
+`arcmux hook --agent <agent> --event <canonical>` (plus `--goal` /
+`--last-message` / `--vault-link` recording flags) to mutate the state doc. The
+per-session identity comes from `ARCMUX_SESSION_ID` / `ARCMUX_SESSION_STATE_DIR`
+env injected at launch (with `ARCMUX_SESSION_CWD` added for vault-link
+resolution); the script no-ops for non-arcmux sessions, so global registration
+is safe.
 
-Hook bridges may also pass `--goal`, `--verification`, and `--path` to
-`arcmux hook`; these update `turn_contract` in the same locked read-modify-write
-as the event. On prompt submission, the bridges emit agent context reminding the
-agent to keep those three fields concrete and consolidated.
+On `turn_end` the hook also fires a **background, best-effort** summarizer that
+refreshes `overall_goal` via `arcmux hook --overall-goal <text>` — a
+**contract-only** write (no `--event`) that updates the recording without moving
+any event counters. It never blocks the turn; if grok is unreachable,
+`overall_goal` simply keeps its prior value.
 
 A subscriber that wants "is session X working? when did it last finish a
 turn?" should read `sessions/<id>.json`. A subscriber that wants the full

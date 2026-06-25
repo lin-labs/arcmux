@@ -21,7 +21,12 @@ func TestEnsureCodexHookWritesIdempotently(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read installed hook: %v", err)
 	}
-	if !strings.Contains(string(data), "--agent codex") {
+	// Codex now installs the unified script (agent from env, not hardcoded),
+	// byte-identical to the generic claude/grok hook.
+	if string(data) != genericHookScript {
+		t.Fatalf("codex hook should be the unified generic script")
+	}
+	if !strings.Contains(string(data), "hook --agent") || !strings.Contains(string(data), "ARCMUX_HOOK_AGENT") {
 		t.Fatalf("installed script missing arcmux contract invocation")
 	}
 	info, _ := os.Stat(path)
@@ -43,7 +48,9 @@ func TestEnsureCodexHookRejectsRelativeDir(t *testing.T) {
 	}
 }
 
-func TestCodexHookPassesTurnContract(t *testing.T) {
+// On a user prompt the unified hook records the raw last user message (recording,
+// not steering — no system-message injection), with the agent taken from the env.
+func TestCodexHookRecordsLastUserMessage(t *testing.T) {
 	dir := t.TempDir()
 	inst := NewInstaller(t.TempDir())
 	if err := inst.EnsureCodexHook(dir); err != nil {
@@ -59,15 +66,17 @@ func TestCodexHookPassesTurnContract(t *testing.T) {
 	cmd := exec.Command("/bin/sh", CodexHookPath(dir))
 	cmd.Env = append(os.Environ(),
 		"ARCMUX_SESSION_ID=s-codex",
+		"ARCMUX_HOOK_AGENT=codex",
 		"ARCMUX_BIN="+fakeArcmux,
 	)
-	cmd.Stdin = strings.NewReader(`{"hook_event_name":"UserPromptSubmit","prompt":"Record turn objective","success_verification":"turn_contract fields are present","path":"Wire Codex bridge to arcmux hook"}`)
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"UserPromptSubmit","prompt":"Record turn objective"}`)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("run codex hook: %v (%s)", err, out)
 	}
-	if !strings.Contains(string(out), "Arcmux turn contract") {
-		t.Fatalf("prompt-submit hook did not emit turn-contract context: %s", out)
+	// Recording, not steering: no turn-contract system message is emitted.
+	if strings.Contains(string(out), "Arcmux turn contract") {
+		t.Fatalf("hook should not emit steering context: %s", out)
 	}
 
 	argv, err := os.ReadFile(argvFile)
@@ -76,9 +85,9 @@ func TestCodexHookPassesTurnContract(t *testing.T) {
 	}
 	call := string(argv)
 	for _, want := range []string{
-		"--goal Record turn objective",
-		"--verification turn_contract fields are present",
-		"--path Wire Codex bridge to arcmux hook",
+		"--agent codex",
+		"--event prompt_submit",
+		"--last-message Record turn objective",
 		"--contract-source UserPromptSubmit",
 	} {
 		if !strings.Contains(call, want) {
@@ -87,7 +96,9 @@ func TestCodexHookPassesTurnContract(t *testing.T) {
 	}
 }
 
-func TestCodexHookExtractsStopContractFromTranscript(t *testing.T) {
+// On Stop the hook gauges the goal from the agent's "Your ask:" line and records
+// the raw last user message, both extracted from the codex transcript.
+func TestCodexHookExtractsRecordingFromTranscript(t *testing.T) {
 	dir := t.TempDir()
 	inst := NewInstaller(t.TempDir())
 	if err := inst.EnsureCodexHook(dir); err != nil {
@@ -97,7 +108,7 @@ func TestCodexHookExtractsStopContractFromTranscript(t *testing.T) {
 	transcript := filepath.Join(dir, "transcript.jsonl")
 	if err := os.WriteFile(transcript, []byte(
 		`{"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Implement arcmux turn contract state."}],"metadata":{"turn_id":"turn-1"}}}`+"\n"+
-			`{"payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Your ask: implement arcmux turn contract state.\nPatched hook state and bridge scripts.\nVerification: go test ./... passed."}],"metadata":{"turn_id":"turn-1"}}}`+"\n",
+			`{"payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Your ask: implement arcmux turn contract state.\nPatched hook state and bridge scripts."}],"metadata":{"turn_id":"turn-1"}}}`+"\n",
 	), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -111,6 +122,7 @@ func TestCodexHookExtractsStopContractFromTranscript(t *testing.T) {
 	cmd := exec.Command("/bin/sh", CodexHookPath(dir))
 	cmd.Env = append(os.Environ(),
 		"ARCMUX_SESSION_ID=s-codex",
+		"ARCMUX_HOOK_AGENT=codex",
 		"ARCMUX_BIN="+fakeArcmux,
 	)
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"Stop","turn_id":"turn-1","transcript_path":"` + transcript + `"}`)
@@ -125,9 +137,9 @@ func TestCodexHookExtractsStopContractFromTranscript(t *testing.T) {
 	call := string(argv)
 	for _, want := range []string{
 		"--event turn_end",
+		"--agent codex",
 		"--goal implement arcmux turn contract state.",
-		"--verification Verification: go test ./... passed.",
-		"--path Your ask: implement arcmux turn contract state. Patched hook state and bridge scripts. Verification: go test ./... passed.",
+		"--last-message Implement arcmux turn contract state.",
 		"--contract-source Stop",
 	} {
 		if !strings.Contains(call, want) {

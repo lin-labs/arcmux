@@ -8,6 +8,60 @@ import (
 	"time"
 )
 
+func TestTurnContractRecording(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	id := "s-rec"
+	now := time.Date(2026, 6, 25, 9, 0, 0, 0, time.UTC)
+
+	// Launch prompt seeds the overall goal.
+	if err := InitSessionState(dir, id, "claude", "build the X feature", now); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	st, _ := ReadSessionState(dir, id)
+	if st.TurnContract == nil || st.TurnContract.OverallGoal != "build the X feature" {
+		t.Fatalf("launch seed missing: %+v", st.TurnContract)
+	}
+
+	// A turn records the gauged goal + raw last message (3-line truncated).
+	rec := TurnContractUpdate{
+		Goal:            "add tests for X",
+		LastUserMessage: "line1\nline2\nline3\nline4\nline5",
+	}
+	if err := ApplyEventWithContract(dir, id, "claude", EventTurnEnd, "", rec, now.Add(time.Minute)); err != nil {
+		t.Fatalf("turn_end: %v", err)
+	}
+	st, _ = ReadSessionState(dir, id)
+	if st.TurnContract.Goal != "add tests for X" {
+		t.Fatalf("goal not recorded: %+v", st.TurnContract)
+	}
+	if got := st.TurnContract.LastUserMessage; got != "line1\nline2\nline3\n…" {
+		t.Fatalf("last message not truncated to 3 lines: %q", got)
+	}
+	if st.TurnContract.OverallGoal != "build the X feature" {
+		t.Fatalf("overall goal should persist across the turn: %+v", st.TurnContract)
+	}
+
+	// The background summarizer refreshes overall_goal WITHOUT moving counters.
+	beforeEvents := st.EventsSeen
+	beforeTurns := st.TurnCount
+	if err := ApplyContractOnly(dir, id, "claude", TurnContractUpdate{OverallGoal: "ship X end to end"}, now.Add(2*time.Minute)); err != nil {
+		t.Fatalf("contract-only: %v", err)
+	}
+	st, _ = ReadSessionState(dir, id)
+	if st.TurnContract.OverallGoal != "ship X end to end" {
+		t.Fatalf("overall goal should evolve: %+v", st.TurnContract)
+	}
+	if st.EventsSeen != beforeEvents || st.TurnCount != beforeTurns {
+		t.Fatalf("contract-only refresh must not move counters: events %d->%d turns %d->%d",
+			beforeEvents, st.EventsSeen, beforeTurns, st.TurnCount)
+	}
+	// Latest goal untouched by the overall refresh.
+	if st.TurnContract.Goal != "add tests for X" {
+		t.Fatalf("latest goal should be untouched: %+v", st.TurnContract)
+	}
+}
+
 func TestApplyEventTransitions(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -140,7 +194,7 @@ func TestApplyEventConcurrent(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	id := "s-conc"
-	if err := InitSessionState(dir, id, "claude", time.Now()); err != nil {
+	if err := InitSessionState(dir, id, "claude", "", time.Now()); err != nil {
 		t.Fatalf("init: %v", err)
 	}
 

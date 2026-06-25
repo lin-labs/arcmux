@@ -644,7 +644,7 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 		// `arcmux hook`, which writes the state doc the hooks judge reads —
 		// so give it the session id and the state dir.
 		if prof.HookBacked() {
-			if err := hooks.InitSessionState(d.cfg.Hooks.SessionStateDir, id, req.Agent, time.Now()); err != nil {
+			if err := hooks.InitSessionState(d.cfg.Hooks.SessionStateDir, id, req.Agent, req.Prompt, time.Now()); err != nil {
 				d.logger.Warn("init session state failed (non-fatal)", "error", err)
 			}
 			sessionEnv := map[string]string{
@@ -652,6 +652,9 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 				"ARCMUX_HOOK_AGENT":        req.Agent,
 				"ARCMUX_HOOK_OUTPUT_DIR":   d.cfg.Hooks.HookOutputDir,
 				"ARCMUX_SESSION_STATE_DIR": d.cfg.Hooks.SessionStateDir,
+				// Lets the hook's vault-link resolver match this session's cwd
+				// against the history logs' frontmatter.
+				"ARCMUX_SESSION_CWD": req.CWD,
 			}
 			// Point the hook at this exact arcmux binary so it doesn't depend on
 			// `arcmux` being on the agent shell's PATH.
@@ -1439,7 +1442,7 @@ func (d *Daemon) restoreSessions() {
 		// Ensure the per-session hook state doc still exists for restored
 		// hook-backed agents (idempotent: preserves existing event fields).
 		if prof, ok := d.profiles[rec.Agent]; ok && prof.HookBacked() {
-			if err := hooks.InitSessionState(d.cfg.Hooks.SessionStateDir, rec.ID, rec.Agent, time.Now()); err != nil {
+			if err := hooks.InitSessionState(d.cfg.Hooks.SessionStateDir, rec.ID, rec.Agent, "", time.Now()); err != nil {
 				d.logger.Warn("init session state on restore failed (non-fatal)", "session", rec.ID, "error", err)
 			}
 		}

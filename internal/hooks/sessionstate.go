@@ -48,11 +48,36 @@ type SessionState struct {
 }
 
 // TurnContract is the compact, current per-session contract that arcmux-parent
-// agents refresh every turn: what they are trying to do, how success will be
-// verified, and the consolidated path taken or planned. It is a snapshot, not
-// an append-only log.
+// agents refresh every turn. It is an accurate, evolving RECORDING of the work
+// (recording, not steering — nothing here changes the agent's behavior), kept
+// as one consolidated snapshot rather than an append-only log.
+//
+// Three recorded views, all valued:
+//   - Goal (latest): the agent's latest "Your ask:" restatement — the current
+//     sub-task being steered, scraped from the transcript (no model call).
+//   - LastUserMessage: the raw last user turn, verbatim (3-line truncated).
+//   - OverallGoal: the entirety of the conversation, CONTINUOUSLY EVOLVING. It
+//     is seeded from the launch prompt and then re-derived each turn by passing
+//     the kept user turns + the current overall goal to a summarizer (xAI grok);
+//     normally one succinct line, or — when the conversation has clearly shifted
+//     gears into separate themes — a short checklist with earlier goals checked
+//     off. It is NOT frozen.
 type TurnContract struct {
-	Goal                string    `json:"goal,omitempty"`
+	// Goal is the current gauged goal — the agent's latest "Your ask:". Shifts
+	// each turn while still reflecting the objective.
+	Goal string `json:"goal,omitempty"`
+	// OverallGoal is the whole-conversation objective, continuously evolving
+	// (see the type doc). Seeded from the launch prompt, then refreshed by the
+	// background summarizer; may hold a multi-theme checklist.
+	OverallGoal string `json:"overall_goal,omitempty"`
+	// LastUserMessage is the raw, verbatim most-recent user prompt (truncated to
+	// 3 lines) — recorded alongside the gauged goal, never as a substitute.
+	LastUserMessage string `json:"last_user_message,omitempty"`
+	// VaultLink is the best-effort path to where the conversation is saved in
+	// the vault (~/agents/histories/<…>.md), resolved by cwd/host match.
+	VaultLink string `json:"vault_link,omitempty"`
+	// SuccessVerification and Path are optional, retained from the original
+	// contract: how success is/was verified, and the consolidated approach.
 	SuccessVerification string    `json:"success_verification,omitempty"`
 	Path                string    `json:"path,omitempty"`
 	Source              string    `json:"source,omitempty"`
@@ -64,6 +89,9 @@ type TurnContract struct {
 // refresh one dimension without erasing the others.
 type TurnContractUpdate struct {
 	Goal                string
+	OverallGoal         string
+	LastUserMessage     string
+	VaultLink           string
 	SuccessVerification string
 	Path                string
 	Source              string
@@ -102,7 +130,12 @@ func ReadSessionState(stateDir, sessionID string) (*SessionState, error) {
 // InitSessionState creates (or refreshes the identity fields of) a session's
 // live state file. Called by the daemon when it starts watching a session.
 // Idempotent: an existing file's event-derived fields are preserved.
-func InitSessionState(stateDir, sessionID, agent string, now time.Time) error {
+//
+// launchGoal is the prompt the session was started with (`arcmux create/exec`
+// prompt). It seeds OverallGoal as the initial objective — so the thing that
+// launched the agent influences the record from turn zero — which the
+// summarizer then continuously refines. Empty launchGoal is fine.
+func InitSessionState(stateDir, sessionID, agent, launchGoal string, now time.Time) error {
 	return mutateSessionState(stateDir, sessionID, func(st *SessionState) {
 		st.SessionID = sessionID
 		if agent != "" {
@@ -114,6 +147,15 @@ func InitSessionState(stateDir, sessionID, agent string, now time.Time) error {
 		if st.UpdatedAt.IsZero() {
 			st.UpdatedAt = now
 		}
+		// Seed the overall goal from the launch prompt; the summarizer refines it.
+		if launchGoal := compactContractText(launchGoal); launchGoal != "" {
+			if st.TurnContract == nil {
+				st.TurnContract = &TurnContract{}
+			}
+			if st.TurnContract.OverallGoal == "" {
+				st.TurnContract.OverallGoal = launchGoal
+			}
+		}
 	})
 }
 
@@ -123,6 +165,23 @@ func InitSessionState(stateDir, sessionID, agent string, now time.Time) error {
 // fails loudly.
 func ApplyEvent(stateDir, sessionID, agent, event, tool string, now time.Time) error {
 	return ApplyEventWithContract(stateDir, sessionID, agent, event, tool, TurnContractUpdate{}, now)
+}
+
+// ApplyContractOnly updates just the turn-contract recording fields without
+// recording an event — no counters move, Working/TurnCount/last_event are
+// untouched. It is the write path for the background overall-goal summarizer,
+// which refreshes OverallGoal out-of-band after a turn has already ended.
+func ApplyContractOnly(stateDir, sessionID, agent string, contract TurnContractUpdate, now time.Time) error {
+	return mutateSessionState(stateDir, sessionID, func(st *SessionState) {
+		st.SessionID = sessionID
+		if agent != "" {
+			st.Agent = agent
+		}
+		if st.CreatedAt.IsZero() {
+			st.CreatedAt = now
+		}
+		applyTurnContractUpdate(st, contract, now)
+	})
 }
 
 // ApplyEventWithContract records a canonical hook event and, when provided,
@@ -174,10 +233,14 @@ func ApplyEventWithContract(stateDir, sessionID, agent, event, tool string, cont
 
 func applyTurnContractUpdate(st *SessionState, update TurnContractUpdate, now time.Time) {
 	goal := compactContractText(update.Goal)
+	overall := compactContractText(update.OverallGoal)
+	lastMsg := truncateLines(update.LastUserMessage, 3)
+	vault := compactContractText(update.VaultLink)
 	verification := compactContractText(update.SuccessVerification)
 	path := compactContractText(update.Path)
 	source := compactContractText(update.Source)
-	if goal == "" && verification == "" && path == "" && source == "" {
+	if goal == "" && overall == "" && lastMsg == "" && vault == "" &&
+		verification == "" && path == "" && source == "" {
 		return
 	}
 
@@ -186,6 +249,16 @@ func applyTurnContractUpdate(st *SessionState, update TurnContractUpdate, now ti
 	}
 	if goal != "" {
 		st.TurnContract.Goal = goal
+	}
+	// OverallGoal evolves continuously — always take the latest summary.
+	if overall != "" {
+		st.TurnContract.OverallGoal = overall
+	}
+	if lastMsg != "" {
+		st.TurnContract.LastUserMessage = lastMsg
+	}
+	if vault != "" {
+		st.TurnContract.VaultLink = vault
 	}
 	if verification != "" {
 		st.TurnContract.SuccessVerification = verification
@@ -210,6 +283,33 @@ func compactContractText(value string) string {
 		return value
 	}
 	return string(runes[:maxRunes])
+}
+
+// truncateLines keeps the raw shape of the last user message but caps it at the
+// first n non-trailing lines, appending an ellipsis when content was dropped.
+// Unlike compactContractText it preserves line breaks (the message is shown
+// verbatim, just bounded). Each kept line is still rune-capped to stay sane.
+func truncateLines(value string, n int) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	lines := strings.Split(value, "\n")
+	kept := make([]string, 0, n)
+	for _, line := range lines {
+		if len(kept) >= n {
+			break
+		}
+		runes := []rune(line)
+		if len(runes) > 300 {
+			line = string(runes[:300])
+		}
+		kept = append(kept, line)
+	}
+	out := strings.Join(kept, "\n")
+	if len(lines) > n {
+		out += "\n…"
+	}
+	return out
 }
 
 // ArchiveSessionState moves a session's live state file into the archived/

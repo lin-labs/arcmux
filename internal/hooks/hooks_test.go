@@ -206,7 +206,7 @@ func TestGenericHook_ParsesStdinJSON(t *testing.T) {
 		"ARCMUX_HOOK_OUTPUT_DIR="+outDir,
 		"ARCMUX_BIN="+fakeArcmux,
 	)
-	cmd.Stdin = strings.NewReader(`{"hook_event_name":"UserPromptSubmit","tool_name":"","session_id":"x","prompt":"Fix arcmux goal routing","success_verification":"state JSON has a turn_contract object","plan":"Patch hook writer and tests"}`)
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"UserPromptSubmit","tool_name":"","session_id":"x","prompt":"Fix arcmux goal routing"}`)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("run hook: %v (%s)", err, out)
 	}
@@ -226,10 +226,11 @@ func TestGenericHook_ParsesStdinJSON(t *testing.T) {
 		t.Fatalf("fake arcmux never invoked: %v", err)
 	}
 	call := string(argv)
+	// Unified recording semantics: the raw prompt is the last user message; the
+	// gauged goal comes from the agent's "Your ask:" (not present here).
 	for _, want := range []string{
-		"--goal Fix arcmux goal routing",
-		"--verification state JSON has a turn_contract object",
-		"--path Patch hook writer and tests",
+		"--event prompt_submit",
+		"--last-message Fix arcmux goal routing",
 		"--contract-source UserPromptSubmit",
 	} {
 		if !strings.Contains(call, want) {
