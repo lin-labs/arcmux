@@ -15,6 +15,7 @@ import (
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
+	"github.com/lin-labs/arcmux/internal/hooks"
 	"github.com/lin-labs/arcmux/internal/profile"
 	"github.com/lin-labs/arcmux/internal/project"
 	"github.com/lin-labs/arcmux/internal/session"
@@ -393,6 +394,11 @@ type sessionSummary struct {
 	StartedAt      string `json:"started_at"`
 	CurrentCommand string `json:"current_command,omitempty"`
 	RemoteServer   bool   `json:"remote_server,omitempty"`
+	// TurnContract is the recording snapshot from the per-session state doc
+	// (goal / overall_goal / last_user_message / vault_link). Merged in so
+	// clients (voxtop) get a bird's-eye view of what each agent is doing
+	// without reading the state files themselves. Nil when no hook data yet.
+	TurnContract *hooks.TurnContract `json:"turn_contract,omitempty"`
 }
 
 type sessionsListResponse struct {
@@ -421,7 +427,7 @@ func (h *HTTPServer) handleSessionsList(w http.ResponseWriter, r *http.Request) 
 		if projectSlug != "" && !matcher.Matches(snap.CWD, snap.OwnerID) {
 			continue
 		}
-		out.Sessions = append(out.Sessions, sessionSummary{
+		summary := sessionSummary{
 			SessionID:      snap.ID,
 			Name:           snap.Name,
 			Agent:          snap.Agent,
@@ -431,7 +437,13 @@ func (h *HTTPServer) handleSessionsList(w http.ResponseWriter, r *http.Request) 
 			StartedAt:      snap.StartedAt.Format("2006-01-02T15:04:05Z07:00"),
 			CurrentCommand: snap.CurrentCommand,
 			RemoteServer:   isCodexRemoteServerSnapshot(snap),
-		})
+		}
+		// Merge the recording snapshot (best-effort: a missing/unreadable state
+		// doc just leaves turn_contract nil, never fails the listing).
+		if st, err := hooks.ReadSessionState(h.daemon.cfg.Hooks.SessionStateDir, snap.ID); err == nil && st != nil {
+			summary.TurnContract = st.TurnContract
+		}
+		out.Sessions = append(out.Sessions, summary)
 	}
 	writeJSON(w, http.StatusOK, out)
 }
