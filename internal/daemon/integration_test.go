@@ -165,7 +165,7 @@ func TestIntegration_TmuxPerAgentSessionsRouteByPaneID(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		tmuxSession := fmt.Sprintf("%s-%d", defaultSession, i)
 		env := map[string]string{"ARCMUX_PROJECT": fmt.Sprintf("project-%d", i)}
-		target, err := d.setupTmuxPane(d.ctx, tmuxSession, sharedName, tmpDir, env)
+		target, err := d.setupTmuxPane(d.ctx, tmuxSession, sharedName, tmpDir, env, "")
 		if err != nil {
 			t.Fatalf("setupTmuxPane %d: %v", i, err)
 		}

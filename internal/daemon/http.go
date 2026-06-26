@@ -214,17 +214,13 @@ func (h *HTTPServer) handleSessionNew(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tmuxSession := h.daemon.agentTmuxSessionName("", name, "", id)
-	target, err := h.daemon.setupTmuxPane(ctx, tmuxSession, name, cwd, nil)
+	// Launch the agent as the tmux session's own command (exec, so the agent
+	// is the pane's process) instead of send-keys into a shell — when it exits
+	// the pane closes and the session is destroyed, leaving nothing lingering.
+	target, err := h.daemon.setupTmuxPane(ctx, tmuxSession, name, cwd, nil, "exec "+command)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{
 			Error: fmt.Sprintf("setup tmux pane: %v", err),
-		})
-		return
-	}
-
-	if err := h.daemon.tmux.SendKeys(ctx, target, command, "Enter"); err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorResponse{
-			Error: fmt.Sprintf("send start command: %v", err),
 		})
 		return
 	}

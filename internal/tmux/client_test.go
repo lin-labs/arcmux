@@ -104,7 +104,7 @@ func TestIntegration_NewSessionWithEnv(t *testing.T) {
 		"ARCMUX_FOO": "bar-value",
 		"ARCMUX_BAZ": "qux",
 	}
-	if err := c.NewSessionWithEnv(ctx, sessionName, "win", "", env); err != nil {
+	if err := c.NewSessionWithEnv(ctx, sessionName, "win", "", env, ""); err != nil {
 		t.Fatalf("NewSessionWithEnv: %v", err)
 	}
 	t.Cleanup(func() {
@@ -162,7 +162,7 @@ func TestIntegration_PaneIDRoutingSurvivesDuplicateNames(t *testing.T) {
 	})
 
 	// First window via NewSessionWithEnvPaneID → returns %pane_id of pane 1.
-	pid1, err := c.NewSessionWithEnvPaneID(ctx, sessionName, "dup", "", nil)
+	pid1, err := c.NewSessionWithEnvPaneID(ctx, sessionName, "dup", "", nil, "")
 	if err != nil {
 		t.Fatalf("NewSessionWithEnvPaneID: %v", err)
 	}
@@ -246,7 +246,7 @@ func TestIntegration_NewWindowCanonical_TargetShape(t *testing.T) {
 		t.Fatalf("EnsureServer: %v", err)
 	}
 	sessionName := fmt.Sprintf("arcmux-canon-session-%d", time.Now().UnixNano())
-	if err := c.NewSessionWithEnv(ctx, sessionName, "first", "", nil); err != nil {
+	if err := c.NewSessionWithEnv(ctx, sessionName, "first", "", nil, ""); err != nil {
 		t.Fatalf("NewSessionWithEnv: %v", err)
 	}
 	t.Cleanup(func() {

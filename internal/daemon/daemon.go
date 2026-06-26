@@ -271,7 +271,6 @@ func (d *Daemon) Start(ctx context.Context) error {
 	go d.relayHealthEvents()
 	go d.watcher.Run(d.ctx)
 	go d.persistLoop()
-	go d.reapLoop()
 
 	// Pulse supervisor: one Pulser per discovered project under
 	// <Pulse.DataRoot>/arcmux/*/state.bolt. Disabled? Skip silently.
@@ -618,21 +617,13 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 	}
 	tmuxSession := d.agentTmuxSessionName(req.TmuxSession, name, req.OwnerID, id)
 
-	// Create a dedicated tmux session for this agent. Pass caller-supplied env through
-	// so ARCMUX_PROJECT / ARCMUX_ROLE_FILE / OBS_AGENTS / ... are visible
-	// to the spawned shell — every elon role file relies on this contract.
-	target, err := d.setupTmuxPane(ctx, tmuxSession, window, req.CWD, req.Env)
-	if err != nil {
-		sess.SetState(session.StateFailed)
-		return nil, false, fmt.Errorf("setup tmux pane: %w", err)
-	}
-	sess.TmuxSessionName = tmuxSession
-	sess.TmuxTarget = target
-
 	// Install hooks (one generic, idempotent script) + write the per-session
-	// env file the tmux loader will load before launching the agent. The env
-	// file lives under /tmp/arcmux with restrictive perms; the loader reads it
-	// via `arcmux hook-env` (validated + re-quoted), never sourcing it raw.
+	// env file the agent loads at startup. This MUST happen before the tmux
+	// session is created, because the agent is now launched as that session's
+	// own command and runs `arcmux hook-env <id>` immediately — the env file
+	// has to already exist. The env file lives under /tmp/arcmux with
+	// restrictive perms; the loader reads it via `arcmux hook-env` (validated
+	// + re-quoted), never sourcing it raw.
 	if d.cfg.Hooks.AutoInstall {
 		hookPath, err := d.hooks.Install(id, prof.HookType, prof.HookDir)
 		if err != nil {
@@ -667,6 +658,24 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 			}
 		}
 	}
+
+	// The agent runs AS the tmux session's command (not send-keys'd into an
+	// interactive shell). This makes the session transactional with the agent:
+	// when the agent exits, tmux closes the pane and destroys the (single-window)
+	// session, so a dead agent never leaves a lingering tmux session behind. The
+	// health monitor observes the vanished pane and marks the session exited.
+	startCommand := d.agentStartCommand(id, req.Agent, prof.StartCommand)
+
+	// Create a dedicated tmux session for this agent, launching the agent as
+	// its command. Pass caller-supplied env through so ARCMUX_PROJECT /
+	// ARCMUX_ROLE_FILE / OBS_AGENTS / ... are visible to the agent process.
+	target, err := d.setupTmuxPane(ctx, tmuxSession, window, req.CWD, req.Env, startCommand)
+	if err != nil {
+		sess.SetState(session.StateFailed)
+		return nil, false, fmt.Errorf("setup tmux pane: %w", err)
+	}
+	sess.TmuxSessionName = tmuxSession
+	sess.TmuxTarget = target
 
 	// Set up output streaming via pipe-pane
 	outputFile := d.outputFilePath(id)
@@ -733,17 +742,18 @@ func (d *Daemon) agentStartCommand(id, agent, startCommand string) string {
 		startCommand = startCommand + " " + args
 	}
 
-	// Hook-backed agents read ARCMUX_SESSION_ID / ARCMUX_SESSION_STATE_DIR
-	// / ARCMUX_BIN from the env the loader injects. Other agents (and
-	// AutoInstall off) launch unchanged.
+	// `exec` so the agent REPLACES the `sh -c` wrapper that tmux launches it
+	// under: the pane's process becomes the agent itself, so the pane (and the
+	// single-window session) dies exactly when the agent exits — no leftover
+	// shell holding it open. Even without hooks the agent is exec'd.
 	if !d.cfg.Hooks.AutoInstall || !ok || !prof.HookBacked() {
-		return startCommand
+		return "exec " + startCommand
 	}
 	bin, err := os.Executable()
 	if err != nil || bin == "" {
 		bin = "arcmux" // fall back to PATH resolution
 	}
-	return fmt.Sprintf(`eval "$(%s hook-env %s)" ; %s`,
+	return fmt.Sprintf(`eval "$(%s hook-env %s)" ; exec %s`,
 		shellSingleQuote(bin), shellSingleQuote(id), startCommand)
 }
 
@@ -755,20 +765,11 @@ func shellSingleQuote(s string) string {
 
 func (d *Daemon) startAgentLifecycle(id string, sess *session.Session, prof profile.Profile, prompt string) {
 	ctx := d.ctx
-	snap := sess.Snapshot()
-	target := snap.TmuxTarget
 
-	// Start the agent process. For claude with hooks enabled, prefix the
-	// launch with the env loader so the generic hook learns its per-session
-	// JSONL path; the loader fails safe (no injected env) if hook-env errors.
-	startCommand := d.agentStartCommand(id, snap.Agent, prof.StartCommand)
-	if err := d.tmux.SendKeys(ctx, target, startCommand, "Enter"); err != nil {
-		sess.SetState(session.StateFailed)
-		d.emitStateChanged(id, session.StateFailed, "failed to start agent")
-		return
-	}
-
-	// Perform handshake
+	// The agent was already launched as the tmux session's own command (see
+	// CreateSession + NewSessionWithEnv): no send-keys launch step, so there is
+	// no shell-readiness race and a dead agent leaves no lingering session.
+	// Proceed straight to the handshake.
 	sess.SetState(session.StateHandshaking)
 	d.emitStateChanged(id, session.StateHandshaking, "")
 
@@ -1224,7 +1225,7 @@ func (d *Daemon) relayHealthEvents() {
 	}
 }
 
-func (d *Daemon) setupTmuxPane(ctx context.Context, tmuxSession, window, cwd string, env map[string]string) (string, error) {
+func (d *Daemon) setupTmuxPane(ctx context.Context, tmuxSession, window, cwd string, env map[string]string, command string) (string, error) {
 	// Create exactly one tmux session per agent. tmux stores environment at
 	// session scope; creating sibling agents as new windows under a shared
 	// session leaves `show-environment -t <session>` pinned to whichever
@@ -1243,7 +1244,7 @@ func (d *Daemon) setupTmuxPane(ctx context.Context, tmuxSession, window, cwd str
 	// 13 correctly-named windows but every prompt got pasted into a
 	// pre-existing pane because the routing target was a window name that
 	// resolved to the wrong window.
-	pid, err := d.tmux.NewSessionWithEnvPaneID(ctx, tmuxSession, window, cwd, env)
+	pid, err := d.tmux.NewSessionWithEnvPaneID(ctx, tmuxSession, window, cwd, env, command)
 	if err == nil {
 		return pid, nil
 	}
@@ -1469,86 +1470,6 @@ func (d *Daemon) persistLoop() {
 	}
 }
 
-// reapInterval is how often the daemon sweeps for tmux-backed sessions whose
-// pane has vanished.
-const reapInterval = 30 * time.Second
-
-// reapGrace shields a freshly-created session from being reaped before its
-// pane is observable. CreateSession sets TmuxTarget synchronously, but a slow
-// tmux server or a transient `has-session` miss right after launch must not
-// trigger a reap.
-const reapGrace = 45 * time.Second
-
-// reapLoop periodically reaps tmux-backed sessions whose pane no longer exists.
-// Such sessions arise when an agent exits, a tmux session is killed out of
-// band, or a launcher (e.g. `ax`) created a session then failed to attach and
-// did not clean up. Without this they accumulate as stale registry entries and
-// orphaned tmux state. A live, detached agent's pane DOES exist, so it is never
-// reaped — only genuinely dead panes are.
-func (d *Daemon) reapLoop() {
-	ticker := time.NewTicker(reapInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-d.ctx.Done():
-			return
-		case <-ticker.C:
-			d.reapDeadTmuxSessions(d.ctx)
-		}
-	}
-}
-
-func (d *Daemon) reapDeadTmuxSessions(ctx context.Context) {
-	now := time.Now()
-	for _, sess := range d.ListSessions() {
-		snap := sess.Snapshot()
-		// Only probe the pane for candidates past the grace window; the tmux
-		// round-trip is the expensive part of the sweep.
-		if !reapCandidate(snap, now, reapGrace) {
-			continue
-		}
-		if d.tmux.PaneExists(ctx, snap.TmuxTarget) {
-			continue
-		}
-		d.logger.Info("session.reap.dead_pane",
-			"session_id", snap.ID,
-			"name", snap.Name,
-			"tmux_target", snap.TmuxTarget,
-			"tmux_session", snap.TmuxSessionName,
-			"state", string(snap.State),
-		)
-		// Reuse the full close path: archives hook state, stops pipe-pane,
-		// kills any leftover tmux session, and marks the session Exited. A
-		// non-graceful kill is right — the pane is already gone.
-		if err := d.Kill(ctx, snap.ID, false, 0); err != nil {
-			d.logger.Warn("reap dead session failed", "session_id", snap.ID, "error", err)
-		}
-	}
-}
-
-// reapCandidate reports whether a session is eligible for a dead-pane reap:
-// tmux-backed, not already closed, has a pane target, and past the startup
-// grace window. The actual pane-existence probe is done by the caller so this
-// stays a pure, unit-testable predicate.
-//
-// StateFailed is intentionally still a candidate: the daemon marks a session
-// "failed" on a handshake/health miss even though its pane (and agent) may be
-// perfectly alive, so "failed" is not a reliable death signal — the pane is.
-// A failed session whose pane is gone is genuine lingering tmux and should be
-// reaped; a failed session whose pane survives is left untouched by the caller.
-// Only StateExited is skipped: it was already closed (tmux torn down by Kill).
-func reapCandidate(snap session.Snapshot, now time.Time, grace time.Duration) bool {
-	if snap.Transport == profile.TransportExec {
-		return false
-	}
-	if snap.State == session.StateExited {
-		return false
-	}
-	if snap.TmuxTarget == "" {
-		return false
-	}
-	return now.Sub(snap.StartedAt) >= grace
-}
 
 // --- Helpers ---
 

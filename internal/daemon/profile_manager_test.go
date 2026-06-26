@@ -54,10 +54,10 @@ func TestProfileManager_CreateRemoveRestart(t *testing.T) {
 	}
 	assertProfileReachable(t, alpha.SocketPath)
 	assertProfileReachable(t, beta.SocketPath)
-	if _, err := pm.daemons["alpha"].setupTmuxPane(ctx, "worker", "win", home, map[string]string{"ARCMUX_PROFILE": "alpha"}); err != nil {
+	if _, err := pm.daemons["alpha"].setupTmuxPane(ctx, "worker", "win", home, map[string]string{"ARCMUX_PROFILE": "alpha"}, ""); err != nil {
 		t.Fatalf("alpha setup tmux pane: %v", err)
 	}
-	if _, err := pm.daemons["beta"].setupTmuxPane(ctx, "worker", "win", home, map[string]string{"ARCMUX_PROFILE": "beta"}); err != nil {
+	if _, err := pm.daemons["beta"].setupTmuxPane(ctx, "worker", "win", home, map[string]string{"ARCMUX_PROFILE": "beta"}, ""); err != nil {
 		t.Fatalf("beta setup tmux pane: %v", err)
 	}
 	if got, err := pm.daemons["alpha"].tmux.ShowEnvironment(ctx, "worker", "ARCMUX_PROFILE"); err != nil || got != "alpha" {

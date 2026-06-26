@@ -85,14 +85,21 @@ func envFlags(env map[string]string) []string {
 
 // NewSession creates a new tmux session.
 func (c *Client) NewSession(ctx context.Context, name, window, cwd string) error {
-	return c.NewSessionWithEnv(ctx, name, window, cwd, nil)
+	return c.NewSessionWithEnv(ctx, name, window, cwd, nil, "")
 }
 
 // NewSessionWithEnv creates a new tmux session, exporting the supplied env
 // vars into the new pane's shell via repeated `-e KEY=VAL` flags. Use this
 // when callers (e.g. arcmux CreateSession) need to inject ARCMUX_PROJECT,
 // ARCMUX_ROLE_FILE, OBS_AGENTS, etc. into the spawned agent process.
-func (c *Client) NewSessionWithEnv(ctx context.Context, name, window, cwd string, env map[string]string) error {
+//
+// When command is non-empty it becomes the pane's process (run as `sh -c
+// command`, so a hook-env eval works) instead of an interactive shell. The
+// agent's lifecycle then IS the session's: when the command exits, tmux closes
+// the pane/window and — being the last window — destroys the session, so a
+// dead agent never leaves a lingering tmux session behind (remain-on-exit
+// defaults to off). An empty command keeps the old interactive-shell behavior.
+func (c *Client) NewSessionWithEnv(ctx context.Context, name, window, cwd string, env map[string]string, command string) error {
 	args := []string{"new-session", "-d", "-s", name}
 	if window != "" {
 		args = append(args, "-n", window)
@@ -101,6 +108,9 @@ func (c *Client) NewSessionWithEnv(ctx context.Context, name, window, cwd string
 		args = append(args, "-c", cwd)
 	}
 	args = append(args, envFlags(env)...)
+	if command != "" {
+		args = append(args, "sh", "-c", command)
+	}
 	_, err := c.run(ctx, args...)
 	return err
 }
@@ -113,8 +123,8 @@ func (c *Client) NewSessionWithEnv(ctx context.Context, name, window, cwd string
 //
 // On failure to create the session, returns an empty string + error so
 // callers can fall back to NewWindowPaneID against an existing session.
-func (c *Client) NewSessionWithEnvPaneID(ctx context.Context, name, window, cwd string, env map[string]string) (string, error) {
-	if err := c.NewSessionWithEnv(ctx, name, window, cwd, env); err != nil {
+func (c *Client) NewSessionWithEnvPaneID(ctx context.Context, name, window, cwd string, env map[string]string, command string) (string, error) {
+	if err := c.NewSessionWithEnv(ctx, name, window, cwd, env, command); err != nil {
 		return "", err
 	}
 	// Resolve the pane_id of the freshly-created window. We use
