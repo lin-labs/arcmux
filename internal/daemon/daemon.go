@@ -271,6 +271,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 	go d.relayHealthEvents()
 	go d.watcher.Run(d.ctx)
 	go d.persistLoop()
+	go d.reapLoop()
 
 	// Pulse supervisor: one Pulser per discovered project under
 	// <Pulse.DataRoot>/arcmux/*/state.bolt. Disabled? Skip silently.
@@ -1466,6 +1467,87 @@ func (d *Daemon) persistLoop() {
 			d.persistSessions()
 		}
 	}
+}
+
+// reapInterval is how often the daemon sweeps for tmux-backed sessions whose
+// pane has vanished.
+const reapInterval = 30 * time.Second
+
+// reapGrace shields a freshly-created session from being reaped before its
+// pane is observable. CreateSession sets TmuxTarget synchronously, but a slow
+// tmux server or a transient `has-session` miss right after launch must not
+// trigger a reap.
+const reapGrace = 45 * time.Second
+
+// reapLoop periodically reaps tmux-backed sessions whose pane no longer exists.
+// Such sessions arise when an agent exits, a tmux session is killed out of
+// band, or a launcher (e.g. `ax`) created a session then failed to attach and
+// did not clean up. Without this they accumulate as stale registry entries and
+// orphaned tmux state. A live, detached agent's pane DOES exist, so it is never
+// reaped — only genuinely dead panes are.
+func (d *Daemon) reapLoop() {
+	ticker := time.NewTicker(reapInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-d.ctx.Done():
+			return
+		case <-ticker.C:
+			d.reapDeadTmuxSessions(d.ctx)
+		}
+	}
+}
+
+func (d *Daemon) reapDeadTmuxSessions(ctx context.Context) {
+	now := time.Now()
+	for _, sess := range d.ListSessions() {
+		snap := sess.Snapshot()
+		// Only probe the pane for candidates past the grace window; the tmux
+		// round-trip is the expensive part of the sweep.
+		if !reapCandidate(snap, now, reapGrace) {
+			continue
+		}
+		if d.tmux.PaneExists(ctx, snap.TmuxTarget) {
+			continue
+		}
+		d.logger.Info("session.reap.dead_pane",
+			"session_id", snap.ID,
+			"name", snap.Name,
+			"tmux_target", snap.TmuxTarget,
+			"tmux_session", snap.TmuxSessionName,
+			"state", string(snap.State),
+		)
+		// Reuse the full close path: archives hook state, stops pipe-pane,
+		// kills any leftover tmux session, and marks the session Exited. A
+		// non-graceful kill is right — the pane is already gone.
+		if err := d.Kill(ctx, snap.ID, false, 0); err != nil {
+			d.logger.Warn("reap dead session failed", "session_id", snap.ID, "error", err)
+		}
+	}
+}
+
+// reapCandidate reports whether a session is eligible for a dead-pane reap:
+// tmux-backed, not already closed, has a pane target, and past the startup
+// grace window. The actual pane-existence probe is done by the caller so this
+// stays a pure, unit-testable predicate.
+//
+// StateFailed is intentionally still a candidate: the daemon marks a session
+// "failed" on a handshake/health miss even though its pane (and agent) may be
+// perfectly alive, so "failed" is not a reliable death signal — the pane is.
+// A failed session whose pane is gone is genuine lingering tmux and should be
+// reaped; a failed session whose pane survives is left untouched by the caller.
+// Only StateExited is skipped: it was already closed (tmux torn down by Kill).
+func reapCandidate(snap session.Snapshot, now time.Time, grace time.Duration) bool {
+	if snap.Transport == profile.TransportExec {
+		return false
+	}
+	if snap.State == session.StateExited {
+		return false
+	}
+	if snap.TmuxTarget == "" {
+		return false
+	}
+	return now.Sub(snap.StartedAt) >= grace
 }
 
 // --- Helpers ---
