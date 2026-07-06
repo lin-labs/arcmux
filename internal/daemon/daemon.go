@@ -1470,7 +1470,6 @@ func (d *Daemon) persistLoop() {
 	}
 }
 
-
 // --- Helpers ---
 
 // CreateSessionRequest is the input for creating a session.
