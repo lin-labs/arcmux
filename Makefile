@@ -1,10 +1,18 @@
-.PHONY: build install proto test validate validate-structural validate-substrate validate-substrate-e2e validate-e2e validate-e2e-hooks validate-eval validate-all clean start stop restart status logs tail release deploy
+.PHONY: build install proto test validate validate-structural validate-substrate validate-substrate-e2e validate-e2e validate-e2e-hooks validate-eval validate-all clean start stop restart status logs tail release deploy service-install service-uninstall
 
 BINARY := arcmux
 INSTALL_DIR := $(HOME)/.local/bin
 BIN := $(INSTALL_DIR)/$(BINARY)
 LOG_DIR := $(HOME)/.config/arcmux/logs
 LOG_FILE := $(LOG_DIR)/daemon.log
+
+# macOS launchd LaunchAgent — the systemd analogue on this platform.
+LAUNCHD_LABEL := com.blin.arcmux
+LAUNCHD_PLIST := $(HOME)/Library/LaunchAgents/$(LAUNCHD_LABEL).plist
+LAUNCHD_TEMPLATE := packaging/launchd/$(LAUNCHD_LABEL).plist
+# PATH baked into the agent so the daemon can spawn tmux + coding agents
+# (codex/claude/grok/node) with no login shell to inherit from.
+SERVICE_PATH := $(HOME)/.local/bin:/opt/homebrew/bin:/opt/homebrew/opt/python@3.12/libexec/bin:$(HOME)/.grok/bin:$(HOME)/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 
 # Remote deploy target — override on the command line, e.g.
 #   make deploy LABS_HOST=labs LABS_REPO=~/Projects/arcmux
@@ -105,11 +113,21 @@ deps:
 HAS_SYSTEMD_UNIT = systemctl --user list-unit-files $(BINARY).service 2>/dev/null \
 	| grep -q '^$(BINARY)\.service'
 
+# If the launchd LaunchAgent plist exists (macOS), defer process control to
+# launchctl (like the systemd path above) so the Makefile doesn't fight the
+# agent's KeepAlive respawn. File-based check (not "is it loaded") mirrors the
+# systemd unit-file check, so stop→start round-trips still route to launchd.
+HAS_LAUNCHD_AGENT = test -f $(LAUNCHD_PLIST)
+
 start:
 	@mkdir -p $(LOG_DIR)
 	@if $(HAS_SYSTEMD_UNIT); then \
 		systemctl --user start $(BINARY); \
 		echo "started $(BINARY) via systemd"; \
+	elif $(HAS_LAUNCHD_AGENT); then \
+		launchctl bootstrap gui/$$(id -u) $(LAUNCHD_PLIST) 2>/dev/null \
+			|| launchctl kickstart gui/$$(id -u)/$(LAUNCHD_LABEL); \
+		echo "started $(BINARY) via launchd"; \
 	elif pgrep -x $(BINARY) >/dev/null; then \
 		echo "$(BINARY) already running (pids $$(pgrep -x $(BINARY) | tr '\n' ' '))"; \
 	else \
@@ -123,6 +141,9 @@ stop:
 	@if $(HAS_SYSTEMD_UNIT); then \
 		systemctl --user stop $(BINARY); \
 		echo "stopped $(BINARY) via systemd"; \
+	elif $(HAS_LAUNCHD_AGENT); then \
+		launchctl bootout gui/$$(id -u)/$(LAUNCHD_LABEL) 2>/dev/null || true; \
+		echo "stopped $(BINARY) via launchd (run 'make start' to reload)"; \
 	elif pgrep -x $(BINARY) >/dev/null; then \
 		pkill -TERM -x $(BINARY); \
 		for i in 1 2 3 4 5; do \
@@ -145,9 +166,38 @@ restart:
 	@if $(HAS_SYSTEMD_UNIT); then \
 		systemctl --user restart $(BINARY); \
 		echo "restarted $(BINARY) via systemd"; \
+	elif $(HAS_LAUNCHD_AGENT); then \
+		launchctl kickstart -k gui/$$(id -u)/$(LAUNCHD_LABEL) 2>/dev/null \
+			|| launchctl bootstrap gui/$$(id -u) $(LAUNCHD_PLIST); \
+		echo "restarted $(BINARY) via launchd"; \
 	else \
 		$(MAKE) --no-print-directory stop start; \
 	fi
+
+# Install (or refresh) the macOS launchd LaunchAgent so the daemon auto-starts
+# at login/boot and is restarted on crash (KeepAlive). Idempotent: renders the
+# plist template with this machine's paths, stops any pre-existing daemon
+# (manual or launchd) so launchd owns the singleton, then loads + kickstarts.
+service-install:
+	@test -x $(BIN) || { echo "missing $(BIN); run 'make install' first"; exit 1; }
+	@mkdir -p $(HOME)/Library/LaunchAgents $(LOG_DIR)
+	@sed -e 's#@HOME@#$(HOME)#g' \
+	     -e 's#@BIN@#$(BIN)#g' \
+	     -e 's#@LOG_FILE@#$(LOG_FILE)#g' \
+	     -e 's#@PATH@#$(SERVICE_PATH)#g' \
+	     $(LAUNCHD_TEMPLATE) > $(LAUNCHD_PLIST)
+	@launchctl bootout gui/$$(id -u)/$(LAUNCHD_LABEL) 2>/dev/null || true
+	@pkill -TERM -x $(BINARY) 2>/dev/null || true
+	@sleep 1
+	@launchctl bootstrap gui/$$(id -u) $(LAUNCHD_PLIST)
+	@launchctl enable gui/$$(id -u)/$(LAUNCHD_LABEL)
+	@launchctl kickstart gui/$$(id -u)/$(LAUNCHD_LABEL) 2>/dev/null || true
+	@echo "installed launchd agent $(LAUNCHD_LABEL) -> $(LAUNCHD_PLIST)"
+
+service-uninstall:
+	@launchctl bootout gui/$$(id -u)/$(LAUNCHD_LABEL) 2>/dev/null || true
+	@rm -f $(LAUNCHD_PLIST)
+	@echo "removed launchd agent $(LAUNCHD_LABEL)"
 
 status:
 	@pids="$$(pgrep -x $(BINARY))"; \
