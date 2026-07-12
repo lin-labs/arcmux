@@ -70,6 +70,19 @@ type Session struct {
 	// must not cross ordinary inventory, audit, or model-evidence boundaries.
 	// It is deliberately not inferred from caller-controlled OwnerID or Env.
 	private bool
+	// ProjectSlug is the project this session's cwd resolved to at spawn
+	// (.agents/project.yaml > registry > folder name); Platform marks the slug
+	// as a platform monorepo, where many concurrent agents share one folder.
+	ProjectSlug string
+	Platform    bool
+	// Feature is the session's evolving feature slug, mirrored from the hook
+	// state doc (turn_contract.feature) by the daemon sweep. When it appears
+	// or changes, the daemon renames the tmux session to <project>-<feature>
+	// so listings and `tmux ls` say what each agent is actually working on.
+	Feature string
+	// TmuxNameRequested marks that the caller supplied an explicit tmux
+	// session name at create time; the daemon never renames those.
+	TmuxNameRequested bool
 }
 
 // NewSession creates a session in starting state.
@@ -187,6 +200,36 @@ func (s *Session) MarkPrivate() {
 	s.private = true
 }
 
+// SetProject records the spawn-time project resolution.
+func (s *Session) SetProject(slug string, platform bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ProjectSlug = slug
+	s.Platform = platform
+}
+
+// SetFeature records the current feature slug (mirrored from the hook state
+// doc by the daemon sweep).
+func (s *Session) SetFeature(feature string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Feature = feature
+}
+
+// SetTmuxNameRequested marks the tmux session name as caller-chosen.
+func (s *Session) SetTmuxNameRequested(v bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.TmuxNameRequested = v
+}
+
+// SetTmuxSessionName updates the owning tmux session name (after a rename).
+func (s *Session) SetTmuxSessionName(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.TmuxSessionName = name
+}
+
 // SetEnv replaces the session environment snapshot.
 func (s *Session) SetEnv(env map[string]string) {
 	s.mu.Lock()
@@ -204,54 +247,62 @@ func (s *Session) SetEnv(env map[string]string) {
 
 // Snapshot returns a read-consistent copy of session fields (without the mutex).
 type Snapshot struct {
-	ID               string
-	Name             string
-	Agent            string
-	CWD              string
-	Transport        string
-	Env              map[string]string
-	TmuxSessionName  string
-	TmuxTarget       string
-	CurrentCommand   string
-	BackendSessionID string
-	PID              int
-	State            State
-	Health           string
-	StartedAt        time.Time
-	LastActivityAt   time.Time
-	IdleSince        *time.Time
-	WorkingSince     *time.Time
-	NudgeCount       int
-	AutoClose        bool
-	OwnerID          string
-	Private          bool
+	ID                string
+	Name              string
+	Agent             string
+	CWD               string
+	Transport         string
+	Env               map[string]string
+	TmuxSessionName   string
+	TmuxTarget        string
+	CurrentCommand    string
+	BackendSessionID  string
+	PID               int
+	State             State
+	Health            string
+	StartedAt         time.Time
+	LastActivityAt    time.Time
+	IdleSince         *time.Time
+	WorkingSince      *time.Time
+	NudgeCount        int
+	AutoClose         bool
+	OwnerID           string
+	Private           bool
+	ProjectSlug       string
+	Platform          bool
+	Feature           string
+	TmuxNameRequested bool
 }
 
 func (s *Session) Snapshot() Snapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return Snapshot{
-		ID:               s.ID,
-		Name:             s.Name,
-		Agent:            s.Agent,
-		CWD:              s.CWD,
-		Transport:        s.Transport,
-		Env:              copyEnvMap(s.Env),
-		TmuxSessionName:  s.TmuxSessionName,
-		TmuxTarget:       s.TmuxTarget,
-		CurrentCommand:   s.CurrentCommand,
-		BackendSessionID: s.BackendSessionID,
-		PID:              s.PID,
-		State:            s.State,
-		Health:           s.Health,
-		StartedAt:        s.StartedAt,
-		LastActivityAt:   s.LastActivityAt,
-		IdleSince:        s.IdleSince,
-		WorkingSince:     s.WorkingSince,
-		NudgeCount:       s.NudgeCount,
-		AutoClose:        s.AutoClose,
-		OwnerID:          s.OwnerID,
-		Private:          s.private,
+		ID:                s.ID,
+		Name:              s.Name,
+		Agent:             s.Agent,
+		CWD:               s.CWD,
+		Transport:         s.Transport,
+		Env:               copyEnvMap(s.Env),
+		TmuxSessionName:   s.TmuxSessionName,
+		TmuxTarget:        s.TmuxTarget,
+		CurrentCommand:    s.CurrentCommand,
+		BackendSessionID:  s.BackendSessionID,
+		PID:               s.PID,
+		State:             s.State,
+		Health:            s.Health,
+		StartedAt:         s.StartedAt,
+		LastActivityAt:    s.LastActivityAt,
+		IdleSince:         s.IdleSince,
+		WorkingSince:      s.WorkingSince,
+		NudgeCount:        s.NudgeCount,
+		AutoClose:         s.AutoClose,
+		OwnerID:           s.OwnerID,
+		Private:           s.private,
+		ProjectSlug:       s.ProjectSlug,
+		Platform:          s.Platform,
+		Feature:           s.Feature,
+		TmuxNameRequested: s.TmuxNameRequested,
 	}
 }
 

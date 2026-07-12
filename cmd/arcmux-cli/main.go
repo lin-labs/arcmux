@@ -33,7 +33,7 @@ func die(err error) {
 
 func main() {
 	if len(os.Args) < 2 {
-		die(fmt.Errorf("usage: arcmux-cli create|exec|agents|list|send|capture|status|attach|kill|audit|inbox|ready|voice [args]"))
+		die(fmt.Errorf("usage: arcmux-cli create|exec|agents|list|send|capture|status|attach|kill|audit|inbox|ready|voice|artifacts|feature [args]"))
 	}
 	cmd := os.Args[1]
 
@@ -60,6 +60,16 @@ func main() {
 		return
 	case "voice":
 		if err := runVoice(os.Args[2:], voiceHTTPBase(), os.Stdout); err != nil {
+			die(err)
+		}
+		return
+	case "artifacts":
+		if err := runArtifacts(os.Args[2:], voiceHTTPBase(), os.Stdout); err != nil {
+			die(err)
+		}
+		return
+	case "feature":
+		if err := runFeature(os.Args[2:], voiceHTTPBase(), os.Stdout); err != nil {
 			die(err)
 		}
 		return

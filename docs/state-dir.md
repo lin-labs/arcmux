@@ -105,10 +105,37 @@ It captures three valued views:
   conversations in the same checkout. It is never projected as canonical
   history by `session self`, the daemon catalog, or mesh APIs.
 
+- `feature` — a short kebab-case slug naming the feature/workstream the
+  session is about (e.g. `artifact-tracking`). Auto-derived by the same
+  turn_end summarizer pass (its final `FEATURE:` output line) and refined as
+  the conversation evolves, unless `feature_pinned` is set (explicit
+  CLI/HTTP set via `arcmux hook --pin-feature` / `POST /session/feature`),
+  which stops auto-updates. The daemon mirrors it onto the session and renames
+  auto-named tmux sessions to `<project>-<feature>-<id>`.
+
 Optional `success_verification` / `path` fields are retained for callers that
 set them, but the unified hook no longer scrapes them. This is not a transcript
 or step log: hook writers replace the snapshot fields, preserving omitted ones
 and updating `updated_at`, so subscribers read one current contract.
+
+The doc additionally records the session's **artifacts** — the files the
+conversation produced:
+
+```json
+"artifacts": [
+  {"path": "/abs/file.md", "op": "create",
+   "first_seen": "…", "last_seen": "…", "edits": 3}
+]
+```
+
+Captured from `PostToolUse` payloads by the unified hook (claude Write/Edit/
+NotebookEdit via `tool_input.file_path`; codex `apply_patch` via its changes
+dict or `*** Add/Update File:` patch headers; no Bash parsing) and passed as
+repeatable `--artifact <op>:<path>` flags. Ordered by first touch, deduped by
+path, capped at 200 (least-recently-touched evicted); the JSONL audit line
+gains a `paths` field for unbounded ordered history. Query surface:
+`GET /session/artifacts` (git-enriched, with a focus heuristic) and
+`arcmux-cli artifacts <name>`.
 
 ## How events get here (one hook, many subscribers)
 

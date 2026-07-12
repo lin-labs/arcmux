@@ -36,6 +36,8 @@ func NewHTTPServer(d *Daemon, addr string) *HTTPServer {
 	mux.HandleFunc("/session/close", h.handleSessionClose)
 	mux.HandleFunc("/session/capture", h.handleSessionCapture)
 	mux.HandleFunc("/session/send", h.handleSessionSend)
+	mux.HandleFunc("/session/artifacts", h.handleSessionArtifacts)
+	mux.HandleFunc("/session/feature", h.handleSessionFeature)
 	mux.HandleFunc("/voice/record/start", h.handleVoiceRecordStart)
 	mux.HandleFunc("/voice/record/stop", h.handleVoiceRecordStop)
 	mux.HandleFunc("/voice/record/status", h.handleVoiceRecordStatus)
@@ -472,6 +474,15 @@ type sessionSummary struct {
 	// clients (voxtop) get a bird's-eye view of what each agent is doing
 	// without reading the state files themselves. Nil when no hook data yet.
 	TurnContract *hooks.TurnContract `json:"turn_contract,omitempty"`
+	// Project/Platform/Feature identify WHAT the session is about: the
+	// spawn-time project resolution and the evolving feature slug — the
+	// discriminator between many agents sharing one platform monorepo.
+	Project  string `json:"project,omitempty"`
+	Platform bool   `json:"platform,omitempty"`
+	Feature  string `json:"feature,omitempty"`
+	// ArtifactCount is how many distinct files the session has produced so
+	// far (hook-captured); fetch /session/artifacts for the list.
+	ArtifactCount int `json:"artifact_count,omitempty"`
 }
 
 type sessionsListResponse struct {
@@ -513,12 +524,19 @@ func (h *HTTPServer) handleSessionsList(w http.ResponseWriter, r *http.Request) 
 			summary.CWD = snap.CWD
 			summary.CurrentCommand = snap.CurrentCommand
 		}
+		summary.Project = snap.ProjectSlug
+		summary.Platform = snap.Platform
+		summary.Feature = snap.Feature
 		// Merge the recording snapshot (best-effort: a missing/unreadable state
 		// doc just leaves turn_contract nil, never fails the listing). Private
 		// sessions keep prompt-derived hook state local to the supervised pane.
 		if !snap.Private {
 			if st, err := hooks.ReadSessionState(h.daemon.cfg.Hooks.SessionStateDir, snap.ID); err == nil && st != nil {
 				summary.TurnContract = st.TurnContract
+				summary.ArtifactCount = len(st.Artifacts)
+				if summary.Feature == "" && st.TurnContract != nil {
+					summary.Feature = st.TurnContract.Feature
+				}
 			}
 		}
 		out.Sessions = append(out.Sessions, summary)

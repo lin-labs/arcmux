@@ -38,6 +38,10 @@ import (
 //	--verification <text>  optional, current concrete success check
 //	--path <text>          optional, consolidated path taken/planned
 //	--contract-source <ev> which native event supplied the recording
+//	--feature <slug>       auto-derived feature slug (ignored while pinned)
+//	--pin-feature <slug>   explicitly set AND pin the feature slug
+//	--artifact <op>:<path> a file op captured from the event (create|edit),
+//	                       repeatable — records what the session produced
 //
 // When --event is omitted but recording flags are present, only the contract is
 // updated (no event is recorded, no counters move) — the write path used by the
@@ -97,6 +101,20 @@ func cmdHook(args []string) error {
 			contract.Path, err = next()
 		case "--contract-source":
 			contract.Source, err = next()
+		case "--feature":
+			contract.Feature, err = next()
+		case "--pin-feature":
+			contract.Feature, err = next()
+			contract.PinFeature = true
+		case "--artifact":
+			var v string
+			if v, err = next(); err == nil {
+				op, path, ok := strings.Cut(v, ":")
+				if !ok || (op != "create" && op != "edit") || path == "" {
+					return fmt.Errorf("arcmux hook: --artifact wants create:<path> or edit:<path>, got %q", v)
+				}
+				contract.Artifacts = append(contract.Artifacts, hooks.ArtifactOp{Op: op, Path: path})
+			}
 		default:
 			return fmt.Errorf("arcmux hook: unknown argument %q", args[i])
 		}
@@ -112,7 +130,8 @@ func cmdHook(args []string) error {
 	hasContract := contract.Goal != "" || contract.OverallGoal != "" ||
 		contract.LastUserMessage != "" || contract.VaultLink != "" ||
 		historyBasename != "" || historyConversationID != "" ||
-		contract.SuccessVerification != "" || contract.Path != ""
+		contract.SuccessVerification != "" || contract.Path != "" ||
+		contract.Feature != "" || len(contract.Artifacts) > 0
 	if event == "" && !hasContract {
 		return fmt.Errorf("arcmux hook: --event is required (one of %v)", hooks.CanonicalEvents)
 	}
@@ -121,7 +140,8 @@ func cmdHook(args []string) error {
 	}
 	if historyBasename != "" || historyConversationID != "" {
 		if event != "" || contract.Goal != "" || contract.OverallGoal != "" || contract.LastUserMessage != "" ||
-			contract.VaultLink != "" || contract.SuccessVerification != "" || contract.Path != "" || contract.Source != "" {
+			contract.VaultLink != "" || contract.SuccessVerification != "" || contract.Path != "" || contract.Source != "" ||
+			contract.Feature != "" || contract.PinFeature || len(contract.Artifacts) > 0 {
 			return fmt.Errorf("arcmux hook: canonical history binding must be a contract-only, history-only update")
 		}
 		historyRoot := os.Getenv("ARCMUX_HISTORY_ROOT")
@@ -140,7 +160,12 @@ func cmdHook(args []string) error {
 		return nil
 	}
 
-	if contract.Source == "" && hasContract {
+	// Artifacts alone shouldn't stamp a contract Source: they are recorded on
+	// the state doc, not the contract snapshot.
+	hasContractText := hasContract && (contract.Goal != "" || contract.OverallGoal != "" ||
+		contract.LastUserMessage != "" || contract.VaultLink != "" ||
+		contract.SuccessVerification != "" || contract.Path != "" || contract.Feature != "")
+	if contract.Source == "" && hasContractText {
 		contract.Source = event // empty for a contract-only refresh
 	}
 

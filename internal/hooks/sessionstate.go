@@ -62,7 +62,37 @@ type SessionState struct {
 	LastPromptSubmitAt time.Time     `json:"last_prompt_submit_at,omitempty"`
 	LastTurnEndAt      time.Time     `json:"last_turn_end_at,omitempty"`
 	TurnContract       *TurnContract `json:"turn_contract,omitempty"`
+
+	// Artifacts is the ordered record of files this session created or edited
+	// through its dedicated file tools (Write/Edit/apply_patch — captured from
+	// PostToolUse hook payloads). Ordered by first touch, deduped by path,
+	// capped at maxArtifacts (least-recently-touched evicted). This is what
+	// answers "what did this conversation produce?" — including vault docs
+	// outside any git repo.
+	Artifacts []Artifact `json:"artifacts,omitempty"`
 }
+
+// Artifact is one file the session touched via a file tool.
+type Artifact struct {
+	Path string `json:"path"`
+	// Op is how the file was produced: "create" (Write / patch Add File) or
+	// "edit". A later whole-file Write upgrades an "edit" to "create".
+	Op        string    `json:"op"`
+	FirstSeen time.Time `json:"first_seen"`
+	LastSeen  time.Time `json:"last_seen"`
+	// Edits counts how many tool events touched the path.
+	Edits int `json:"edits"`
+}
+
+// ArtifactOp is one captured file operation from a hook event.
+type ArtifactOp struct {
+	Op   string // "create" | "edit"
+	Path string
+}
+
+// maxArtifacts bounds the artifacts list in the state doc; the JSONL audit
+// keeps the unbounded history.
+const maxArtifacts = 200
 
 // TurnContract is the compact, current per-session contract that arcmux-parent
 // agents refresh every turn. It is an accurate, evolving RECORDING of the work
@@ -98,6 +128,14 @@ type TurnContract struct {
 	// It stores only a basename plus the native conversation identity locally;
 	// mesh/session projections expose the basename, never transcript contents.
 	CanonicalHistory *CanonicalHistoryBinding `json:"canonical_history,omitempty"`
+	// Feature is a short kebab-case slug naming the feature/workstream this
+	// session is about (e.g. "artifact-tracking"). Auto-derived by the same
+	// turn_end summarizer that refreshes OverallGoal, and refined as the
+	// conversation evolves — unless pinned.
+	Feature string `json:"feature,omitempty"`
+	// FeaturePinned marks Feature as explicitly set (CLI/HTTP); auto-derived
+	// updates are ignored while pinned.
+	FeaturePinned bool `json:"feature_pinned,omitempty"`
 	// SuccessVerification and Path are optional, retained from the original
 	// contract: how success is/was verified, and the consolidated approach.
 	SuccessVerification string    `json:"success_verification,omitempty"`
@@ -124,6 +162,13 @@ type TurnContractUpdate struct {
 	SuccessVerification string
 	Path                string
 	Source              string
+	// Feature is the auto-derived feature slug; ignored while the current
+	// contract has FeaturePinned set.
+	Feature string
+	// PinFeature explicitly sets Feature AND pins it against auto updates.
+	PinFeature bool
+	// Artifacts are file operations captured from the triggering hook event.
+	Artifacts []ArtifactOp
 }
 
 // OverallGoalInputSnapshot is the complete hook-state input authorized for one
@@ -248,6 +293,7 @@ func ApplyContractOnly(stateDir, sessionID, agent string, contract TurnContractU
 			st.CreatedAt = now
 		}
 		applyTurnContractUpdate(st, contract, now)
+		applyArtifacts(st, contract.Artifacts, now)
 		st.UpdatedAt = now
 	})
 }
@@ -338,7 +384,53 @@ func ApplyEventWithContract(stateDir, sessionID, agent, event, tool string, cont
 		}
 
 		applyTurnContractUpdate(st, contract, now)
+		applyArtifacts(st, contract.Artifacts, now)
 	})
+}
+
+// applyArtifacts merges captured file operations into the ordered, deduped
+// artifacts list. Repeat touches bump Edits/LastSeen in place (order stays by
+// first touch); a whole-file "create" upgrades a prior "edit". Over the cap,
+// the least-recently-touched entry is evicted.
+func applyArtifacts(st *SessionState, ops []ArtifactOp, now time.Time) {
+	for _, op := range ops {
+		path := strings.TrimSpace(op.Path)
+		if path == "" {
+			continue
+		}
+		kind := op.Op
+		if kind != "create" {
+			kind = "edit"
+		}
+		found := false
+		for i := range st.Artifacts {
+			if st.Artifacts[i].Path != path {
+				continue
+			}
+			st.Artifacts[i].Edits++
+			st.Artifacts[i].LastSeen = now
+			if kind == "create" {
+				st.Artifacts[i].Op = "create"
+			}
+			found = true
+			break
+		}
+		if found {
+			continue
+		}
+		st.Artifacts = append(st.Artifacts, Artifact{
+			Path: path, Op: kind, FirstSeen: now, LastSeen: now, Edits: 1,
+		})
+		if len(st.Artifacts) > maxArtifacts {
+			oldest := 0
+			for i := range st.Artifacts {
+				if st.Artifacts[i].LastSeen.Before(st.Artifacts[oldest].LastSeen) {
+					oldest = i
+				}
+			}
+			st.Artifacts = append(st.Artifacts[:oldest], st.Artifacts[oldest+1:]...)
+		}
+	}
 }
 
 func applyTurnContractUpdate(st *SessionState, update TurnContractUpdate, now time.Time) {
@@ -349,8 +441,9 @@ func applyTurnContractUpdate(st *SessionState, update TurnContractUpdate, now ti
 	verification := compactContractText(update.SuccessVerification)
 	path := compactContractText(update.Path)
 	source := compactContractText(update.Source)
+	feature := SanitizeFeatureSlug(update.Feature)
 	if goal == "" && overall == "" && lastMsg == "" && vault == "" &&
-		verification == "" && path == "" && source == "" {
+		verification == "" && path == "" && source == "" && feature == "" {
 		return
 	}
 
@@ -383,7 +476,41 @@ func applyTurnContractUpdate(st *SessionState, update TurnContractUpdate, now ti
 	if source != "" {
 		st.TurnContract.Source = source
 	}
+	if feature != "" {
+		if update.PinFeature {
+			st.TurnContract.Feature = feature
+			st.TurnContract.FeaturePinned = true
+		} else if !st.TurnContract.FeaturePinned {
+			// Auto-derived feature: refined turn over turn until pinned.
+			st.TurnContract.Feature = feature
+		}
+	}
 	st.TurnContract.UpdatedAt = now
+}
+
+// SanitizeFeatureSlug normalizes a feature name to a bounded kebab-case slug:
+// lowercase [a-z0-9-], runs of other characters collapsed to single dashes,
+// max 48 runes. Empty input (or input with no usable characters) yields "".
+func SanitizeFeatureSlug(raw string) string {
+	var b strings.Builder
+	lastDash := true // suppress a leading dash
+	for _, r := range strings.ToLower(strings.TrimSpace(raw)) {
+		ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if ok {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	slug := strings.Trim(b.String(), "-")
+	if runes := []rune(slug); len(runes) > 48 {
+		slug = strings.TrimRight(string(runes[:48]), "-")
+	}
+	return slug
 }
 
 func compactContractText(value string) string {

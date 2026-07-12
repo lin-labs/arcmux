@@ -190,6 +190,14 @@ Field semantics:
 - `agent` — the agent profile name (`claude`, `codex`, …).
 - `state` — session lifecycle: `starting | handshaking | idle | working | stuck | escalated | exited | failed`.
 - `tmux_target` — tmux target string usable with `tmux -L arcmux send-keys -t <target> ...`.
+- `turn_contract` — recording snapshot from the per-session state doc (goal /
+  overall_goal / last_user_message / vault_link / feature); absent until hook
+  data lands.
+- `project`, `platform` — the spawn-time cwd resolution (`.agents/project.yaml`
+  → registry → folder name; `platform` marks a platform-monorepo slug).
+- `feature` — the session's evolving feature slug (see `/session/feature`).
+- `artifact_count` — distinct files the session produced so far; fetch
+  `/session/artifacts` for the list.
 
 ### Example
 
@@ -259,6 +267,78 @@ Field semantics:
 ```bash
 curl -s "http://127.0.0.1:7777/session-catalog" | jq
 ```
+
+---
+
+## `GET /session/artifacts`
+
+What did this conversation produce? Returns the session's hook-captured file
+operations (Write/Edit/apply_patch — including vault docs outside any repo),
+in first-touch order, enriched with git status from the session cwd, plus a
+computed `focus` suggestion for voice callers.
+
+### Query parameters
+
+| name     | type   | default | notes                                                        |
+|----------|--------|---------|--------------------------------------------------------------|
+| `name`   | string | (req.)  | Session name or session id. Ended sessions still answer by id from their archived state doc. |
+| `window` | string | `2h`    | Recency window for the focus heuristic (Go duration).        |
+
+### Response
+
+`200 OK`
+```json
+{
+  "session_id": "s-1781…",
+  "name": "arcmux-s-17810373",
+  "project": "arcmux",
+  "platform": true,
+  "feature": "artifact-tracking",
+  "artifacts": [
+    {"path": "/home/blin/agents/obsProjects/arcmux/specs/design.md",
+     "op": "create", "first_seen": "…", "last_seen": "…", "edits": 3,
+     "size_bytes": 7421, "git_status": ""}
+  ],
+  "git_extra": [{"path": "/home/blin/Projects/arcmux/go.sum", "status": "M"}],
+  "focus": {"path": "…/design.md", "reason": "most recently updated (recent, 4m ago)"},
+  "alt_focus": {"path": "…/big.go", "reason": "largest recent file (48 KB)"}
+}
+```
+
+- `artifacts` — ordered by first touch, deduped by path, capped at 200 in the
+  state doc (the JSONL audit keeps unbounded history). `size_bytes` is -1 when
+  the file no longer exists.
+- `git_extra` — dirty/untracked repo files NOT captured as artifacts
+  (Bash-mediated changes), capped at 50.
+- `focus` — most recently touched artifact within `window` (falls back to
+  overall latest); `alt_focus` — largest recently-touched file when different.
+
+CLI: `arcmux-cli artifacts <name> [--json] [--window 2h]`.
+
+---
+
+## `POST /session/feature`
+
+Set (and by default pin) a session's feature slug — the discriminator between
+many agents working the same platform monorepo. Normally the slug is
+auto-derived each turn by the turn_end summarizer; pinning stops auto-updates.
+The daemon's sweep renames auto-named tmux sessions to
+`<project>-<feature>-<id>` as the feature appears or changes.
+
+### Query parameters
+
+| name      | type   | default | notes                                             |
+|-----------|--------|---------|---------------------------------------------------|
+| `name`    | string | (req.)  | Session name.                                     |
+| `feature` | string | (req.)  | Feature name; normalized to a kebab-case slug.    |
+| `pin`     | bool   | `1`     | `0` records a suggestion the summarizer may refine. |
+
+### Response
+
+`200 OK` — `{"session_id": "…", "name": "…", "feature": "…", "pinned": true}`
+(the EFFECTIVE feature: a non-pin set against a pinned contract is ignored).
+
+CLI: `arcmux-cli feature <name> [<slug>] [--no-pin]`.
 
 ---
 

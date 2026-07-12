@@ -37,10 +37,11 @@ EVENT_TYPE="${CLAUDE_HOOK_EVENT_TYPE:-}"
 TOOL_NAME="${CLAUDE_TOOL_NAME:-}"
 USER_MSG=""
 GOAL=""
+ARTIFACTS=""
 
 if command -v python3 >/dev/null 2>&1; then
   parsed=$(printf '%s' "$payload" | python3 -c '
-import base64, json, sys
+import base64, json, os, sys
 from pathlib import Path
 
 raw = sys.stdin.read()
@@ -128,7 +129,53 @@ def keep_lines(text, n=3, limit=300):
         out += "\n…"
     return out
 
-event = ""; tool = ""; notify_type = ""; user_msg = ""; goal = ""
+def artifact_ops(event, tool, tool_input):
+    # Extract completed file operations from a PostToolUse payload — the
+    # ARTIFACTS of the session. Only dedicated edit tools count (no Bash parsing):
+    #   claude: Write (create), Edit/MultiEdit (edit), NotebookEdit (edit)
+    #   codex:  apply_patch — changes dict when present, else patch headers
+    #   other:  generic file_path probe, only for edit-suggesting tool names
+    if event not in ("PostToolUse", "post_tool_use"):
+        return []
+    ti = tool_input if isinstance(tool_input, dict) else {}
+    try:
+        cwd = os.getcwd()
+    except OSError:
+        cwd = ""
+    ops = []
+    def add(op, p):
+        if not isinstance(p, str) or not p.strip():
+            return
+        p = p.strip()
+        if not p.startswith("/") and cwd:
+            p = os.path.join(cwd, p)
+        ops.append((op, os.path.normpath(p)))
+    t = (tool or "").lower()
+    if t == "write":
+        add("create", ti.get("file_path") or ti.get("path"))
+    elif t in ("edit", "multiedit"):
+        add("edit", ti.get("file_path") or ti.get("path"))
+    elif t == "notebookedit":
+        add("edit", ti.get("notebook_path"))
+    elif t == "apply_patch":
+        changes = ti.get("changes")
+        if isinstance(changes, dict):
+            for p, ch in changes.items():
+                kind = "create" if isinstance(ch, dict) and "add" in ch else "edit"
+                add(kind, p)
+        else:
+            patch = ti.get("input") or ti.get("patch") or ""
+            for line in str(patch).splitlines():
+                s = line.strip()
+                if s.startswith("*** Add File:"):
+                    add("create", s.split(":", 1)[1])
+                elif s.startswith("*** Update File:"):
+                    add("edit", s.split(":", 1)[1])
+    elif any(k in t for k in ("write", "edit", "patch")):
+        add("edit", ti.get("file_path") or ti.get("path") or ti.get("notebook_path"))
+    return ops[:8]
+
+event = ""; tool = ""; notify_type = ""; user_msg = ""; goal = ""; arts = []
 try:
     d = json.loads(raw) if raw.strip() else {}
     if isinstance(d, dict):
@@ -155,23 +202,34 @@ try:
                 user_msg = t_user
             if not goal and t_assistant:
                 goal = gauged_goal(t_assistant)
+        arts = artifact_ops(event, tool, d.get("tool_input") or d.get("toolInput"))
 except Exception:
     pass
 
 user_b64 = base64.b64encode(keep_lines(user_msg).encode("utf-8")).decode() if user_msg else ""
+arts_b64 = ""
+if arts:
+    joined = "\n".join(f"{op}:{p}" for op, p in arts)
+    arts_b64 = base64.b64encode(joined.encode("utf-8")).decode()
 print(event)
 print(tool)
 print(notify_type)
 print(user_b64)
 print(goal)
+print(arts_b64)
 ' 2>/dev/null)
   je=$(printf '%s\n' "$parsed" | sed -n '1p')
   jt=$(printf '%s\n' "$parsed" | sed -n '2p')
   jnotify=$(printf '%s\n' "$parsed" | sed -n '3p')
   user_b64=$(printf '%s\n' "$parsed" | sed -n '4p')
   GOAL=$(printf '%s\n' "$parsed" | sed -n '5p')
+  arts_b64=$(printf '%s\n' "$parsed" | sed -n '6p')
   if [ -n "$user_b64" ]; then
     USER_MSG=$(printf '%s' "$user_b64" | python3 -c 'import base64,sys;sys.stdout.write(base64.b64decode(sys.stdin.read()).decode("utf-8","replace"))' 2>/dev/null)
+  fi
+  ARTIFACTS=""
+  if [ -n "$arts_b64" ]; then
+    ARTIFACTS=$(printf '%s' "$arts_b64" | python3 -c 'import base64,sys;sys.stdout.write(base64.b64decode(sys.stdin.read()).decode("utf-8","replace"))' 2>/dev/null)
   fi
 else
   je=$(printf '%s' "$payload" | sed -n 's/.*"hook_event_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n '1p')
@@ -188,12 +246,20 @@ fi
 [ -n "$jt" ] && TOOL_NAME="$jt"
 [ -n "$EVENT_TYPE" ] || EVENT_TYPE=unknown
 
-# 1) JSONL audit (only when an output dir was provided).
+# 1) JSONL audit (only when an output dir was provided). Artifact paths ride
+# along (comma-joined, quotes/backslashes stripped) so the JSONL keeps the
+# unbounded ordered history beyond the state doc's capped snapshot.
 if [ -n "$ARCMUX_HOOK_OUTPUT_DIR" ]; then
   out="$ARCMUX_HOOK_OUTPUT_DIR/arcmux-hooks-$ARCMUX_SESSION_ID.jsonl"
   mkdir -p "$ARCMUX_HOOK_OUTPUT_DIR" 2>/dev/null
-  printf '{"event":"%s","tool":"%s","ts":"%s","session_id":"%s"}\n' \
-    "$EVENT_TYPE" "$TOOL_NAME" "$(date -u +%FT%TZ)" "$ARCMUX_SESSION_ID" >> "$out"
+  if [ -n "$ARTIFACTS" ]; then
+    arts_flat=$(printf '%s' "$ARTIFACTS" | tr '\n' ',' | tr -d '"\\')
+    printf '{"event":"%s","tool":"%s","ts":"%s","session_id":"%s","paths":"%s"}\n' \
+      "$EVENT_TYPE" "$TOOL_NAME" "$(date -u +%FT%TZ)" "$ARCMUX_SESSION_ID" "$arts_flat" >> "$out"
+  else
+    printf '{"event":"%s","tool":"%s","ts":"%s","session_id":"%s"}\n' \
+      "$EVENT_TYPE" "$TOOL_NAME" "$(date -u +%FT%TZ)" "$ARCMUX_SESSION_ID" >> "$out"
+  fi
 fi
 
 # 2) Map the native event (claude PascalCase, grok snake_case, codex names) to a
@@ -218,6 +284,17 @@ set -- hook --agent "${ARCMUX_HOOK_AGENT:-claude}" --event "$CANON" --tool "$TOO
 [ -n "$USER_MSG" ] && set -- "$@" --last-message "$USER_MSG"
 if [ -n "$GOAL$USER_MSG" ]; then
   set -- "$@" --contract-source "$EVENT_TYPE"
+fi
+# Captured file operations (one --artifact op:path per line; paths may contain
+# spaces, so split strictly on newlines).
+if [ -n "$ARTIFACTS" ]; then
+  arcmux_old_ifs=$IFS
+  IFS='
+'
+  for arcmux_art in $ARTIFACTS; do
+    [ -n "$arcmux_art" ] && set -- "$@" --artifact "$arcmux_art"
+  done
+  IFS=$arcmux_old_ifs
 fi
 "$ARCMUX_BIN" "$@" >/dev/null 2>&1 || true
 

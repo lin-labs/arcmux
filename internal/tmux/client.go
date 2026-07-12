@@ -351,6 +351,13 @@ func (c *Client) KillSession(ctx context.Context, session string) error {
 	return err
 }
 
+// RenameSession renames a session. Safe for arcmux routing, which addresses
+// panes by immutable %pane_id, never by session name.
+func (c *Client) RenameSession(ctx context.Context, session, newName string) error {
+	_, err := c.run(ctx, "rename-session", "-t", session, newName)
+	return err
+}
+
 // KillServer terminates the tmux server for this client's socket.
 func (c *Client) KillServer(ctx context.Context) error {
 	_, err := c.run(ctx, "kill-server")

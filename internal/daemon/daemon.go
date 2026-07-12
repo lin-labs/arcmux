@@ -100,6 +100,11 @@ type Daemon struct {
 	// call contexts. May be nil/empty when no projects.toml is present.
 	projects *project.Registry
 
+	// platforms is the set of slugs that name platform monorepos (from the
+	// cross-agent ~/agents/projects.yaml platforms: list). Loaded once at New;
+	// used by CreateSession's cwd resolution. Never nil.
+	platforms map[string]bool
+
 	// state is the daemon-level bbolt store backing the C1 substrate RPCs
 	// (Send/PeekInbox/AckInbox/QueryAudit). Opened at Start, lazily on
 	// first need if Start hasn't been called (test path). One file:
@@ -147,6 +152,7 @@ func New(cfg *config.Config, logger *slog.Logger) *Daemon {
 		watcher:             hooks.NewWatcher(cfg.Hooks.HookOutputDir, logger),
 		profiles:            cfg.Agents,
 		projects:            projects,
+		platforms:           project.LoadPlatforms(""),
 		logger:              logger,
 		sessions:            make(map[string]*session.Session),
 		monitors:            make(map[string]context.CancelFunc),
@@ -738,6 +744,14 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 	sess.SetOwnerID(req.OwnerID)
 	if req.private {
 		sess.MarkPrivate()
+	}
+	sess.SetTmuxNameRequested(req.TmuxSession != "")
+	// Resolve the cwd to a project slug (+ platform-ness). On a platform
+	// monorepo many agents share one folder, so the folder-derived name can't
+	// discriminate sessions — the feature sweep renames the tmux session to
+	// <project>-<feature> once the conversation's feature is known.
+	if res := d.projects.ResolveCWD(req.CWD, d.platforms); res.Slug != "" {
+		sess.SetProject(res.Slug, res.Platform)
 	}
 
 	// Audit the create. Best-effort — the store may not be open yet (test
@@ -1557,6 +1571,10 @@ type persistedSession struct {
 	OwnerID             string        `json:"owner_id,omitempty"`
 	Private             bool          `json:"private,omitempty"`
 	HandoffInstructions string        `json:"handoff_instructions,omitempty"`
+	ProjectSlug         string        `json:"project_slug,omitempty"`
+	Platform            bool          `json:"platform,omitempty"`
+	Feature             string        `json:"feature,omitempty"`
+	TmuxNameRequested   bool          `json:"tmux_name_requested,omitempty"`
 }
 
 func (d *Daemon) persistPath() string {
@@ -1599,19 +1617,23 @@ func (d *Daemon) persistSessionsChecked() error {
 			continue
 		}
 		record := persistedSession{
-			ID:               snap.ID,
-			Name:             snap.Name,
-			Agent:            snap.Agent,
-			CWD:              snap.CWD,
-			Transport:        snap.Transport,
-			TmuxSessionName:  snap.TmuxSessionName,
-			TmuxTarget:       snap.TmuxTarget,
-			CurrentCommand:   snap.CurrentCommand,
-			BackendSessionID: snap.BackendSessionID,
-			State:            snap.State,
-			StartedAt:        snap.StartedAt,
-			OwnerID:          snap.OwnerID,
-			Private:          snap.Private,
+			ID:                snap.ID,
+			Name:              snap.Name,
+			Agent:             snap.Agent,
+			CWD:               snap.CWD,
+			Transport:         snap.Transport,
+			TmuxSessionName:   snap.TmuxSessionName,
+			TmuxTarget:        snap.TmuxTarget,
+			CurrentCommand:    snap.CurrentCommand,
+			BackendSessionID:  snap.BackendSessionID,
+			State:             snap.State,
+			StartedAt:         snap.StartedAt,
+			OwnerID:           snap.OwnerID,
+			Private:           snap.Private,
+			ProjectSlug:       snap.ProjectSlug,
+			Platform:          snap.Platform,
+			Feature:           snap.Feature,
+			TmuxNameRequested: snap.TmuxNameRequested,
 		}
 		if snap.Private {
 			record.HandoffInstructions = snap.Env["ARCMUX_HANDOFF_INSTRUCTIONS"]
@@ -1767,6 +1789,9 @@ func (d *Daemon) restoreSessions() {
 		sess.SetCurrentCommand(rec.CurrentCommand)
 		sess.SetBackendSessionID(rec.BackendSessionID)
 		sess.StartedAt = rec.StartedAt
+		sess.SetProject(rec.ProjectSlug, rec.Platform)
+		sess.SetFeature(rec.Feature)
+		sess.SetTmuxNameRequested(rec.TmuxNameRequested)
 		sess.SetState(rec.State)
 
 		d.mu.Lock()
@@ -1809,8 +1834,55 @@ func (d *Daemon) persistLoop() {
 		case <-d.ctx.Done():
 			return
 		case <-ticker.C:
+			d.featureSweep()
 			d.persistSessions()
 		}
+	}
+}
+
+// featureSweep mirrors turn_contract.feature from each hook state doc onto the
+// session and converges auto-named tmux sessions to <project>-<feature>-<id>.
+// Idempotent and self-healing: the desired name is recomputed every sweep, so
+// a failed rename simply retries on the next tick, and a feature refined by
+// the summarizer re-renames. Caller-requested tmux names are never touched.
+func (d *Daemon) featureSweep() {
+	for _, s := range d.ListSessions() {
+		snap := s.Snapshot()
+		if snap.State == session.StateExited || snap.State == session.StateFailed {
+			continue
+		}
+		st, err := hooks.ReadSessionState(d.cfg.Hooks.SessionStateDir, snap.ID)
+		if err != nil || st == nil || st.TurnContract == nil {
+			continue
+		}
+		feature := st.TurnContract.Feature
+		if feature == "" {
+			continue
+		}
+		if feature != snap.Feature {
+			s.SetFeature(feature)
+			d.logger.Info("session.feature",
+				"session_id", snap.ID, "feature", feature, "pinned", st.TurnContract.FeaturePinned)
+		}
+		if snap.TmuxSessionName == "" || snap.TmuxNameRequested {
+			continue
+		}
+		base := snap.ProjectSlug
+		if base == "" {
+			base = snap.Name
+		}
+		desired := safeTmuxSessionName(base+"-"+feature, snap.ID)
+		if desired == snap.TmuxSessionName {
+			continue
+		}
+		if err := d.tmux.RenameSession(d.ctx, snap.TmuxSessionName, desired); err != nil {
+			d.logger.Warn("feature rename failed (will retry)",
+				"session_id", snap.ID, "from", snap.TmuxSessionName, "to", desired, "error", err)
+			continue
+		}
+		s.SetTmuxSessionName(desired)
+		d.logger.Info("session.tmux_renamed",
+			"session_id", snap.ID, "from", snap.TmuxSessionName, "to", desired)
 	}
 }
 
