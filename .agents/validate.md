@@ -163,6 +163,17 @@ staticcheck ./... 2>/dev/null    # if installed
   `tmux -L arcmux show-environment -t <agent-session> | grep ARCMUX`. Do not
   rely only on a pane shell's `env`; shared-session inheritance can mask missing
   per-agent env plumbing.
+- **Goal summarizer probe** (turn_contract.overall_goal / feature empty?):
+  the summarizer needs headless grok auth from `~/.config/arcmux/goal.env`
+  (symlink to the machine secrets env; override `ARCMUX_GOAL_ENV_FILE`). Probe:
+  `set -a; . ~/.config/arcmux/goal.env; set +a; echo 'Say OK.' > /tmp/p.txt &&
+  timeout 45 grok --no-alt-screen --disable-web-search -m grok-4.3
+  --prompt-file /tmp/p.txt </dev/null` → must print OK in seconds. A
+  device-code/429 error means the key is missing — the summarizer is silently
+  dead (it never blocks turns). Rotted unnoticed 2026-06-25→07-12.
+- **Never `make restart`/`release` from an arcmux-hosted agent pane without
+  Boyan present** — the restart kills the tmux server and the deploying agent
+  with it. `make build`/`install` are always safe; restart goes last.
 
 ## Highest fidelity rung available
 

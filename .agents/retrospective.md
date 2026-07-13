@@ -34,16 +34,34 @@ codified checks live in `.agents/validate.md`.
   inspect tmux session scope (`show-environment -t <agent-session>`) as well as
   the pane shell; shell-only probes can miss stale or accidentally inherited
   session env.
+- **Restarting arcmux kills the deployer.** The agent doing the deploy usually
+  runs inside an arcmux-hosted pane; `make restart`/`release` takes down the
+  tmux server and that pane with it (hit 2026-07-12: `make release` killed the
+  Claude session running it, mid-turn). Prevention: `make build`/`install`
+  freely; the restart only with Boyan present and warned, as the LAST command
+  of the turn.
+- **Best-effort background passes rot silently.** The turn_end goal summarizer
+  no-oped for ~3 weeks because grok's auth.json went empty (2026-06-25 →
+  2026-07-12); its "never block the turn" design hid it, and unauthenticated
+  retries got the box device-code rate-limited (429). Prevention: probe listed
+  in `.agents/validate.md` ("Goal summarizer probe"); run it whenever a
+  feature built on a best-effort dependency produces mysteriously empty fields.
 
 ## Successful patterns worth reinforcing
 
 - Using the `blin-lab-service` conventions for install path, log path,
   systemd unit, signal handling — never reinventing per service.
-- `make release` (build + push + restart) as the single deploy ritual.
+- `make release` (build + push + restart) as the single deploy ritual —
+  EXCEPT when the deployer is arcmux-hosted; then split install from restart
+  (see failure mode above).
 - Confirming the deployed binary via remote `make status` rather than
   trusting that the local build is what's running.
 - Reproducing TUI compatibility with the isolated live-agent hook gate before
   restarting the pane-preserving service.
+- **Self-dogfood verification**: a Claude session running inside arcmux can
+  verify arcmux features on itself (2026-07-12: artifact capture, summarize,
+  feature-slug tmux rename all proven against the verifying session's own
+  state doc). Cheapest possible end-to-end fixture — prefer it.
 
 ## Where retro findings from this project should land
 
