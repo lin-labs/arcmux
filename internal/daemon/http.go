@@ -38,6 +38,7 @@ func NewHTTPServer(d *Daemon, addr string) *HTTPServer {
 	mux.HandleFunc("/session/send", h.handleSessionSend)
 	mux.HandleFunc("/session/artifacts", h.handleSessionArtifacts)
 	mux.HandleFunc("/session/feature", h.handleSessionFeature)
+	mux.HandleFunc("/session/summarize", h.handleSessionSummarize)
 	mux.HandleFunc("/voice/record/start", h.handleVoiceRecordStart)
 	mux.HandleFunc("/voice/record/stop", h.handleVoiceRecordStop)
 	mux.HandleFunc("/voice/record/status", h.handleVoiceRecordStatus)

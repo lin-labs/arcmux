@@ -342,6 +342,25 @@ CLI: `arcmux-cli feature <name> [<slug>] [--no-pin]`.
 
 ---
 
+## `POST /session/summarize`
+
+On-demand goal summarization — the recovery path for a subscriber (voxtop
+babysit) that finds a session with **no recorded briefing** (empty
+`turn_contract.overall_goal`). The daemon captures the pane scrollback, runs
+the same goal-model pass as the turn_end hook (`ARCMUX_GOAL_BIN`, default
+`grok`), and writes `overall_goal` + `feature` to the session state doc via the
+single writer. Debounced: one pass in flight per session (409 on duplicates in
+wait mode; silently coalesced in background mode).
+
+### Query parameters
+
+| name   | type   | default | notes                                              |
+|--------|--------|---------|----------------------------------------------------|
+| `name` | string | (req.)  | Session name.                                      |
+| `wait` | bool   | `0`     | `1` blocks (≤90s) and returns the refreshed `turn_contract`; default fires in the background and returns `{"started": true}`. |
+
+---
+
 ## `POST|GET /session/close`
 
 Kill the tmux pane for a session and remove it from the registry.

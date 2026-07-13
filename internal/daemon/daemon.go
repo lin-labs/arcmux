@@ -105,6 +105,10 @@ type Daemon struct {
 	// used by CreateSession's cwd resolution. Never nil.
 	platforms map[string]bool
 
+	// summarizing debounces on-demand session summarization (POST
+	// /session/summarize): at most one goal-model pass in flight per session.
+	summarizing sync.Map
+
 	// state is the daemon-level bbolt store backing the C1 substrate RPCs
 	// (Send/PeekInbox/AckInbox/QueryAudit). Opened at Start, lazily on
 	// first need if Start hasn't been called (test path). One file:

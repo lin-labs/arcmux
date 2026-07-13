@@ -253,6 +253,62 @@ func gitDirtyFiles(ctx context.Context, cwd string) map[string]string {
 	return statuses
 }
 
+// handleSessionSummarize serves POST /session/summarize?name=<n>[&wait=1].
+// Triggers the on-demand goal-model pass that writes overall_goal + feature to
+// the session's state doc — the recovery path for a babysit call that finds no
+// briefing. Default is fire-and-forget ({"started": true}); wait=1 blocks
+// (bounded) and returns the refreshed turn_contract.
+func (h *HTTPServer) handleSessionSummarize(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "POST only"})
+		return
+	}
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "missing name"})
+		return
+	}
+	sess := h.findByName(name)
+	if sess == nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: fmt.Sprintf("no session named %q", name)})
+		return
+	}
+	snap := sess.Snapshot()
+	wait := r.URL.Query().Get("wait") == "1" || r.URL.Query().Get("wait") == "true"
+
+	if !wait {
+		go func() {
+			ctx, cancel := context.WithTimeout(h.daemon.ctx, 120*time.Second)
+			defer cancel()
+			if _, err := h.daemon.SummarizeSessionByID(ctx, snap.ID); err != nil && err != ErrSummarizeInFlight {
+				h.daemon.logger.Warn("background summarize failed", "session_id", snap.ID, "error", err)
+			}
+		}()
+		writeJSON(w, http.StatusOK, map[string]any{
+			"session_id": snap.ID, "name": snap.Name, "started": true,
+			"note": "summarizing in background; re-read the state doc or /sessions shortly",
+		})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+	goal, err := h.daemon.SummarizeSessionByID(ctx, snap.ID)
+	if err == ErrSummarizeInFlight {
+		writeJSON(w, http.StatusConflict, errorResponse{Error: err.Error()})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: err.Error()})
+		return
+	}
+	resp := map[string]any{"session_id": snap.ID, "name": snap.Name, "overall_goal": goal}
+	if st, rerr := hooks.ReadSessionState(h.daemon.cfg.Hooks.SessionStateDir, snap.ID); rerr == nil && st != nil {
+		resp["turn_contract"] = st.TurnContract
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // handleSessionFeature serves POST /session/feature?name=<n>&feature=<slug>
 // [&pin=0]. An explicit set pins by default (auto-derivation stops); pass
 // pin=0 to record a suggestion the summarizer may still refine.
