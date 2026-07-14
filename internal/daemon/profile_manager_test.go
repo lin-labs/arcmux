@@ -11,6 +11,7 @@ import (
 
 	arcmuxv1 "github.com/lin-labs/arcmux/gen/arcmux/v1"
 	"github.com/lin-labs/arcmux/internal/config"
+	"github.com/lin-labs/arcmux/internal/mesh"
 	"github.com/lin-labs/arcmux/internal/tmux"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -51,6 +52,9 @@ func TestProfileManager_CreateRemoveRestart(t *testing.T) {
 	}
 	if alpha.TmuxSocketName == beta.TmuxSocketName {
 		t.Fatalf("tmux sockets collide: %q", alpha.TmuxSocketName)
+	}
+	if pm.daemons["alpha"].mesh != nil || pm.daemons["beta"].mesh != nil {
+		t.Fatal("profile daemon started the machine-scoped mesh")
 	}
 	assertProfileReachable(t, alpha.SocketPath)
 	assertProfileReachable(t, beta.SocketPath)
@@ -102,6 +106,15 @@ func TestProfileManager_CreateRemoveRestart(t *testing.T) {
 func testProfileManagerConfig(t *testing.T) *config.Config {
 	t.Helper()
 	tmp := t.TempDir()
+	registryPath := filepath.Join(tmp, "mesh.json")
+	if err := mesh.SaveRegistry(registryPath, &mesh.Registry{
+		Version:  mesh.RegistryVersion,
+		DeviceID: "root",
+		Serve:    true,
+		Accept:   map[string]string{"peer": mesh.TokenHash("test-token")},
+	}); err != nil {
+		t.Fatalf("write mesh registry: %v", err)
+	}
 	return &config.Config{
 		Daemon: config.DaemonConfig{
 			Socket:   filepath.Join(tmp, "default.sock"),
@@ -128,6 +141,11 @@ func testProfileManagerConfig(t *testing.T) *config.Config {
 			Interval:          "10s",
 			DiscoveryInterval: "60s",
 			Cadence:           config.PulseCadenceConfig{Interval: "30s"},
+		},
+		Mesh: config.MeshConfig{
+			Enabled:      true,
+			ListenAddr:   "127.0.0.1:0",
+			RegistryPath: registryPath,
 		},
 		Agents: config.DefaultAgentProfiles(),
 	}

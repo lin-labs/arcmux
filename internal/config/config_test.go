@@ -35,6 +35,41 @@ func TestLoad_Defaults(t *testing.T) {
 	if _, ok := cfg.Agents["codex"]; !ok {
 		t.Error("expected codex in default profiles")
 	}
+	mesh, err := cfg.Mesh.Parse()
+	if err != nil {
+		t.Fatalf("Mesh.Parse: %v", err)
+	}
+	if !mesh.Enabled || mesh.ListenAddr != "127.0.0.1:7788" || mesh.ReconnectMin != 500*time.Millisecond || mesh.DeadAfter != 60*time.Second {
+		t.Fatalf("unexpected mesh defaults: %+v", mesh)
+	}
+}
+
+func TestMeshParseRejectsUnsafeOrInvalidSettings(t *testing.T) {
+	tests := []MeshConfig{
+		{ListenAddr: "0.0.0.0:7788"},
+		{ListenAddr: "127.0.0.1:7788", StaleAfter: "1m", DeadAfter: "30s"},
+		{ListenAddr: "127.0.0.1:7788", ReconnectMin: "5s", ReconnectMax: "1s"},
+		{ListenAddr: "127.0.0.1:7788", WriterQueue: -1},
+	}
+	for _, tc := range tests {
+		if _, err := tc.Parse(); err == nil {
+			t.Fatalf("Parse accepted unsafe config: %+v", tc)
+		}
+	}
+}
+
+func TestLoadInvalidMeshDoesNotBlockLocalConfig(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(p, []byte("[mesh]\nlisten_addr = \"0.0.0.0:7788\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load should leave mesh failure to best-effort daemon path: %v", err)
+	}
+	if _, err := cfg.Mesh.Parse(); err == nil {
+		t.Fatal("Mesh.Parse accepted unsafe address")
+	}
 }
 
 func TestLoad_HooksAutoRegisterOptIn(t *testing.T) {

@@ -34,6 +34,19 @@ make start && sleep 1 && make status
   `ARCMUX_SOCKET=<sock> bin/arcmux-cli exec --agent grok "Reply with exactly: pong"`.
 - HTTP/gRPC endpoint check after `make start`: hit the documented port and
   confirm a known endpoint returns 200 / a valid proto response.
+- Mesh reconnect smoke (isolated ports; never restart the production daemon):
+  configure two temporary `mesh.json` registries and daemon configs, expose the
+  serving side on `127.0.0.1:7788`, then verify
+  `arcmux mesh status --json`, `arcmux mesh ping <peer>`, stop/start only the
+  serving daemon, and confirm the dialer transitions disconnected → connected
+  without either side's local sessions changing.
+- Live tailnet rung: on the stable host run
+  `arcmux mesh serve ref --device <host> --url ws://<tailscale-host>:7788/v1/mesh --tailscale-port 7788`
+  and pipe the JSON over SSH into
+  `arcmux mesh join - --device ref`. Confirm both pairing commands report a
+  mesh-only hot reload, `arcmux mesh ping <host>` succeeds, and
+  `tailscale serve status` retains unrelated mappings. Never put the invite
+  bearer on a command line or in a validation report.
 - `make deploy` to labs followed by an SSH-side `make status` and a curl from
   the lab box, confirming the released binary boots in its real environment.
 
@@ -59,6 +72,9 @@ staticcheck ./... 2>/dev/null    # if installed
 - Toolchain: Go (version per `go.mod`).
 - Port: see Makefile `LOG_DIR` / port flag defaults; update this profile with
   the exact value once confirmed.
+- Local control HTTP defaults to `127.0.0.1:7777`; the mesh wire listener is a
+  separate loopback-only `127.0.0.1:7788`, normally raw-TCP proxied by
+  Tailscale Serve.
 - Service install path on labs: per `blin-lab-service` conventions.
 
 ## Known flakies and quirks

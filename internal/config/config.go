@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 // Config is the top-level configuration for the arcmux daemon.
 type Config struct {
 	Daemon   DaemonConfig               `toml:"daemon"`
+	Mesh     MeshConfig                 `toml:"mesh"`
 	Mux      MuxConfig                  `toml:"mux"`
 	Tmux     TmuxConfig                 `toml:"tmux"`
 	Health   HealthConfig               `toml:"health"`
@@ -27,6 +29,38 @@ type Config struct {
 	// features (recording, future tools) can share the same root without
 	// depending on the pulse sub-config.
 	DataRoot string `toml:"data_root"`
+}
+
+// MeshConfig controls the private, best-effort peer transport. Peer identities
+// and credentials deliberately live in RegistryPath instead of config.toml so
+// pairing commands can update them atomically without rewriting user TOML.
+type MeshConfig struct {
+	Enabled           bool   `toml:"enabled"`
+	ListenAddr        string `toml:"listen_addr"`
+	RegistryPath      string `toml:"registry_path"`
+	HeartbeatInterval string `toml:"heartbeat_interval"`
+	StaleAfter        string `toml:"stale_after"`
+	DeadAfter         string `toml:"dead_after"`
+	ReconnectMax      string `toml:"reconnect_max"`
+	ReconnectMin      string `toml:"reconnect_min"`
+	HandshakeTimeout  string `toml:"handshake_timeout"`
+	MaxMessageBytes   int64  `toml:"max_message_bytes"`
+	WriterQueue       int    `toml:"writer_queue"`
+}
+
+// ParsedMeshConfig is the validated runtime form of MeshConfig.
+type ParsedMeshConfig struct {
+	Enabled           bool
+	ListenAddr        string
+	RegistryPath      string
+	HeartbeatInterval time.Duration
+	StaleAfter        time.Duration
+	DeadAfter         time.Duration
+	ReconnectMax      time.Duration
+	ReconnectMin      time.Duration
+	HandshakeTimeout  time.Duration
+	MaxMessageBytes   int64
+	WriterQueue       int
 }
 
 // DeliveryConfig selects which prompt-delivery judge the daemon uses. The
@@ -153,6 +187,19 @@ func Load(path string) (*Config, error) {
 			LogDir:   defaultLogDir(),
 			HTTPAddr: "127.0.0.1:7777",
 		},
+		Mesh: MeshConfig{
+			Enabled:           true,
+			ListenAddr:        "127.0.0.1:7788",
+			RegistryPath:      defaultMeshRegistryPath(),
+			HeartbeatInterval: "15s",
+			StaleAfter:        "35s",
+			DeadAfter:         "60s",
+			ReconnectMax:      "30s",
+			ReconnectMin:      "500ms",
+			HandshakeTimeout:  "10s",
+			MaxMessageBytes:   64 << 10,
+			WriterQueue:       32,
+		},
 		Mux: MuxConfig{
 			Backend: "cmux",
 		},
@@ -240,8 +287,84 @@ func Load(path string) (*Config, error) {
 	if err := cfg.Delivery.Validate(); err != nil {
 		return nil, err
 	}
-
 	return cfg, nil
+}
+
+func defaultMeshRegistryPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config", "arcmux", "mesh.json")
+}
+
+// Parse validates mesh safety and converts duration strings. The listener is
+// loopback-only by design; Tailscale Serve must proxy to it rather than making
+// the arcmux control or mesh ports directly public.
+func (m MeshConfig) Parse() (ParsedMeshConfig, error) {
+	parsed := ParsedMeshConfig{
+		Enabled:    m.Enabled,
+		ListenAddr: m.ListenAddr, RegistryPath: m.RegistryPath,
+		MaxMessageBytes: m.MaxMessageBytes, WriterQueue: m.WriterQueue,
+	}
+	if parsed.ListenAddr == "" {
+		parsed.ListenAddr = "127.0.0.1:7788"
+	}
+	host, _, err := net.SplitHostPort(parsed.ListenAddr)
+	if err != nil {
+		return parsed, fmt.Errorf("config: mesh.listen_addr: %w", err)
+	}
+	ip := net.ParseIP(host)
+	if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+		return parsed, fmt.Errorf("config: mesh.listen_addr must be loopback, got %q", parsed.ListenAddr)
+	}
+	if parsed.RegistryPath == "" {
+		parsed.RegistryPath = defaultMeshRegistryPath()
+	}
+	parseDuration := func(name, value string, fallback time.Duration) (time.Duration, error) {
+		if value == "" {
+			return fallback, nil
+		}
+		d, err := time.ParseDuration(value)
+		if err != nil || d <= 0 {
+			return 0, fmt.Errorf("config: mesh.%s must be a positive duration", name)
+		}
+		return d, nil
+	}
+	if parsed.HeartbeatInterval, err = parseDuration("heartbeat_interval", m.HeartbeatInterval, 15*time.Second); err != nil {
+		return parsed, err
+	}
+	if parsed.StaleAfter, err = parseDuration("stale_after", m.StaleAfter, 35*time.Second); err != nil {
+		return parsed, err
+	}
+	if parsed.DeadAfter, err = parseDuration("dead_after", m.DeadAfter, 60*time.Second); err != nil {
+		return parsed, err
+	}
+	if parsed.ReconnectMax, err = parseDuration("reconnect_max", m.ReconnectMax, 30*time.Second); err != nil {
+		return parsed, err
+	}
+	if parsed.ReconnectMin, err = parseDuration("reconnect_min", m.ReconnectMin, 500*time.Millisecond); err != nil {
+		return parsed, err
+	}
+	if parsed.HandshakeTimeout, err = parseDuration("handshake_timeout", m.HandshakeTimeout, 10*time.Second); err != nil {
+		return parsed, err
+	}
+	if parsed.StaleAfter >= parsed.DeadAfter {
+		return parsed, fmt.Errorf("config: mesh.stale_after must be less than dead_after")
+	}
+	if parsed.ReconnectMin > parsed.ReconnectMax {
+		return parsed, fmt.Errorf("config: mesh.reconnect_min must be at most reconnect_max")
+	}
+	if parsed.MaxMessageBytes == 0 {
+		parsed.MaxMessageBytes = 64 << 10
+	}
+	if parsed.MaxMessageBytes < 1024 || parsed.MaxMessageBytes > 1<<20 {
+		return parsed, fmt.Errorf("config: mesh.max_message_bytes must be between 1024 and 1048576")
+	}
+	if parsed.WriterQueue == 0 {
+		parsed.WriterQueue = 32
+	}
+	if parsed.WriterQueue < 1 || parsed.WriterQueue > 4096 {
+		return parsed, fmt.Errorf("config: mesh.writer_queue must be between 1 and 4096")
+	}
+	return parsed, nil
 }
 
 // expandTilde turns "~", "~/..." into an absolute path under the user's
@@ -272,6 +395,7 @@ func expandConfigPaths(cfg *Config) {
 	cfg.Daemon.Socket = expandTilde(cfg.Daemon.Socket)
 	cfg.Daemon.LogDir = expandTilde(cfg.Daemon.LogDir)
 	cfg.Daemon.StatePath = expandTilde(cfg.Daemon.StatePath)
+	cfg.Mesh.RegistryPath = expandTilde(cfg.Mesh.RegistryPath)
 	cfg.Hooks.ClaudeHookDir = expandTilde(cfg.Hooks.ClaudeHookDir)
 	cfg.Hooks.CodexHookDir = expandTilde(cfg.Hooks.CodexHookDir)
 	cfg.Hooks.GrokHookDir = expandTilde(cfg.Hooks.GrokHookDir)

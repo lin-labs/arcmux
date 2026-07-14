@@ -44,8 +44,53 @@ func NewHTTPServer(d *Daemon, addr string) *HTTPServer {
 	mux.HandleFunc("/profiles", h.handleProfilesList)
 	mux.HandleFunc("/profiles/create", h.handleProfilesCreate)
 	mux.HandleFunc("/profiles/remove", h.handleProfilesRemove)
+	mux.HandleFunc("/mesh/status", h.handleMeshStatus)
+	mux.HandleFunc("/mesh/ping", h.handleMeshPing)
+	mux.HandleFunc("/mesh/reload", h.handleMeshReload)
 	h.srv = &http.Server{Addr: addr, Handler: otelhttp.NewHandler(h.withAuth(mux), "arcmux-http")}
 	return h
+}
+
+func (h *HTTPServer) handleMeshStatus(w http.ResponseWriter, r *http.Request) {
+	enabled, peers := h.daemon.MeshStatus()
+	if !enabled {
+		writeJSON(w, http.StatusOK, map[string]any{"enabled": false, "peers": []any{}})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": true, "peers": peers})
+}
+
+func (h *HTTPServer) handleMeshPing(w http.ResponseWriter, r *http.Request) {
+	peer := r.URL.Query().Get("peer")
+	if peer == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "missing peer"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	rtt, err := h.daemon.MeshPing(ctx, peer)
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"peer_id": peer, "round_trip_ms": rtt.Milliseconds()})
+}
+
+func (h *HTTPServer) handleMeshReload(w http.ResponseWriter, r *http.Request) {
+	if !isLoopback(r.RemoteAddr) {
+		writeJSON(w, http.StatusForbidden, errorResponse{Error: "mesh reload is loopback-only"})
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "POST required"})
+		return
+	}
+	if err := h.daemon.ReloadMesh(); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	enabled, peers := h.daemon.MeshStatus()
+	writeJSON(w, http.StatusOK, map[string]any{"reloaded": true, "enabled": enabled, "peers": peers})
 }
 
 // isLoopback reports whether a RemoteAddr (host:port or bare host) is a

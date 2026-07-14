@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -18,6 +19,7 @@ import (
 	"github.com/lin-labs/arcmux/internal/health"
 	"github.com/lin-labs/arcmux/internal/hooks"
 	"github.com/lin-labs/arcmux/internal/manager/store"
+	arcmuxmesh "github.com/lin-labs/arcmux/internal/mesh"
 	"github.com/lin-labs/arcmux/internal/mux"
 	"github.com/lin-labs/arcmux/internal/muxbuild"
 	"github.com/lin-labs/arcmux/internal/profile"
@@ -51,6 +53,8 @@ type Daemon struct {
 	server   *grpc.Server
 	listener net.Listener
 	httpSrv  *HTTPServer
+	meshMu   sync.RWMutex
+	mesh     *arcmuxmesh.Manager
 	ctx      context.Context
 	cancel   context.CancelFunc
 
@@ -318,6 +322,18 @@ func (d *Daemon) Start(ctx context.Context) error {
 		d.logger.Info("http server listening", "addr", addr)
 	}
 
+	// Mesh transport is strictly best-effort. A missing/invalid machine-local
+	// registry or an unavailable Tailscale path must never prevent local agent
+	// sessions from starting and continuing normally.
+	// The mesh is machine-scoped and belongs to the root daemon only. Profile
+	// daemons share the machine registry; letting each profile start it would
+	// duplicate outbound dials and contend for the same listener.
+	if d.cfg.Daemon.ProfileName == "" {
+		if err := d.ReloadMesh(); err != nil {
+			d.logger.Warn("mesh disabled; local sessions unaffected", "error", err)
+		}
+	}
+
 	d.logger.Info("daemon started",
 		"socket", socketPath,
 		"tmux_socket", d.cfg.Tmux.SocketName,
@@ -351,6 +367,14 @@ func (d *Daemon) Stop() {
 		_ = d.httpSrv.Shutdown(shutdownCtx)
 		cancel()
 	}
+	d.meshMu.Lock()
+	if d.mesh != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		d.mesh.Stop(shutdownCtx)
+		cancel()
+		d.mesh = nil
+	}
+	d.meshMu.Unlock()
 
 	// Flush OTLP traces (LabOps observability).
 	if d.otelShutdown != nil {
@@ -387,6 +411,69 @@ func (d *Daemon) Stop() {
 		d.state = nil
 	}
 	d.stateMu.Unlock()
+}
+
+// ReloadMesh atomically swaps only the best-effort mesh transport. It never
+// restarts the daemon, gRPC server, tmux server, or any managed agent pane.
+func (d *Daemon) ReloadMesh() error {
+	d.meshMu.Lock()
+	defer d.meshMu.Unlock()
+	if d.cfg.Daemon.ProfileName != "" {
+		return errors.New("mesh is owned by the root daemon, not profile daemons")
+	}
+	meshCfg, err := d.cfg.Mesh.Parse()
+	if err != nil {
+		return err
+	}
+	if !meshCfg.Enabled {
+		if d.mesh != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			d.mesh.Stop(ctx)
+			cancel()
+			d.mesh = nil
+		}
+		return nil
+	}
+	registry, err := arcmuxmesh.LoadRegistry(meshCfg.RegistryPath)
+	if err != nil {
+		return err
+	}
+	if d.mesh != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		d.mesh.Stop(ctx)
+		cancel()
+		d.mesh = nil
+	}
+	if registry.DeviceID == "" || (!registry.Serve && len(registry.Peers) == 0) {
+		return nil
+	}
+	next := arcmuxmesh.New(meshCfg, registry, d.logger)
+	if err := next.Start(d.ctx); err != nil {
+		return err
+	}
+	d.mesh = next
+	return nil
+}
+
+func (d *Daemon) MeshStatus() (bool, []arcmuxmesh.Status) {
+	d.meshMu.RLock()
+	defer d.meshMu.RUnlock()
+	if d.mesh == nil {
+		return false, nil
+	}
+	return true, d.mesh.Status()
+}
+
+func (d *Daemon) MeshPing(ctx context.Context, peer string) (time.Duration, error) {
+	d.meshMu.RLock()
+	m := d.mesh
+	if m == nil {
+		d.meshMu.RUnlock()
+		return 0, errors.New("mesh is disabled")
+	}
+	rtt, err := m.Ping(ctx, peer)
+	d.meshMu.RUnlock()
+	return rtt, err
 }
 
 // openState opens the daemon-level state.bolt under
