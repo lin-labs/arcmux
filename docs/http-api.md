@@ -36,6 +36,58 @@ When `http_auth_token` is set, **non-loopback** requests must present
 (`127.0.0.1`, `::1`, `localhost`) always bypass auth for local dev. When the
 token is empty (default), auth is disabled entirely.
 
+The device mesh does **not** reuse this listener. Its authenticated WebSocket
+upgrade is on a dedicated loopback listener (default `127.0.0.1:7788`) at
+`/v1/mesh`, normally reached through raw-TCP Tailscale Serve. Never expose port
+7777 as the mesh transport.
+
+## Mesh administration (local control API)
+
+These endpoints expose no bearer credentials. They are protected by the same
+control-plane authentication rules above and are intended for local CLI and
+Mission Control use.
+
+### `GET /mesh/status`
+
+Returns deterministic peer status including `peer_id`, direction, state
+(`disconnected`, `connecting`, `connected`, `stale`, or `dead`), last seen / last
+success, next retry, sanitized last error, negotiated protocol, and round-trip
+milliseconds. An offline peer remains visible; local sessions remain usable.
+
+```json
+{
+  "enabled": true,
+  "peers": [{"peer_id":"labs","direction":"outbound","state":"connected","protocol":1,"round_trip_ms":12}]
+}
+```
+
+### `POST /mesh/ping?peer=<id>`
+
+Sends an application-level ping over the current peer connection and returns
+`peer_id` plus `round_trip_ms`. It returns `503` when the mesh or peer is
+unavailable.
+
+### `POST /mesh/reload`
+
+Atomically stops and replaces only the mesh manager from the owner-only mesh
+registry. The gRPC/HTTP control servers, tmux server, and all agent sessions are
+left running. `arcmux mesh serve` and `arcmux mesh join` call this endpoint after
+an atomic registry update, so pairing does not require a daemon restart.
+
+## Mesh wire endpoint (dedicated listener)
+
+`GET /v1/mesh` is a WebSocket upgrade requiring:
+
+- `Authorization: Bearer <256-bit invite credential>`;
+- `Sec-WebSocket-Protocol: arcmux.mesh.v1`;
+- a protocol-v1 text-JSON `hello` whose device ID matches the credential;
+- messages no larger than the configured limit (64 KiB default).
+
+The server stores only a SHA-256 hash for accepted credentials. Malformed,
+binary, oversized, wrong-version, and wrong-identity frames close only that peer
+connection. Protocol v1 carries hello/welcome/ping/pong control envelopes; the
+remote-session and artifact vocabulary is intentionally a later layer.
+
 ## Supported agents
 
 | agent    | status          | command launched                               |

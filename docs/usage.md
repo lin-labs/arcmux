@@ -7,6 +7,69 @@ pure substrate — role structure (Elon/Manager/IC) is owned by callers (elonco)
 not the daemon; the mental model below describes the elonco usage pattern, not
 daemon-enforced tiers.
 
+## Resilient device mesh
+
+arcmux can maintain a directed, authenticated WebSocket link between two
+devices on a tailnet. The mesh listener is separate from the local control API:
+it binds only to `127.0.0.1:7788` by default, while Tailscale Serve forwards raw
+TCP to it. Losing Wi-Fi, VPN, or the remote machine never stops local sessions;
+the peer becomes stale/dead and the dialer retries forever with bounded jitter.
+
+On the machine that stays reachable (for example `labs`), create an invite for
+the laptop. Keep the bearer out of shell arguments and logs by piping JSON or
+using the owner-only output file:
+
+```bash
+arcmux mesh serve ref \
+  --device labs \
+  --url ws://labs:7788/v1/mesh \
+  --tailscale-port 7788 \
+  --output ~/.config/arcmux/ref.mesh-invite.json
+```
+
+`--tailscale-port` runs the additive command
+`tailscale serve --bg --tcp 7788 tcp://127.0.0.1:7788`; it does not reset other
+Serve mappings. Copy the invite over a trusted channel, or pipe it over SSH,
+then join from the laptop without placing the credential in the process list:
+
+```bash
+ssh labs 'arcmux mesh serve ref --device labs --url ws://labs:7788/v1/mesh --tailscale-port 7788' |
+  arcmux mesh join - --device ref
+```
+
+Both commands hot-reload only the mesh manager in an already-running daemon;
+agent panes and local APIs are untouched. If the daemon is offline, the command
+reports that the pairing is configured for the next start. Re-running `serve`
+is safe and does not re-emit the credential; pass `--rotate` to deliberately
+re-enroll that peer.
+
+```bash
+arcmux mesh status
+arcmux mesh status --json
+arcmux mesh ping labs
+```
+
+The machine-local registry defaults to `~/.config/arcmux/mesh.json` mode `0600`.
+Servers retain only SHA-256 bearer hashes; an outbound dialer retains the raw
+credential in that owner-only file. Protocol v1 permits one direction per peer
+pair: do not configure the same peer under both inbound accepts and outbound
+peers. The socket is bidirectional after connection; session/artifact messages
+will layer onto it without a second reverse dial.
+
+Optional transport timing and location overrides belong in `config.toml`:
+
+```toml
+[mesh]
+enabled = true
+listen_addr = "127.0.0.1:7788"
+registry_path = "~/.config/arcmux/mesh.json"
+heartbeat_interval = "15s"
+stale_after = "35s"
+dead_after = "60s"
+reconnect_min = "500ms"
+reconnect_max = "30s"
+```
+
 ---
 
 ## TL;DR — the minimum to drive Elon

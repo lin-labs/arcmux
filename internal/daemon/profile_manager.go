@@ -208,6 +208,9 @@ func (pm *ProfileManager) startLocked(ctx context.Context, rec ProfileRecord) er
 	cfg.Tmux.DefaultSession = rec.Name
 	cfg.Pulse.Enabled = false
 	cfg.Pulse.DataRoot = rec.DataDir
+	// Mesh connectivity is machine-scoped. Only the root daemon owns the
+	// shared registry, listener, and outbound peer loops.
+	cfg.Mesh.Enabled = false
 
 	d := New(cfg, pm.parent.logger.With("profile", rec.Name))
 	if err := d.Start(ctx); err != nil {

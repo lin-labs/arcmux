@@ -44,6 +44,8 @@ func run(args []string) error {
 		return cmdPulse(args[1:])
 	case "profiles":
 		return cmdProfiles(args[1:], os.Stdout)
+	case "mesh":
+		return cmdMesh(args[1:], os.Stdin, os.Stdout)
 	case "hook-env":
 		return cmdHookEnv(args[1:], os.Stdout)
 	case "hook":
@@ -118,6 +120,10 @@ Usage:
   arcmux profiles remove <name> [--purge]                 Stop listening and remove the profile registry entry
   arcmux profiles purge <name>                            Stop listening, remove registry entry, and delete profile state
   arcmux info [--config path] [--json]                    Print daemon-process introspection (PID, socket, bolt path, session count, uptime)
+  arcmux mesh status [--json]                             Show peer connectivity without exposing credentials
+  arcmux mesh ping <peer>                                 Check a connected peer
+  arcmux mesh serve <peer> --url <url> [--output file]    Create a one-time pairing invite
+  arcmux mesh join <invite-file|->                        Join from a 0600 file or stdin
   arcmux pulse --project <slug> [--interval 10s] [--once] Debug-only: pulse one project (the daemon does this for all projects)
   arcmux version                                          Print version
   arcmux help                                             Show this help
