@@ -47,6 +47,14 @@ func NewHTTPServer(d *Daemon, addr string) *HTTPServer {
 	mux.HandleFunc("/mesh/status", h.handleMeshStatus)
 	mux.HandleFunc("/mesh/ping", h.handleMeshPing)
 	mux.HandleFunc("/mesh/reload", h.handleMeshReload)
+	mux.HandleFunc("/mesh/sessions", h.meshOperatorOnly(h.handleMeshSessions))
+	mux.HandleFunc("/mesh/sessions/sync", h.meshOperatorOnly(h.handleMeshSessionsSync))
+	mux.HandleFunc("/mesh/session", h.meshOperatorOnly(h.handleMeshSession))
+	mux.HandleFunc("/mesh/artifacts", h.meshOperatorOnly(h.handleMeshArtifacts))
+	mux.HandleFunc("/mesh/artifacts/sync", h.meshOperatorOnly(h.handleMeshArtifactsSync))
+	mux.HandleFunc("/mesh/artifact", h.meshOperatorOnly(h.handleMeshArtifact))
+	mux.HandleFunc("/mesh/subscribe", h.meshOperatorOnly(h.handleMeshSubscribe))
+	mux.HandleFunc("/mesh/surface-bindings", h.meshOperatorOnly(h.handleMeshSurfaceBindings))
 	h.srv = &http.Server{Addr: addr, Handler: otelhttp.NewHandler(h.withAuth(mux), "arcmux-http")}
 	return h
 }
@@ -133,6 +141,20 @@ func (h *HTTPServer) withAuth(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// meshOperatorOnly prevents the mesh projection/control surface from becoming
+// an unauthenticated LAN API under the legacy "empty token disables auth"
+// setting. Loopback remains convenient; non-loopback requires configuring the
+// bearer token, which withAuth verifies before this handler is reached.
+func (h *HTTPServer) meshOperatorOnly(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if h.authToken == "" && !isLoopback(r.RemoteAddr) {
+			writeJSON(w, http.StatusForbidden, errorResponse{Error: "mesh operator API requires loopback or configured HTTP auth"})
+			return
+		}
+		next(w, r)
+	}
 }
 
 func (h *HTTPServer) Serve() error {
