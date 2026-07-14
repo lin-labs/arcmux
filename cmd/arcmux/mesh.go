@@ -30,7 +30,7 @@ type meshInvite struct {
 
 func cmdMesh(args []string, stdin io.Reader, stdout io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: arcmux mesh status|ping|serve|join")
+		return fmt.Errorf("usage: arcmux mesh status|ping|serve|join|grant|revoke")
 	}
 	switch args[0] {
 	case "status":
@@ -41,9 +41,133 @@ func cmdMesh(args []string, stdin io.Reader, stdout io.Writer) error {
 		return cmdMeshServe(args[1:], stdout)
 	case "join":
 		return cmdMeshJoin(args[1:], stdin, stdout)
+	case "grant":
+		return cmdMeshGrant(args[1:], stdout)
+	case "revoke":
+		return cmdMeshRevoke(args[1:], stdout)
+	case "sessions":
+		return cmdMeshSessions(args[1:], stdout)
+	case "session":
+		return cmdMeshSession(args[1:], stdout)
+	case "artifacts":
+		return cmdMeshRemoteArtifacts(args[1:], stdout)
+	case "artifact":
+		return cmdMeshRemoteArtifact(args[1:], stdout)
+	case "subscribe":
+		return cmdMeshSubscribe(args[1:], stdout)
 	default:
 		return fmt.Errorf("unknown mesh subcommand %q", args[0])
 	}
+}
+
+var meshReadScopes = []string{
+	mesh.ScopeArtifactsRead,
+	mesh.ScopeEventsRead,
+	mesh.ScopeSessionsRead,
+}
+
+// cmdMeshGrant enables explicitly read-only application access for one paired
+// peer. Pairing alone remains transport-only; omitting scopes grants the full
+// safe read set so the common two-device setup stays a one-command operation.
+func cmdMeshGrant(args []string, stdout io.Writer) error {
+	cfg, rest, err := meshConfig(args)
+	if err != nil {
+		return err
+	}
+	if len(rest) < 1 {
+		return fmt.Errorf("usage: arcmux mesh grant <peer> [sessions.read artifacts.read events.read]")
+	}
+	peerID := rest[0]
+	scopes := append([]string(nil), rest[1:]...)
+	if len(scopes) == 0 {
+		scopes = append(scopes, meshReadScopes...)
+	}
+	allowed := make(map[string]bool, len(meshReadScopes))
+	for _, scope := range meshReadScopes {
+		allowed[scope] = true
+	}
+	seen := make(map[string]bool, len(scopes))
+	for _, scope := range scopes {
+		if !allowed[scope] {
+			return fmt.Errorf("unsupported mesh grant scope %q", scope)
+		}
+		if seen[scope] {
+			return fmt.Errorf("duplicate mesh grant scope %q", scope)
+		}
+		seen[scope] = true
+	}
+	parsed, err := cfg.Mesh.Parse()
+	if err != nil {
+		return err
+	}
+	registry, err := mesh.LoadRegistry(parsed.RegistryPath)
+	if err != nil {
+		return err
+	}
+	if !meshPeerConfigured(registry, peerID) {
+		return fmt.Errorf("mesh peer %q is not paired", peerID)
+	}
+	registry.Grants[peerID] = scopes
+	if err := mesh.SaveRegistry(parsed.RegistryPath, registry); err != nil {
+		return err
+	}
+	reloaded, err := reloadMesh(cfg)
+	if err != nil {
+		return err
+	}
+	state := "saved for next daemon start"
+	if reloaded {
+		state = "running daemon reloaded"
+	}
+	_, err = fmt.Fprintf(stdout, "granted %s to %s; %s\n", strings.Join(scopes, ","), peerID, state)
+	return err
+}
+
+func cmdMeshRevoke(args []string, stdout io.Writer) error {
+	cfg, rest, err := meshConfig(args)
+	if err != nil {
+		return err
+	}
+	if len(rest) != 1 {
+		return fmt.Errorf("usage: arcmux mesh revoke <peer>")
+	}
+	parsed, err := cfg.Mesh.Parse()
+	if err != nil {
+		return err
+	}
+	registry, err := mesh.LoadRegistry(parsed.RegistryPath)
+	if err != nil {
+		return err
+	}
+	delete(registry.Grants, rest[0])
+	if err := mesh.SaveRegistry(parsed.RegistryPath, registry); err != nil {
+		return err
+	}
+	reloaded, err := reloadMesh(cfg)
+	if err != nil {
+		return err
+	}
+	state := "saved for next daemon start"
+	if reloaded {
+		state = "running daemon reloaded"
+	}
+	_, err = fmt.Fprintf(stdout, "revoked application access from %s; %s\n", rest[0], state)
+	return err
+}
+
+func meshPeerConfigured(registry *mesh.Registry, peerID string) bool {
+	if registry == nil {
+		return false
+	}
+	if _, ok := registry.Accept[peerID]; ok {
+		return true
+	}
+	for _, peer := range registry.Peers {
+		if peer.ID == peerID {
+			return true
+		}
+	}
+	return false
 }
 
 func meshConfig(args []string) (*config.Config, []string, error) {
@@ -133,10 +257,24 @@ func cmdMeshPing(args []string, stdout io.Writer) error {
 }
 
 func meshAPI(cfg *config.Config, method, path string) ([]byte, error) {
+	return meshAPIBody(cfg, method, path, nil)
+}
+
+func meshAPIBody(cfg *config.Config, method, path string, body []byte) ([]byte, error) {
 	if cfg.Daemon.HTTPAddr == "" {
 		return nil, errors.New("daemon http_addr is disabled")
 	}
-	req, _ := http.NewRequest(method, "http://"+cfg.Daemon.HTTPAddr+path, nil)
+	var reader io.Reader
+	if body != nil {
+		reader = strings.NewReader(string(body))
+	}
+	req, _ := http.NewRequest(method, "http://"+cfg.Daemon.HTTPAddr+path, reader)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if cfg.Daemon.HTTPAuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.Daemon.HTTPAuthToken)
+	}
 	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("daemon mesh API unavailable at %s: %w", cfg.Daemon.HTTPAddr, err)
@@ -338,6 +476,9 @@ func reloadMesh(cfg *config.Config) (bool, error) {
 		return false, nil
 	}
 	req, _ := http.NewRequest(http.MethodPost, "http://"+cfg.Daemon.HTTPAddr+"/mesh/reload", nil)
+	if cfg.Daemon.HTTPAuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.Daemon.HTTPAuthToken)
+	}
 	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
 	if err != nil {
 		return false, nil

@@ -46,6 +46,10 @@ func run(args []string) error {
 		return cmdProfiles(args[1:], os.Stdout)
 	case "mesh":
 		return cmdMesh(args[1:], os.Stdin, os.Stdout)
+	case "artifact":
+		return cmdArtifact(args[1:], os.Stdout)
+	case "surface":
+		return cmdSurface(args[1:], os.Stdout)
 	case "hook-env":
 		return cmdHookEnv(args[1:], os.Stdout)
 	case "hook":
@@ -124,6 +128,17 @@ Usage:
   arcmux mesh ping <peer>                                 Check a connected peer
   arcmux mesh serve <peer> --url <url> [--output file]    Create a one-time pairing invite
   arcmux mesh join <invite-file|->                        Join from a 0600 file or stdin
+  arcmux mesh grant <peer> [scopes...]                    Allow explicit read-only application access
+  arcmux mesh revoke <peer>                               Return a peer to transport-only access
+  arcmux mesh sessions <peer> [--profile scope]           Synchronize and list safe remote sessions
+  arcmux mesh session <peer> <scope> <session-id>         Show one safe remote session projection
+  arcmux mesh artifacts <peer> [--kind kind]              Synchronize and list remote artifact references
+  arcmux mesh artifact <peer> <kind> <source-id>          Fetch one live remote artifact reference
+  arcmux mesh subscribe <peer> [topics...]                Subscribe to typed session/artifact updates
+  arcmux artifact record --kind K --id ID [metadata]      Record a local artifact reference
+  arcmux artifact list [--kind kind]                      List local and synchronized artifact references
+  arcmux surface bind <device> <scope> <session-id>       Bind this cmux surface to an exact remote session
+  arcmux surface show|list|unbind                         Inspect or remove durable cmux bindings
   arcmux pulse --project <slug> [--interval 10s] [--once] Debug-only: pulse one project (the daemon does this for all projects)
   arcmux version                                          Print version
   arcmux help                                             Show this help

@@ -25,6 +25,10 @@ type Registry struct {
 	Serve    bool              `json:"serve"`
 	Accept   map[string]string `json:"accept,omitempty"`
 	Peers    []Peer            `json:"peers,omitempty"`
+	// Grants are local authorization policy, keyed by authenticated peer ID.
+	// An absent peer or absent scope denies all application RPC while leaving
+	// transport heartbeat traffic available.
+	Grants map[string][]string `json:"grants,omitempty"`
 }
 
 type Peer struct {
@@ -47,7 +51,7 @@ func LoadRegistry(path string) (*Registry, error) {
 	}
 	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return &Registry{Version: RegistryVersion, Accept: map[string]string{}}, nil
+		return &Registry{Version: RegistryVersion, Accept: map[string]string{}, Grants: map[string][]string{}}, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read mesh registry: %w", err)
@@ -58,6 +62,9 @@ func LoadRegistry(path string) (*Registry, error) {
 	}
 	if r.Accept == nil {
 		r.Accept = map[string]string{}
+	}
+	if r.Grants == nil {
+		r.Grants = map[string][]string{}
 	}
 	if err := r.Validate(); err != nil {
 		return nil, err
@@ -73,10 +80,15 @@ func (r *Registry) Validate() error {
 		return fmt.Errorf("mesh device id %q is invalid", r.DeviceID)
 	}
 	seen := map[string]bool{}
+	acceptedCredentials := make(map[string]string, len(r.Accept))
 	for id, token := range r.Accept {
 		if !safeID.MatchString(id) || token == "" {
 			return fmt.Errorf("mesh accepted peer %q is invalid", id)
 		}
+		if prior, exists := acceptedCredentials[token]; exists {
+			return fmt.Errorf("mesh accepted peers %q and %q reuse one credential", prior, id)
+		}
+		acceptedCredentials[token] = id
 	}
 	for _, p := range r.Peers {
 		if !safeID.MatchString(p.ID) || p.URL == "" || p.Token == "" {
@@ -93,6 +105,21 @@ func (r *Registry) Validate() error {
 		}
 		seen[p.ID] = true
 	}
+	for id, grants := range r.Grants {
+		if !safeID.MatchString(id) {
+			return fmt.Errorf("mesh grant peer %q is invalid", id)
+		}
+		seenScopes := make(map[string]bool, len(grants))
+		for _, scope := range grants {
+			if !safeScope.MatchString(scope) {
+				return fmt.Errorf("mesh grant scope %q for peer %q is invalid", scope, id)
+			}
+			if seenScopes[scope] {
+				return fmt.Errorf("mesh grant scope %q for peer %q is duplicated", scope, id)
+			}
+			seenScopes[scope] = true
+		}
+	}
 	return nil
 }
 
@@ -106,6 +133,9 @@ func SaveRegistry(path string, r *Registry) error {
 		return fmt.Errorf("create mesh config dir: %w", err)
 	}
 	sort.Slice(r.Peers, func(i, j int) bool { return r.Peers[i].ID < r.Peers[j].ID })
+	for id := range r.Grants {
+		sort.Strings(r.Grants[id])
+	}
 	b, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
 		return err

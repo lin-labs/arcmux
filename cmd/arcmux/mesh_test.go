@@ -88,6 +88,63 @@ func TestMeshServeDocumentedOrderIsIdempotentAndJoinReadsStdin(t *testing.T) {
 	}
 }
 
+func TestMeshGrantIsExplicitReadOnlyAndRevokeRestoresTransportOnly(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := meshTestConfig(t, dir, "server")
+	parsedRegistry := filepath.Join(dir, "server-mesh.json")
+	registry := &mesh.Registry{
+		Version:  mesh.RegistryVersion,
+		DeviceID: "server",
+		Accept:   map[string]string{"client": mesh.TokenHash("token")},
+		Grants:   map[string][]string{},
+	}
+	if err := mesh.SaveRegistry(parsedRegistry, registry); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := cmdMesh([]string{"grant", "client", "--config", cfgPath}, strings.NewReader(""), &out); err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	updated, err := mesh.LoadRegistry(parsedRegistry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{
+		mesh.ScopeArtifactsRead: true,
+		mesh.ScopeEventsRead:    true,
+		mesh.ScopeSessionsRead:  true,
+	}
+	if len(updated.Grants["client"]) != len(want) {
+		t.Fatalf("grants=%v", updated.Grants["client"])
+	}
+	for _, scope := range updated.Grants["client"] {
+		if !want[scope] {
+			t.Fatalf("unexpected grant %q", scope)
+		}
+	}
+	if !strings.Contains(out.String(), "saved for next daemon start") {
+		t.Fatalf("offline grant output=%q", out.String())
+	}
+
+	if err := cmdMesh([]string{"grant", "client", "shell.execute", "--config", cfgPath}, strings.NewReader(""), &bytes.Buffer{}); err == nil {
+		t.Fatal("unsafe scope accepted")
+	}
+	if err := cmdMesh([]string{"grant", "stranger", "--config", cfgPath}, strings.NewReader(""), &bytes.Buffer{}); err == nil {
+		t.Fatal("unpaired peer accepted")
+	}
+	if err := cmdMesh([]string{"revoke", "client", "--config", cfgPath}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	updated, err = mesh.LoadRegistry(parsedRegistry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := updated.Grants["client"]; ok {
+		t.Fatalf("revoke left grants: %v", updated.Grants)
+	}
+}
+
 func TestMeshServeValidatesBeforeWritingRegistry(t *testing.T) {
 	dir := t.TempDir()
 	cfg := meshTestConfig(t, dir, "server")

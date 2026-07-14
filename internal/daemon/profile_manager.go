@@ -138,6 +138,22 @@ func (pm *ProfileManager) List() []ProfileRecord {
 	return out
 }
 
+// SnapshotDaemons returns a shallow copy of the currently running profile
+// daemons. It deliberately releases the manager lock before callers enter a
+// child daemon, preventing lock inversion during profile create/remove.
+func (pm *ProfileManager) SnapshotDaemons() map[string]*Daemon {
+	if pm == nil {
+		return nil
+	}
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	out := make(map[string]*Daemon, len(pm.daemons))
+	for name, daemon := range pm.daemons {
+		out[name] = daemon
+	}
+	return out
+}
+
 func (pm *ProfileManager) Create(ctx context.Context, name string) (ProfileRecord, error) {
 	slug, err := NormalizeProfileName(name)
 	if err != nil {
@@ -217,6 +233,7 @@ func (pm *ProfileManager) startLocked(ctx context.Context, rec ProfileRecord) er
 		return fmt.Errorf("start profile %s: %w", rec.Name, err)
 	}
 	pm.daemons[rec.Name] = d
+	pm.parent.forwardProfileSessionEvents(ctx, rec.Name, d)
 	pm.parent.logger.Info("profile listening", "profile", rec.Name, "socket", rec.SocketPath, "tmux_socket", rec.TmuxSocketName)
 	return nil
 }

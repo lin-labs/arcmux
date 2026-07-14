@@ -1,6 +1,6 @@
 // Package mesh provides arcmux's best-effort, authenticated device transport.
-// It intentionally carries only transport control messages in protocol v1;
-// remote session and artifact semantics are layered on it separately.
+// Protocol v1 carries transport control plus a capability-gated, generic RPC
+// and event substrate. Session and artifact semantics remain separate layers.
 package mesh
 
 import (
@@ -29,29 +29,32 @@ const (
 	subprotocol     = "arcmux.mesh.v1"
 )
 
-var ErrBackpressure = errors.New("mesh peer writer queue is full")
 var errHeartbeatTimeout = errors.New("peer heartbeat timed out")
 
 type Envelope struct {
-	Version  int    `json:"version"`
-	Type     string `json:"type"`
-	ID       string `json:"id,omitempty"`
-	DeviceID string `json:"device_id,omitempty"`
-	SentAt   string `json:"sent_at,omitempty"`
+	Version      int             `json:"version"`
+	Type         string          `json:"type"`
+	ID           string          `json:"id,omitempty"`
+	DeviceID     string          `json:"device_id,omitempty"`
+	SentAt       string          `json:"sent_at,omitempty"`
+	Capabilities []string        `json:"capabilities,omitempty"`
+	Payload      json.RawMessage `json:"payload,omitempty"`
+	eventGap     bool
 }
 
 type Status struct {
-	PeerID      string     `json:"peer_id"`
-	Direction   string     `json:"direction,omitempty"`
-	State       string     `json:"state"`
-	ConnectedAt *time.Time `json:"connected_at,omitempty"`
-	LastSeen    *time.Time `json:"last_seen,omitempty"`
-	LastSuccess *time.Time `json:"last_success,omitempty"`
-	LastError   string     `json:"last_error,omitempty"`
-	NextRetryAt *time.Time `json:"next_retry_at,omitempty"`
-	Attempts    int        `json:"attempts,omitempty"`
-	Protocol    int        `json:"protocol,omitempty"`
-	RoundTripMS int64      `json:"round_trip_ms,omitempty"`
+	PeerID       string     `json:"peer_id"`
+	Direction    string     `json:"direction,omitempty"`
+	State        string     `json:"state"`
+	ConnectedAt  *time.Time `json:"connected_at,omitempty"`
+	LastSeen     *time.Time `json:"last_seen,omitempty"`
+	LastSuccess  *time.Time `json:"last_success,omitempty"`
+	LastError    string     `json:"last_error,omitempty"`
+	NextRetryAt  *time.Time `json:"next_retry_at,omitempty"`
+	Attempts     int        `json:"attempts,omitempty"`
+	Protocol     int        `json:"protocol,omitempty"`
+	RoundTripMS  int64      `json:"round_trip_ms,omitempty"`
+	Capabilities []string   `json:"capabilities,omitempty"`
 }
 
 type Manager struct {
@@ -70,18 +73,34 @@ type Manager struct {
 	status  map[string]Status
 	gen     atomic.Uint64
 	started bool
+
+	capabilities []string
+	handlersMu   sync.RWMutex
+	handlers     map[string]registeredMethod
+	eventsMu     sync.Mutex
+	eventSubs    map[uint64]*eventSubscriber
+	eventSubID   atomic.Uint64
 }
 
 type peerRuntime struct {
-	generation uint64
-	peerID     string
-	direction  string
-	conn       *websocket.Conn
-	send       chan Envelope
-	done       chan struct{}
-	closeOnce  sync.Once
-	pendingMu  sync.Mutex
-	pending    map[string]chan time.Duration
+	generation   uint64
+	peerID       string
+	direction    string
+	conn         *websocket.Conn
+	send         chan Envelope // heartbeat and transport control; always highest priority
+	app          chan Envelope
+	events       chan Envelope
+	done         chan struct{}
+	closeOnce    sync.Once
+	pendingMu    sync.Mutex
+	pending      map[string]chan time.Duration
+	rpcMu        sync.Mutex
+	rpcPending   map[string]chan callResult
+	inflight     map[string]context.CancelFunc
+	capabilities map[string]struct{}
+	eventMu      sync.Mutex
+	eventDirty   bool
+	eventGapSent bool
 }
 
 func New(cfg config.ParsedMeshConfig, registry *Registry, logger *slog.Logger) *Manager {
@@ -89,7 +108,9 @@ func New(cfg config.ParsedMeshConfig, registry *Registry, logger *slog.Logger) *
 		logger = slog.Default()
 	}
 	return &Manager{cfg: cfg, registry: registry, logger: logger,
-		peers: map[string]*peerRuntime{}, status: map[string]Status{}}
+		peers: map[string]*peerRuntime{}, status: map[string]Status{},
+		capabilities: append([]string(nil), defaultCapabilities...),
+		handlers:     map[string]registeredMethod{}, eventSubs: map[uint64]*eventSubscriber{}}
 }
 
 func (m *Manager) Start(parent context.Context) error {
@@ -204,12 +225,13 @@ func (m *Manager) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 		m.setError(peerID, "mesh handshake rejected")
 		return
 	}
-	welcome := Envelope{Version: ProtocolVersion, Type: "welcome", DeviceID: m.registry.DeviceID, SentAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	negotiated := intersectCapabilities(m.capabilitiesSnapshot(), hello.Capabilities)
+	welcome := Envelope{Version: ProtocolVersion, Type: "welcome", DeviceID: m.registry.DeviceID, SentAt: time.Now().UTC().Format(time.RFC3339Nano), Capabilities: negotiated}
 	if err := writeEnvelope(ctx, conn, welcome); err != nil {
 		_ = conn.Close(websocket.StatusInternalError, "handshake write failed")
 		return
 	}
-	m.activate(peerID, "inbound", conn)
+	m.activate(peerID, "inbound", conn, negotiated)
 }
 
 func (m *Manager) authorize(header string) (string, bool) {
@@ -236,26 +258,30 @@ func (m *Manager) connectLoop(peer Peer) {
 		headers := http.Header{"Authorization": []string{"Bearer " + peer.Token}}
 		ctx, cancel := context.WithTimeout(m.ctx, m.cfg.HandshakeTimeout)
 		conn, _, err := websocket.Dial(ctx, peer.URL, &websocket.DialOptions{HTTPHeader: headers, Subprotocols: []string{subprotocol}})
+		var negotiated []string
 		if err == nil {
 			if conn.Subprotocol() != subprotocol {
 				err = errors.New("mesh subprotocol mismatch")
 			}
 			conn.SetReadLimit(m.cfg.MaxMessageBytes)
+			localCapabilities := m.capabilitiesSnapshot()
 			if err == nil {
-				err = writeEnvelope(ctx, conn, Envelope{Version: ProtocolVersion, Type: "hello", DeviceID: m.registry.DeviceID, SentAt: time.Now().UTC().Format(time.RFC3339Nano)})
+				err = writeEnvelope(ctx, conn, Envelope{Version: ProtocolVersion, Type: "hello", DeviceID: m.registry.DeviceID, SentAt: time.Now().UTC().Format(time.RFC3339Nano), Capabilities: localCapabilities})
 			}
 			if err == nil {
 				var welcome Envelope
 				welcome, err = readEnvelope(ctx, conn)
 				if err == nil && (welcome.Type != "welcome" || welcome.Version != ProtocolVersion || welcome.DeviceID != peer.ID) {
 					err = fmt.Errorf("peer identity or protocol mismatch")
+				} else if err == nil {
+					negotiated = intersectCapabilities(localCapabilities, welcome.Capabilities)
 				}
 			}
 		}
 		cancel()
 		if err == nil {
 			connectedAt := time.Now()
-			p, activated := m.activate(peer.ID, "outbound", conn)
+			p, activated := m.activate(peer.ID, "outbound", conn, negotiated)
 			if !activated {
 				return
 			}
@@ -310,9 +336,15 @@ func fullJitter(attempt int, min, max time.Duration) time.Duration {
 	return floor + time.Duration(rand.Int64N(int64(cap-floor)+1))
 }
 
-func (m *Manager) activate(peerID, direction string, conn *websocket.Conn) (*peerRuntime, bool) {
+func (m *Manager) activate(peerID, direction string, conn *websocket.Conn, capabilities []string) (*peerRuntime, bool) {
+	capSet := make(map[string]struct{}, len(capabilities))
+	for _, capability := range capabilities {
+		capSet[capability] = struct{}{}
+	}
 	p := &peerRuntime{generation: m.gen.Add(1), peerID: peerID, direction: direction, conn: conn,
-		send: make(chan Envelope, m.cfg.WriterQueue), done: make(chan struct{}), pending: map[string]chan time.Duration{}}
+		send: make(chan Envelope, m.cfg.WriterQueue), app: make(chan Envelope, m.cfg.WriterQueue),
+		events: make(chan Envelope, m.cfg.WriterQueue), done: make(chan struct{}), pending: map[string]chan time.Duration{},
+		rpcPending: map[string]chan callResult{}, inflight: map[string]context.CancelFunc{}, capabilities: capSet}
 	now := time.Now()
 	m.mu.Lock()
 	if !m.started {
@@ -322,7 +354,7 @@ func (m *Manager) activate(peerID, direction string, conn *websocket.Conn) (*pee
 	}
 	old := m.peers[peerID]
 	m.peers[peerID] = p
-	m.status[peerID] = Status{PeerID: peerID, Direction: direction, State: "connected", ConnectedAt: &now, LastSeen: &now, LastSuccess: &now, Protocol: ProtocolVersion}
+	m.status[peerID] = Status{PeerID: peerID, Direction: direction, State: "connected", ConnectedAt: &now, LastSeen: &now, LastSuccess: &now, Protocol: ProtocolVersion, Capabilities: append([]string(nil), capabilities...)}
 	// Register connection goroutines before releasing the lifecycle lock so
 	// Stop cannot begin Wait while an accepted handshake is still activating.
 	m.wg.Add(3)
@@ -338,21 +370,47 @@ func (m *Manager) activate(peerID, direction string, conn *websocket.Conn) (*pee
 
 func (m *Manager) writer(p *peerRuntime) {
 	for {
+		// Always drain heartbeat/control work first. Application events have a
+		// separate bounded queue and therefore cannot starve ping/pong.
 		select {
 		case env := <-p.send:
-			ctx, cancel := context.WithTimeout(m.ctx, m.cfg.HandshakeTimeout)
-			err := writeEnvelope(ctx, p.conn, env)
-			cancel()
-			if err != nil {
-				m.disconnect(p, err)
+			if !m.writePeerEnvelope(p, env) {
 				return
 			}
+			continue
+		default:
+		}
+		select {
+		case env := <-p.send:
+			if !m.writePeerEnvelope(p, env) {
+				return
+			}
+		case env := <-p.app:
+			if !m.writePeerEnvelope(p, env) {
+				return
+			}
+		case env := <-p.events:
+			if !m.writePeerEnvelope(p, env) {
+				return
+			}
+			m.eventDelivered(p, env)
 		case <-p.done:
 			return
 		case <-m.ctx.Done():
 			return
 		}
 	}
+}
+
+func (m *Manager) writePeerEnvelope(p *peerRuntime, env Envelope) bool {
+	ctx, cancel := context.WithTimeout(m.ctx, m.cfg.HandshakeTimeout)
+	err := writeEnvelope(ctx, p.conn, env)
+	cancel()
+	if err != nil {
+		m.disconnect(p, err)
+		return false
+	}
+	return true
 }
 
 func (m *Manager) reader(p *peerRuntime) {
@@ -386,6 +444,8 @@ func (m *Manager) reader(p *peerRuntime) {
 				}
 				close(ch)
 			}
+		case "request", "response", "cancel", "event":
+			m.handleApplicationEnvelope(p, env)
 		default:
 			m.disconnect(p, fmt.Errorf("unsupported frame type %q", env.Type))
 			return
@@ -499,7 +559,9 @@ func (p *peerRuntime) removePending(id string) {
 }
 
 func (m *Manager) disconnect(p *peerRuntime, err error) {
-	p.close(websocket.StatusNormalClosure, "connection ended")
+	// Claim the current connection and publish its terminal state before closing
+	// the socket. Otherwise the reader awakened by a heartbeat-initiated close
+	// can race the heartbeat goroutine and overwrite "dead" as "disconnected".
 	m.mu.Lock()
 	if m.peers[p.peerID] == p {
 		delete(m.peers, p.peerID)
@@ -513,21 +575,44 @@ func (m *Manager) disconnect(p *peerRuntime, err error) {
 		m.status[p.peerID] = s
 	}
 	m.mu.Unlock()
+	p.close(websocket.StatusNormalClosure, "connection ended")
 }
 
 func (p *peerRuntime) close(status websocket.StatusCode, reason string) {
 	p.closeOnce.Do(func() {
+		// Serialize lifecycle closure with event enqueue/loss bookkeeping. Event
+		// channels are deliberately never closed, so concurrent producers cannot
+		// panic while a replacement connection tears this runtime down.
+		p.eventMu.Lock()
 		close(p.done)
+		p.eventDirty = false
+		p.eventGapSent = false
+		p.eventMu.Unlock()
 		// CloseNow unblocks the single reader/writer immediately. A blocking
 		// close handshake here would delay status transitions and daemon reloads
 		// for several seconds when Wi-Fi/VPN vanished.
-		_ = p.conn.CloseNow()
+		if p.conn != nil {
+			_ = p.conn.CloseNow()
+		}
 		p.pendingMu.Lock()
 		for id, ch := range p.pending {
 			delete(p.pending, id)
 			close(ch)
 		}
 		p.pendingMu.Unlock()
+		p.rpcMu.Lock()
+		for id, ch := range p.rpcPending {
+			delete(p.rpcPending, id)
+			select {
+			case ch <- callResult{err: ErrPeerDisconnected}:
+			default:
+			}
+		}
+		for id, cancel := range p.inflight {
+			delete(p.inflight, id)
+			cancel()
+		}
+		p.rpcMu.Unlock()
 	})
 }
 

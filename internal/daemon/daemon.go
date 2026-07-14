@@ -50,13 +50,15 @@ type Daemon struct {
 	eventBus     *EventBus
 	delivery     *delivery.Controller
 
-	server   *grpc.Server
-	listener net.Listener
-	httpSrv  *HTTPServer
-	meshMu   sync.RWMutex
-	mesh     *arcmuxmesh.Manager
-	ctx      context.Context
-	cancel   context.CancelFunc
+	server       *grpc.Server
+	listener     net.Listener
+	httpSrv      *HTTPServer
+	meshMu       sync.RWMutex
+	meshReloadMu sync.Mutex
+	mesh         *arcmuxmesh.Manager
+	meshApp      *meshApplication
+	ctx          context.Context
+	cancel       context.CancelFunc
 
 	// otelShutdown flushes the OTLP trace provider on daemon Stop (LabOps
 	// observability). Nil when tracing failed to init — never fatal.
@@ -246,6 +248,11 @@ func (d *Daemon) Start(ctx context.Context) error {
 		d.logger.Warn("open daemon state.bolt failed; C1 inbox/audit RPCs will return Unavailable",
 			"error", err)
 	}
+	if d.cfg.Daemon.ProfileName == "" {
+		if err := d.initMeshApplication(); err != nil {
+			d.logger.Warn("open mesh protocol state failed; remote projections unavailable", "error", err)
+		}
+	}
 
 	// Restore sessions from persistence
 	d.restoreSessions()
@@ -367,14 +374,7 @@ func (d *Daemon) Stop() {
 		_ = d.httpSrv.Shutdown(shutdownCtx)
 		cancel()
 	}
-	d.meshMu.Lock()
-	if d.mesh != nil {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		d.mesh.Stop(shutdownCtx)
-		cancel()
-		d.mesh = nil
-	}
-	d.meshMu.Unlock()
+	d.stopMeshTransport()
 
 	// Flush OTLP traces (LabOps observability).
 	if d.otelShutdown != nil {
@@ -416,8 +416,8 @@ func (d *Daemon) Stop() {
 // ReloadMesh atomically swaps only the best-effort mesh transport. It never
 // restarts the daemon, gRPC server, tmux server, or any managed agent pane.
 func (d *Daemon) ReloadMesh() error {
-	d.meshMu.Lock()
-	defer d.meshMu.Unlock()
+	d.meshReloadMu.Lock()
+	defer d.meshReloadMu.Unlock()
 	if d.cfg.Daemon.ProfileName != "" {
 		return errors.New("mesh is owned by the root daemon, not profile daemons")
 	}
@@ -426,32 +426,29 @@ func (d *Daemon) ReloadMesh() error {
 		return err
 	}
 	if !meshCfg.Enabled {
-		if d.mesh != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			d.mesh.Stop(ctx)
-			cancel()
-			d.mesh = nil
-		}
+		d.detachMeshTransport()
 		return nil
 	}
 	registry, err := arcmuxmesh.LoadRegistry(meshCfg.RegistryPath)
 	if err != nil {
 		return err
 	}
-	if d.mesh != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		d.mesh.Stop(ctx)
-		cancel()
-		d.mesh = nil
-	}
+	d.setMeshDeviceID(registry.DeviceID)
+	d.detachMeshTransport()
 	if registry.DeviceID == "" || (!registry.Serve && len(registry.Peers) == 0) {
 		return nil
 	}
 	next := arcmuxmesh.New(meshCfg, registry, d.logger)
+	if err := d.registerMeshApplication(next); err != nil {
+		return err
+	}
 	if err := next.Start(d.ctx); err != nil {
 		return err
 	}
+	d.meshMu.Lock()
 	d.mesh = next
+	d.meshMu.Unlock()
+	d.startMeshApplicationRuntime(next)
 	return nil
 }
 
@@ -471,9 +468,8 @@ func (d *Daemon) MeshPing(ctx context.Context, peer string) (time.Duration, erro
 		d.meshMu.RUnlock()
 		return 0, errors.New("mesh is disabled")
 	}
-	rtt, err := m.Ping(ctx, peer)
 	d.meshMu.RUnlock()
-	return rtt, err
+	return m.Ping(ctx, peer)
 }
 
 // openState opens the daemon-level state.bolt under
@@ -1399,9 +1395,24 @@ type persistedSession struct {
 	BackendSessionID string        `json:"backend_session_id"`
 	State            session.State `json:"state"`
 	StartedAt        time.Time     `json:"started_at"`
+	OwnerID          string        `json:"owner_id,omitempty"`
 }
 
 func (d *Daemon) persistPath() string {
+	// Named profiles share one socket directory, so the socket path cannot
+	// define ownership of their session inventory. StatePath is profile-local
+	// and is the authoritative persistence root. LogDir is a compatibility
+	// fallback for hand-built profile configs that predate StatePath.
+	if d.cfg.Daemon.StatePath != "" {
+		return filepath.Join(filepath.Dir(d.cfg.Daemon.StatePath), "sessions.json")
+	}
+	if d.cfg.Daemon.ProfileName != "" && d.cfg.Daemon.LogDir != "" {
+		return filepath.Join(filepath.Dir(d.cfg.Daemon.LogDir), "sessions.json")
+	}
+	return filepath.Join(filepath.Dir(d.cfg.Daemon.Socket), "sessions.json")
+}
+
+func (d *Daemon) legacyPersistPath() string {
 	return filepath.Join(filepath.Dir(d.cfg.Daemon.Socket), "sessions.json")
 }
 
@@ -1426,6 +1437,7 @@ func (d *Daemon) persistSessions() {
 			BackendSessionID: snap.BackendSessionID,
 			State:            snap.State,
 			StartedAt:        snap.StartedAt,
+			OwnerID:          snap.OwnerID,
 		})
 	}
 	d.mu.RUnlock()
@@ -1449,6 +1461,17 @@ func (d *Daemon) persistSessions() {
 func (d *Daemon) restoreSessions() {
 	path := d.persistPath()
 	data, err := os.ReadFile(path)
+	// Root daemons may migrate from the historical socket-adjacent inventory.
+	// Named profiles must not read it: that old location was shared by every
+	// profile and has no ownership marker, so guessing would cross-contaminate
+	// independent catalogs.
+	if os.IsNotExist(err) && d.cfg.Daemon.ProfileName == "" && path != d.legacyPersistPath() {
+		legacyPath := d.legacyPersistPath()
+		if legacyData, legacyErr := os.ReadFile(legacyPath); legacyErr == nil {
+			data, err = legacyData, nil
+			d.logger.Info("restoring legacy socket-adjacent session inventory", "path", legacyPath)
+		}
+	}
 	if err != nil {
 		if !os.IsNotExist(err) {
 			d.logger.Warn("restore sessions read", "error", err)
@@ -1480,6 +1503,7 @@ func (d *Daemon) restoreSessions() {
 		if rec.Transport == profile.TransportExec {
 			sess := session.NewSession(rec.ID, rec.Name, rec.Agent, rec.CWD)
 			sess.SetTransport(rec.Transport)
+			sess.SetOwnerID(rec.OwnerID)
 			sess.SetCurrentCommand(rec.CurrentCommand)
 			sess.SetBackendSessionID(rec.BackendSessionID)
 			sess.StartedAt = rec.StartedAt
@@ -1505,6 +1529,7 @@ func (d *Daemon) restoreSessions() {
 
 		sess := session.NewSession(rec.ID, rec.Name, rec.Agent, rec.CWD)
 		sess.SetTransport(rec.Transport)
+		sess.SetOwnerID(rec.OwnerID)
 		sess.TmuxSessionName = rec.TmuxSessionName
 		sess.TmuxTarget = rec.TmuxTarget
 		sess.SetCurrentCommand(rec.CurrentCommand)

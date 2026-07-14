@@ -88,6 +88,21 @@ func TestRegistryRejectsBidirectionalPeerInV1(t *testing.T) {
 	}
 }
 
+func TestRegistryRejectsDuplicateAcceptedCredentialWithoutExposingIt(t *testing.T) {
+	credential := TokenHash("same-secret-credential")
+	r := &Registry{
+		Version: 1, DeviceID: "ref",
+		Accept: map[string]string{"devbox": credential, "labs": credential},
+	}
+	err := r.Validate()
+	if err == nil {
+		t.Fatal("registry accepted one inbound credential for two peer identities")
+	}
+	if strings.Contains(err.Error(), credential) || strings.Contains(err.Error(), "same-secret-credential") {
+		t.Fatalf("validation error exposed credential material: %v", err)
+	}
+}
+
 func TestRegistryRejectsInsecurePermissionsAndSymlink(t *testing.T) {
 	dir := t.TempDir()
 	insecure := filepath.Join(dir, "insecure.json")
@@ -293,6 +308,46 @@ func TestAuthSubprotocolMalformedOversizeAndDuplicateIsolation(t *testing.T) {
 	}
 	overCancel()
 	waitState(t, server, "client", "disconnected")
+}
+
+func TestReplacementClearsOldPeerEventLossState(t *testing.T) {
+	token, _ := NewToken()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server := New(testConfig("127.0.0.1:0"), &Registry{
+		Version: 1, DeviceID: "server", Serve: true,
+		Accept: map[string]string{"client": TokenHash(token)},
+	}, testLogger())
+	startManager(t, server, ctx)
+	defer func() {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+		defer stopCancel()
+		server.Stop(stopCtx)
+	}()
+
+	first := dialRaw(t, server.Addr(), token, "client")
+	defer first.CloseNow()
+	server.mu.RLock()
+	old := server.peers["client"]
+	server.mu.RUnlock()
+	old.eventMu.Lock()
+	old.eventDirty = true
+	old.eventGapSent = true
+	old.eventMu.Unlock()
+
+	second := dialRaw(t, server.Addr(), token, "client")
+	defer second.CloseNow()
+	select {
+	case <-old.done:
+	case <-time.After(time.Second):
+		t.Fatal("replacement did not close old peer runtime")
+	}
+	old.eventMu.Lock()
+	dirty, gapSent := old.eventDirty, old.eventGapSent
+	old.eventMu.Unlock()
+	if dirty || gapSent {
+		t.Fatalf("replacement retained old event loss state: dirty=%v gap_sent=%v", dirty, gapSent)
+	}
 }
 
 func TestInboundPeerTransitionsStaleThenDead(t *testing.T) {
