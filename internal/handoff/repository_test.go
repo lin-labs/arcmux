@@ -126,7 +126,7 @@ func TestPrepareRepositoryFetchesExactRemoteBranch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if prepared.WorktreePath != wantPath || prepared.Head != fixture.head || prepared.Branch != "arcmux/handoff/clean-fetch" {
+	if prepared.WorktreePath != wantPath || prepared.Head != fixture.head || prepared.LocalBranch != "arcmux/handoff/clean-fetch" || prepared.SourceBranch != "main" {
 		t.Fatalf("preparation = %#v", prepared)
 	}
 	if got := testGit(t, prepared.WorktreePath, "status", "--porcelain"); got != "" {
@@ -197,6 +197,26 @@ func TestPrepareRepositoryRequiresExistingWorktreesRoot(t *testing.T) {
 	requireRepositoryCode(t, err, RepositoryErrorDeterministic)
 }
 
+func TestPrepareRepositoryWorktreesRootOwnershipAndPermissions(t *testing.T) {
+	t.Run("owner 0755 accepted", func(t *testing.T) {
+		fixture := newRepositoryFixture(t)
+		if err := os.Chmod(fixture.worktrees, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := PrepareRepository(context.Background(), fixture.manifest("root-0755"), fixture.project()); err != nil {
+			t.Fatalf("PrepareRepository: %v", err)
+		}
+	})
+	t.Run("owner 0777 rejected", func(t *testing.T) {
+		fixture := newRepositoryFixture(t)
+		if err := os.Chmod(fixture.worktrees, 0o777); err != nil {
+			t.Fatal(err)
+		}
+		_, err := PrepareRepository(context.Background(), fixture.manifest("root-0777"), fixture.project())
+		requireRepositoryCode(t, err, RepositoryErrorDeterministic)
+	})
+}
+
 func TestPrepareRepositoryCleanReplayReusesExactWorktree(t *testing.T) {
 	fixture := newRepositoryFixture(t)
 	manifest := fixture.manifest("replay")
@@ -210,6 +230,48 @@ func TestPrepareRepositoryCleanReplayReusesExactWorktree(t *testing.T) {
 	}
 	if first != second {
 		t.Fatalf("replay = %#v, first = %#v", second, first)
+	}
+}
+
+func TestPrepareRepositoryReplayRejectsTamperedPushPolicy(t *testing.T) {
+	fixture := newRepositoryFixture(t)
+	manifest := fixture.manifest("push-policy")
+	prepared, err := PrepareRepository(context.Background(), manifest, fixture.project())
+	if err != nil {
+		t.Fatal(err)
+	}
+	testGit(t, prepared.WorktreePath, "config", "--worktree", "push.default", "simple")
+	_, err = PrepareRepository(context.Background(), manifest, fixture.project())
+	requireRepositoryCode(t, err, RepositoryErrorDeterministic)
+	if got := testGit(t, prepared.WorktreePath, "config", "--worktree", "--get", "push.default"); got != "simple" {
+		t.Fatalf("completed replay mutated push policy to %q", got)
+	}
+}
+
+func TestPrepareRepositoryRepairsPushPolicyOnlyWithPreparationMarker(t *testing.T) {
+	fixture := newRepositoryFixture(t)
+	manifest := fixture.manifest("config-crash")
+	candidate := filepath.Join(fixture.worktrees, "handoff-config-crash")
+	localBranch, err := chooseLocalBranch(context.Background(), fixture.checkout, candidate, manifest.HandoffID, manifest.Repository.Branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker, err := newPreparationMarker(context.Background(), fixture.checkout, manifest.HandoffID, localBranch, manifest.Repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testGit(t, fixture.checkout, "fetch", "origin", "refs/heads/main:refs/remotes/origin/main")
+	testGit(t, fixture.checkout, "branch", "--track", localBranch, "refs/remotes/origin/main")
+	if err := writePreparationMarker(fixture.worktrees, manifest.HandoffID, marker); err != nil {
+		t.Fatal(err)
+	}
+	testGit(t, fixture.checkout, "worktree", "add", candidate, localBranch)
+	prepared, err := PrepareRepository(context.Background(), manifest, fixture.project())
+	if err != nil {
+		t.Fatalf("PrepareRepository recovery: %v", err)
+	}
+	if got := testGit(t, prepared.WorktreePath, "config", "--worktree", "--get", "push.default"); got != "upstream" {
+		t.Fatalf("recovered push policy = %q", got)
 	}
 }
 
@@ -238,7 +300,7 @@ func TestPrepareRepositoryRejectsDirtyOrMismatchedExistingWorktree(t *testing.T)
 			t.Fatal(err)
 		}
 		testGit(t, prepared.WorktreePath, "add", "third.txt")
-		testGit(t, prepared.WorktreePath, "commit", "-m", "advance synthetic branch")
+		testGit(t, prepared.WorktreePath, "commit", "-m", "advance source branch")
 		_, err = PrepareRepository(context.Background(), manifest, fixture.project())
 		requireRepositoryCode(t, err, RepositoryErrorDeterministic)
 	})
@@ -271,25 +333,115 @@ func TestPrepareRepositoryRejectsSymlinkedRootOrCandidate(t *testing.T) {
 	})
 }
 
-func TestPrepareRepositoryRecoversExactSyntheticBranch(t *testing.T) {
+func TestPrepareRepositoryPlainPushUpdatesOriginalRemoteBranch(t *testing.T) {
 	fixture := newRepositoryFixture(t)
-	manifest := fixture.manifest("recover")
-	testGit(t, fixture.checkout, "branch", "arcmux/handoff/recover", fixture.head)
+	manifest := fixture.manifest("plain-push")
 	prepared, err := PrepareRepository(context.Background(), manifest, fixture.project())
 	if err != nil {
 		t.Fatalf("PrepareRepository: %v", err)
 	}
-	if prepared.Head != fixture.head || prepared.Branch != "arcmux/handoff/recover" {
-		t.Fatalf("preparation = %#v", prepared)
+	if err := os.WriteFile(filepath.Join(prepared.WorktreePath, "continued.txt"), []byte("continued\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	testGit(t, prepared.WorktreePath, "add", "continued.txt")
+	testGit(t, prepared.WorktreePath, "commit", "-m", "continue on target")
+	newHead := testGit(t, prepared.WorktreePath, "rev-parse", "HEAD")
+	testGit(t, prepared.WorktreePath, "push")
+	if remoteHead := testGit(t, fixture.origin, "rev-parse", "refs/heads/main"); remoteHead != newHead {
+		t.Fatalf("remote head = %q, want pushed %q", remoteHead, newHead)
 	}
 }
 
-func TestPrepareRepositoryRejectsMismatchedSyntheticBranch(t *testing.T) {
+func TestPrepareRepositoryUsesFreeSourceBranchDirectly(t *testing.T) {
 	fixture := newRepositoryFixture(t)
+	branch := "feature/free"
+	testGit(t, fixture.seed, "branch", branch, fixture.head)
+	testGit(t, fixture.seed, "push", "origin", "refs/heads/"+branch)
+	manifest := fixture.manifest("free-source")
+	manifest.Repository.Branch = branch
+	prepared, err := PrepareRepository(context.Background(), manifest, fixture.project())
+	if err != nil {
+		t.Fatalf("PrepareRepository: %v", err)
+	}
+	if prepared.LocalBranch != branch || prepared.SourceBranch != branch {
+		t.Fatalf("preparation branches = %#v", prepared)
+	}
+}
+
+func TestPrepareRepositoryRejectsLocalSourceBranchCollision(t *testing.T) {
+	fixture := newRepositoryFixture(t)
+	testGit(t, fixture.seed, "branch", "collision", fixture.head)
+	testGit(t, fixture.seed, "push", "origin", "refs/heads/collision")
+	testGit(t, fixture.checkout, "branch", "collision", fixture.baseCommit)
 	manifest := fixture.manifest("branch-conflict")
-	testGit(t, fixture.checkout, "branch", "arcmux/handoff/branch-conflict", fixture.baseCommit)
+	manifest.Repository.Branch = "collision"
 	_, err := PrepareRepository(context.Background(), manifest, fixture.project())
 	requireRepositoryCode(t, err, RepositoryErrorDeterministic)
+}
+
+func TestPrepareRepositoryRejectsFallbackBranchCollision(t *testing.T) {
+	fixture := newRepositoryFixture(t)
+	manifest := fixture.manifest("fallback-collision")
+	testGit(t, fixture.checkout, "branch", "arcmux/handoff/fallback-collision", fixture.baseCommit)
+	_, err := PrepareRepository(context.Background(), manifest, fixture.project())
+	requireRepositoryCode(t, err, RepositoryErrorDeterministic)
+}
+
+func TestPrepareRepositoryRecoversOwnedInterruptedCandidate(t *testing.T) {
+	fixture := newRepositoryFixture(t)
+	manifest := fixture.manifest("partial")
+	localBranch, err := chooseLocalBranch(context.Background(), fixture.checkout, filepath.Join(fixture.worktrees, "handoff-partial"), manifest.HandoffID, manifest.Repository.Branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker, err := newPreparationMarker(context.Background(), fixture.checkout, manifest.HandoffID, localBranch, manifest.Repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	interruptedMarker := filepath.Join(fixture.worktrees, preparationMarkerName(manifest.HandoffID)+".tmp")
+	if err := os.WriteFile(interruptedMarker, []byte("truncated"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePreparationMarker(fixture.worktrees, manifest.HandoffID, marker); err != nil {
+		t.Fatal(err)
+	}
+	candidate := filepath.Join(fixture.worktrees, "handoff-partial")
+	if err := os.Mkdir(candidate, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(candidate, "partial-file"), []byte("interrupted"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := PrepareRepository(context.Background(), manifest, fixture.project())
+	if err != nil {
+		t.Fatalf("PrepareRepository recovery: %v", err)
+	}
+	resolvedCandidate, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.WorktreePath != resolvedCandidate || prepared.LocalBranch != "arcmux/handoff/partial" || prepared.SourceBranch != "main" {
+		t.Fatalf("preparation = %#v", prepared)
+	}
+	if _, err := os.Stat(filepath.Join(candidate, "partial-file")); !os.IsNotExist(err) {
+		t.Fatalf("partial file survived recovery: %v", err)
+	}
+}
+
+func TestPrepareRepositoryRejectsForeignOccupiedCandidate(t *testing.T) {
+	fixture := newRepositoryFixture(t)
+	candidate := filepath.Join(fixture.worktrees, "handoff-foreign")
+	if err := os.Mkdir(candidate, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(candidate, "keep.txt"), []byte("foreign"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := PrepareRepository(context.Background(), fixture.manifest("foreign"), fixture.project())
+	requireRepositoryCode(t, err, RepositoryErrorDeterministic)
+	if data, readErr := os.ReadFile(filepath.Join(candidate, "keep.txt")); readErr != nil || string(data) != "foreign" {
+		t.Fatalf("foreign path was mutated: %q, %v", data, readErr)
+	}
 }
 
 func TestPrepareRepositoryDoesNotInterpretBranchWithShell(t *testing.T) {

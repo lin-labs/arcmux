@@ -3,19 +3,21 @@ package handoff
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/lin-labs/arcmux/internal/project"
 )
 
-// RepositoryErrorCode distinguishes deterministic input/configuration
-// conflicts from target-local failures that can succeed on a later retry.
 type RepositoryErrorCode string
 
 const (
@@ -23,8 +25,6 @@ const (
 	RepositoryErrorRetryable     RepositoryErrorCode = "retryable"
 )
 
-// RepositoryError is deliberately bounded: its message never contains Git
-// command output or a configured origin URL.
 type RepositoryError struct {
 	Code RepositoryErrorCode
 	Err  error
@@ -44,8 +44,6 @@ func (e *RepositoryError) Unwrap() error {
 	return e.Err
 }
 
-// RepositoryErrorCodeOf extracts the classification returned by
-// PrepareRepository.
 func RepositoryErrorCodeOf(err error) (RepositoryErrorCode, bool) {
 	var repositoryErr *RepositoryError
 	if !errors.As(err, &repositoryErr) {
@@ -54,18 +52,17 @@ func RepositoryErrorCodeOf(err error) (RepositoryErrorCode, bool) {
 	return repositoryErr.Code, true
 }
 
-// RepositoryPreparation identifies the verified target-local worktree. The
-// commit and synthetic branch are repeated so callers do not need to inspect
-// the worktree with another subprocess before launching a session.
+// RepositoryPreparation is the exact target-local continuation checkout.
+// LocalBranch is SourceBranch when free, or a deterministic fallback when the
+// source branch is already checked out. Either way its upstream and
+// worktree-local push policy target origin/SourceBranch.
 type RepositoryPreparation struct {
 	WorktreePath string
 	Head         string
-	Branch       string
+	LocalBranch  string
+	SourceBranch string
 }
 
-// PrepareRepository materializes or recovers the deterministic target-local
-// worktree for a remote_branch handoff. It executes Git directly with argv;
-// neither manifest values nor local configuration are interpreted by a shell.
 func PrepareRepository(ctx context.Context, manifest Manifest, resolved project.ResolvedProject) (RepositoryPreparation, error) {
 	if err := validateID("handoff_id", manifest.HandoffID); err != nil {
 		return RepositoryPreparation{}, repositoryError(RepositoryErrorDeterministic, "invalid handoff id")
@@ -85,10 +82,6 @@ func PrepareRepository(ctx context.Context, manifest Manifest, resolved project.
 		return RepositoryPreparation{}, repositoryError(RepositoryErrorDeterministic, "resolved project does not match manifest")
 	}
 
-	syntheticBranch := "arcmux/handoff/" + manifest.HandoffID
-	if err := validateGitRef(syntheticBranch); err != nil {
-		return RepositoryPreparation{}, repositoryError(RepositoryErrorDeterministic, "handoff id cannot form a synthetic branch")
-	}
 	checkout, err := selectRepositoryCheckout(ctx, resolved.RepoPaths, snapshot.RepoSlug)
 	if err != nil {
 		return RepositoryPreparation{}, err
@@ -97,19 +90,56 @@ func PrepareRepository(ctx context.Context, manifest Manifest, resolved project.
 	if err != nil {
 		return RepositoryPreparation{}, err
 	}
+	localBranch, err := chooseLocalBranch(ctx, checkout, candidate, manifest.HandoffID, snapshot.Branch)
+	if err != nil {
+		return RepositoryPreparation{}, err
+	}
+	marker, err := newPreparationMarker(ctx, checkout, manifest.HandoffID, localBranch, snapshot)
+	if err != nil {
+		return RepositoryPreparation{}, err
+	}
 
 	if exists, err := candidateExists(candidate); err != nil {
 		return RepositoryPreparation{}, err
 	} else if exists {
-		return validateRepositoryReplay(ctx, checkout, root, candidate, snapshot, syntheticBranch)
+		registered, err := registeredWorktree(ctx, checkout, candidate)
+		if err != nil {
+			return RepositoryPreparation{}, err
+		}
+		if registered {
+			ownedIncomplete, err := preparationMarkerExists(root, manifest.HandoffID, marker)
+			if err != nil {
+				return RepositoryPreparation{}, err
+			}
+			if ownedIncomplete {
+				if err := configureWorktreePush(ctx, checkout, candidate); err != nil {
+					return RepositoryPreparation{}, err
+				}
+			}
+			prepared, err := validateRepositoryReplay(ctx, checkout, root, candidate, localBranch, snapshot)
+			if err != nil {
+				return RepositoryPreparation{}, err
+			}
+			if err := clearPreparationMarker(root, manifest.HandoffID, marker); err != nil {
+				return RepositoryPreparation{}, err
+			}
+			return prepared, nil
+		}
+		recovered, err := recoverOwnedPartialCandidate(root, candidate, manifest.HandoffID, marker)
+		if err != nil {
+			return RepositoryPreparation{}, err
+		}
+		if !recovered {
+			return RepositoryPreparation{}, repositoryError(RepositoryErrorDeterministic, "existing path is not a registered worktree")
+		}
 	}
 
-	privateRef := privateHandoffRef(manifest.HandoffID)
-	refspec := "refs/heads/" + snapshot.Branch + ":" + privateRef
+	remoteRef := "refs/remotes/origin/" + snapshot.Branch
+	refspec := "refs/heads/" + snapshot.Branch + ":" + remoteRef
 	if _, err := gitOutput(ctx, checkout, "fetch", "--no-tags", "--force", "--no-write-fetch-head", "origin", refspec); err != nil {
 		return RepositoryPreparation{}, repositoryError(RepositoryErrorRetryable, "fetch exact remote branch failed")
 	}
-	fetchedHead, err := gitOutput(ctx, checkout, "rev-parse", "--verify", privateRef+"^{commit}")
+	fetchedHead, err := gitOutput(ctx, checkout, "rev-parse", "--verify", remoteRef+"^{commit}")
 	if err != nil {
 		return RepositoryPreparation{}, repositoryError(RepositoryErrorRetryable, "fetched branch is not available")
 	}
@@ -120,33 +150,60 @@ func PrepareRepository(ctx context.Context, manifest Manifest, resolved project.
 		return RepositoryPreparation{}, err
 	}
 
-	branchRef := "refs/heads/" + syntheticBranch
-	branchHead, branchErr := gitOutput(ctx, checkout, "rev-parse", "--verify", "--quiet", branchRef+"^{commit}")
+	localRef := "refs/heads/" + localBranch
+	branchHead, branchErr := gitOutput(ctx, checkout, "rev-parse", "--verify", "--quiet", localRef+"^{commit}")
 	branchExists := branchErr == nil
 	if branchErr != nil && !isExitCode(branchErr, 1) {
-		return RepositoryPreparation{}, repositoryError(RepositoryErrorRetryable, "inspect synthetic branch failed")
+		return RepositoryPreparation{}, repositoryError(RepositoryErrorRetryable, "inspect local continuation branch failed")
 	}
 	if branchExists && branchHead != snapshot.SourceHead {
-		return RepositoryPreparation{}, repositoryError(RepositoryErrorDeterministic, "synthetic branch already exists at a different head")
+		return RepositoryPreparation{}, repositoryError(RepositoryErrorDeterministic, "local continuation branch already exists at a different head")
+	}
+	if checkedOut, err := branchWorktree(ctx, checkout, localRef); err != nil {
+		return RepositoryPreparation{}, err
+	} else if checkedOut != "" {
+		return RepositoryPreparation{}, repositoryError(RepositoryErrorDeterministic, "local continuation branch is already checked out in another worktree")
+	}
+	if branchExists {
+		if err := verifyBranchUpstream(ctx, checkout, localBranch, snapshot.Branch); err != nil {
+			return RepositoryPreparation{}, err
+		}
+	} else {
+		if _, err := gitOutput(ctx, checkout, "branch", "--track", localBranch, remoteRef); err != nil {
+			return RepositoryPreparation{}, repositoryError(RepositoryErrorRetryable, "create local continuation branch failed")
+		}
+		if err := verifyBranchUpstream(ctx, checkout, localBranch, snapshot.Branch); err != nil {
+			return RepositoryPreparation{}, err
+		}
 	}
 
-	var addErr error
-	if branchExists {
-		_, addErr = gitOutput(ctx, checkout, "worktree", "add", candidate, syntheticBranch)
-	} else {
-		_, addErr = gitOutput(ctx, checkout, "worktree", "add", "-b", syntheticBranch, candidate, privateRef)
+	if err := writePreparationMarker(root, manifest.HandoffID, marker); err != nil {
+		return RepositoryPreparation{}, err
 	}
-	if addErr != nil {
-		// A concurrent replay may have completed between the existence check and
-		// worktree add. Revalidate it before reporting a transient failure.
+	if _, err := gitOutput(ctx, checkout, "worktree", "add", candidate, localBranch); err != nil {
 		if exists, _ := candidateExists(candidate); exists {
-			if prepared, replayErr := validateRepositoryReplay(ctx, checkout, root, candidate, snapshot, syntheticBranch); replayErr == nil {
-				return prepared, nil
+			if registered, _ := registeredWorktree(ctx, checkout, candidate); registered {
+				if configErr := configureWorktreePush(ctx, checkout, candidate); configErr == nil {
+					if prepared, replayErr := validateRepositoryReplay(ctx, checkout, root, candidate, localBranch, snapshot); replayErr == nil {
+						_ = clearPreparationMarker(root, manifest.HandoffID, marker)
+						return prepared, nil
+					}
+				}
 			}
 		}
 		return RepositoryPreparation{}, repositoryError(RepositoryErrorRetryable, "attach deterministic worktree failed")
 	}
-	return validateRepositoryReplay(ctx, checkout, root, candidate, snapshot, syntheticBranch)
+	if err := configureWorktreePush(ctx, checkout, candidate); err != nil {
+		return RepositoryPreparation{}, err
+	}
+	prepared, err := validateRepositoryReplay(ctx, checkout, root, candidate, localBranch, snapshot)
+	if err != nil {
+		return RepositoryPreparation{}, err
+	}
+	if err := clearPreparationMarker(root, manifest.HandoffID, marker); err != nil {
+		return RepositoryPreparation{}, err
+	}
+	return prepared, nil
 }
 
 func selectRepositoryCheckout(ctx context.Context, candidates []string, wantSlug string) (string, error) {
@@ -182,7 +239,6 @@ func normalizeOriginSlug(origin string) (string, bool) {
 		}
 		pathPart = parsed.Path
 	} else if colon := strings.IndexByte(origin, ':'); colon > 0 && !strings.ContainsAny(origin[:colon], `/\`) {
-		// SCP-style Git URL: [user@]host:owner/repo.git.
 		pathPart = origin[colon+1:]
 	}
 	pathPart = strings.Trim(strings.ReplaceAll(pathPart, `\`, "/"), "/")
@@ -213,6 +269,9 @@ func resolveWorktreeCandidate(rawRoot, handoffID string) (string, string, error)
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return "", "", repositoryError(RepositoryErrorDeterministic, "declared worktrees root must be a real directory")
 	}
+	if !ownedByCurrentEUID(info) || info.Mode().Perm()&0o022 != 0 {
+		return "", "", repositoryError(RepositoryErrorDeterministic, "declared worktrees root must be owner-controlled and not group/world writable")
+	}
 	root, err := filepath.EvalSymlinks(rawRoot)
 	if err != nil {
 		return "", "", repositoryError(RepositoryErrorRetryable, "resolve declared worktrees root failed")
@@ -229,6 +288,11 @@ func resolveWorktreeCandidate(rawRoot, handoffID string) (string, string, error)
 	return root, candidate, nil
 }
 
+func ownedByCurrentEUID(info os.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && int(stat.Uid) == os.Geteuid()
+}
+
 func candidateExists(candidate string) (bool, error) {
 	info, err := os.Lstat(candidate)
 	if err != nil {
@@ -243,7 +307,53 @@ func candidateExists(candidate string) (bool, error) {
 	return true, nil
 }
 
-func validateRepositoryReplay(ctx context.Context, checkout, root, candidate string, snapshot RepositorySnapshot, wantBranch string) (RepositoryPreparation, error) {
+func chooseLocalBranch(ctx context.Context, checkout, candidate, handoffID, sourceBranch string) (string, error) {
+	sourceRef := "refs/heads/" + sourceBranch
+	fallback := "arcmux/handoff/" + handoffID
+	if err := validateGitRef(fallback); err != nil {
+		return "", repositoryError(RepositoryErrorDeterministic, "handoff id cannot form a fallback branch")
+	}
+	fallbackRef := "refs/heads/" + fallback
+	entries, err := listWorktrees(ctx, checkout)
+	if err != nil {
+		return "", err
+	}
+	for _, entry := range entries {
+		if !sameFilesystemPath(entry.Path, candidate) {
+			continue
+		}
+		switch entry.Branch {
+		case sourceRef:
+			return sourceBranch, nil
+		case fallbackRef:
+			return fallback, nil
+		default:
+			return "", repositoryError(RepositoryErrorDeterministic, "deterministic worktree uses an unexpected local branch")
+		}
+	}
+	for _, entry := range entries {
+		if entry.Branch == sourceRef {
+			return fallback, nil
+		}
+	}
+	return sourceBranch, nil
+}
+
+func sameFilesystemPath(left, right string) bool {
+	leftResolved, leftErr := filepath.EvalSymlinks(left)
+	rightResolved, rightErr := filepath.EvalSymlinks(right)
+	if leftErr == nil {
+		left = leftResolved
+	}
+	if rightErr == nil {
+		right = rightResolved
+	}
+	leftAbs, leftErr := filepath.Abs(left)
+	rightAbs, rightErr := filepath.Abs(right)
+	return leftErr == nil && rightErr == nil && filepath.Clean(leftAbs) == filepath.Clean(rightAbs)
+}
+
+func validateRepositoryReplay(ctx context.Context, checkout, root, candidate, wantLocalBranch string, snapshot RepositorySnapshot) (RepositoryPreparation, error) {
 	resolvedCandidate, err := filepath.EvalSymlinks(candidate)
 	if err != nil {
 		return RepositoryPreparation{}, repositoryError(RepositoryErrorRetryable, "resolve deterministic worktree failed")
@@ -274,8 +384,14 @@ func validateRepositoryReplay(ctx context.Context, checkout, root, candidate str
 		return RepositoryPreparation{}, err
 	}
 	branch, err := gitOutput(ctx, resolvedCandidate, "symbolic-ref", "--quiet", "--short", "HEAD")
-	if err != nil || branch != wantBranch {
+	if err != nil || branch != wantLocalBranch {
 		return RepositoryPreparation{}, repositoryError(RepositoryErrorDeterministic, "existing worktree branch does not match")
+	}
+	if err := verifyBranchUpstream(ctx, resolvedCandidate, branch, snapshot.Branch); err != nil {
+		return RepositoryPreparation{}, err
+	}
+	if err := verifyWorktreePush(ctx, resolvedCandidate); err != nil {
+		return RepositoryPreparation{}, err
 	}
 	status, err := gitOutput(ctx, resolvedCandidate, "status", "--porcelain=v1", "--untracked-files=all")
 	if err != nil {
@@ -284,7 +400,36 @@ func validateRepositoryReplay(ctx context.Context, checkout, root, candidate str
 	if status != "" {
 		return RepositoryPreparation{}, repositoryError(RepositoryErrorDeterministic, "existing worktree is dirty")
 	}
-	return RepositoryPreparation{WorktreePath: resolvedCandidate, Head: head, Branch: branch}, nil
+	return RepositoryPreparation{WorktreePath: resolvedCandidate, Head: head, LocalBranch: branch, SourceBranch: snapshot.Branch}, nil
+}
+
+func verifyBranchUpstream(ctx context.Context, checkout, localBranch, sourceBranch string) error {
+	upstream, err := gitOutput(ctx, checkout, "for-each-ref", "--format=%(upstream:short)", "refs/heads/"+localBranch)
+	if err != nil {
+		return repositoryError(RepositoryErrorRetryable, "inspect continuation branch upstream failed")
+	}
+	if upstream != "origin/"+sourceBranch {
+		return repositoryError(RepositoryErrorDeterministic, "continuation branch upstream does not match origin")
+	}
+	return nil
+}
+
+func configureWorktreePush(ctx context.Context, checkout, worktree string) error {
+	if _, err := gitOutput(ctx, checkout, "config", "extensions.worktreeConfig", "true"); err != nil {
+		return repositoryError(RepositoryErrorRetryable, "enable worktree-local Git configuration failed")
+	}
+	if _, err := gitOutput(ctx, worktree, "config", "--worktree", "push.default", "upstream"); err != nil {
+		return repositoryError(RepositoryErrorRetryable, "configure continuation push behavior failed")
+	}
+	return verifyWorktreePush(ctx, worktree)
+}
+
+func verifyWorktreePush(ctx context.Context, worktree string) error {
+	got, err := gitOutput(ctx, worktree, "config", "--worktree", "--get", "push.default")
+	if err != nil || got != "upstream" {
+		return repositoryError(RepositoryErrorDeterministic, "continuation push behavior is not worktree-local upstream")
+	}
+	return nil
 }
 
 func validateRepositoryCommitClaims(ctx context.Context, checkout, head string, snapshot RepositorySnapshot) error {
@@ -307,21 +452,60 @@ func validateRepositoryCommitClaims(ctx context.Context, checkout, head string, 
 	return nil
 }
 
-func registeredWorktree(ctx context.Context, checkout, candidate string) (bool, error) {
+type gitWorktree struct {
+	Path   string
+	Branch string
+}
+
+func listWorktrees(ctx context.Context, checkout string) ([]gitWorktree, error) {
 	output, err := gitOutput(ctx, checkout, "worktree", "list", "--porcelain", "-z")
 	if err != nil {
-		return false, repositoryError(RepositoryErrorRetryable, "list registered worktrees failed")
+		return nil, repositoryError(RepositoryErrorRetryable, "list registered worktrees failed")
 	}
+	var entries []gitWorktree
+	var current gitWorktree
 	for _, field := range strings.Split(output, "\x00") {
-		if !strings.HasPrefix(field, "worktree ") {
-			continue
+		switch {
+		case strings.HasPrefix(field, "worktree "):
+			if current.Path != "" {
+				entries = append(entries, current)
+			}
+			current = gitWorktree{Path: strings.TrimPrefix(field, "worktree ")}
+		case strings.HasPrefix(field, "branch "):
+			current.Branch = strings.TrimPrefix(field, "branch ")
 		}
-		listed, err := filepath.EvalSymlinks(strings.TrimPrefix(field, "worktree "))
+	}
+	if current.Path != "" {
+		entries = append(entries, current)
+	}
+	return entries, nil
+}
+
+func registeredWorktree(ctx context.Context, checkout, candidate string) (bool, error) {
+	entries, err := listWorktrees(ctx, checkout)
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range entries {
+		listed, err := filepath.EvalSymlinks(entry.Path)
 		if err == nil && filepath.Clean(listed) == filepath.Clean(candidate) {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+func branchWorktree(ctx context.Context, checkout, branchRef string) (string, error) {
+	entries, err := listWorktrees(ctx, checkout)
+	if err != nil {
+		return "", err
+	}
+	for _, entry := range entries {
+		if entry.Branch == branchRef {
+			return entry.Path, nil
+		}
+	}
+	return "", nil
 }
 
 func gitCommonDir(ctx context.Context, checkout string) (string, error) {
@@ -336,9 +520,207 @@ func gitCommonDir(ctx context.Context, checkout string) (string, error) {
 	return filepath.Clean(common), nil
 }
 
-func privateHandoffRef(handoffID string) string {
-	digest := sha256.Sum256([]byte(handoffID))
-	return fmt.Sprintf("refs/arcmux/handoffs/%x/source", digest[:16])
+type preparationMarker struct {
+	Version      int    `json:"version"`
+	HandoffID    string `json:"handoff_id"`
+	RepoID       string `json:"repo_id"`
+	LocalBranch  string `json:"local_branch"`
+	SourceBranch string `json:"source_branch"`
+	Head         string `json:"head"`
+}
+
+func newPreparationMarker(ctx context.Context, checkout, handoffID, localBranch string, snapshot RepositorySnapshot) (preparationMarker, error) {
+	common, err := gitCommonDir(ctx, checkout)
+	if err != nil {
+		return preparationMarker{}, repositoryError(RepositoryErrorDeterministic, "configured checkout is not a usable repository")
+	}
+	digest := sha256.Sum256([]byte(common))
+	return preparationMarker{
+		Version: 1, HandoffID: handoffID, RepoID: hex.EncodeToString(digest[:]),
+		LocalBranch: localBranch, SourceBranch: snapshot.Branch, Head: snapshot.SourceHead,
+	}, nil
+}
+
+func preparationMarkerName(handoffID string) string {
+	return ".handoff-" + handoffID + ".preparing"
+}
+
+func writePreparationMarker(root, handoffID string, want preparationMarker) error {
+	opened, err := os.OpenRoot(root)
+	if err != nil {
+		return repositoryError(RepositoryErrorRetryable, "open worktrees root failed")
+	}
+	defer opened.Close()
+	name := preparationMarkerName(handoffID)
+	if exists, err := verifyPreparationMarker(opened, name, want); err != nil {
+		return err
+	} else if exists {
+		return nil
+	}
+	data, err := json.Marshal(want)
+	if err != nil {
+		return repositoryError(RepositoryErrorDeterministic, "encode preparation marker failed")
+	}
+	tempName := name + ".tmp"
+	if info, err := opened.Lstat(tempName); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || !ownedByCurrentEUID(info) {
+			return repositoryError(RepositoryErrorDeterministic, "preparation marker temporary path is unsafe")
+		}
+		if err := opened.Remove(tempName); err != nil {
+			return repositoryError(RepositoryErrorRetryable, "remove interrupted preparation marker failed")
+		}
+	} else if !os.IsNotExist(err) {
+		return repositoryError(RepositoryErrorRetryable, "inspect preparation marker temporary path failed")
+	}
+	file, err := opened.OpenFile(tempName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return repositoryError(RepositoryErrorRetryable, "create preparation marker temporary file failed")
+	}
+	if err := file.Chmod(0o600); err != nil {
+		file.Close()
+		return repositoryError(RepositoryErrorRetryable, "secure preparation marker failed")
+	}
+	if _, err := file.Write(data); err != nil {
+		file.Close()
+		return repositoryError(RepositoryErrorRetryable, "write preparation marker failed")
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		return repositoryError(RepositoryErrorRetryable, "sync preparation marker failed")
+	}
+	if err := file.Close(); err != nil {
+		return repositoryError(RepositoryErrorRetryable, "close preparation marker failed")
+	}
+	if err := opened.Rename(tempName, name); err != nil {
+		return repositoryError(RepositoryErrorRetryable, "publish preparation marker failed")
+	}
+	if err := syncDirectory(root); err != nil {
+		return repositoryError(RepositoryErrorRetryable, "sync worktrees root failed")
+	}
+	return nil
+}
+
+func verifyPreparationMarker(root *os.Root, name string, want preparationMarker) (bool, error) {
+	before, err := root.Lstat(name)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, repositoryError(RepositoryErrorRetryable, "inspect preparation marker failed")
+	}
+	if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() || before.Mode().Perm() != 0o600 || !ownedByCurrentEUID(before) {
+		return false, repositoryError(RepositoryErrorDeterministic, "preparation marker is unsafe")
+	}
+	if before.Size() <= 0 || before.Size() > 4096 {
+		return false, repositoryError(RepositoryErrorDeterministic, "preparation marker has invalid size")
+	}
+	file, err := root.Open(name)
+	if err != nil {
+		return false, repositoryError(RepositoryErrorRetryable, "open preparation marker failed")
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(before, opened) {
+		return false, repositoryError(RepositoryErrorRetryable, "preparation marker changed while opening")
+	}
+	var got preparationMarker
+	decoder := json.NewDecoder(file)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&got); err != nil {
+		return false, repositoryError(RepositoryErrorDeterministic, "preparation marker is malformed")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return false, repositoryError(RepositoryErrorDeterministic, "preparation marker has trailing content")
+	}
+	if got != want {
+		return false, repositoryError(RepositoryErrorDeterministic, "preparation marker conflicts with handoff")
+	}
+	return true, nil
+}
+
+func preparationMarkerExists(root, handoffID string, want preparationMarker) (bool, error) {
+	opened, err := os.OpenRoot(root)
+	if err != nil {
+		return false, repositoryError(RepositoryErrorRetryable, "open worktrees root failed")
+	}
+	defer opened.Close()
+	return verifyPreparationMarker(opened, preparationMarkerName(handoffID), want)
+}
+
+func clearPreparationMarker(root, handoffID string, want preparationMarker) error {
+	opened, err := os.OpenRoot(root)
+	if err != nil {
+		return repositoryError(RepositoryErrorRetryable, "open worktrees root failed")
+	}
+	defer opened.Close()
+	name := preparationMarkerName(handoffID)
+	exists, err := verifyPreparationMarker(opened, name, want)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	if err := opened.Remove(name); err != nil {
+		return repositoryError(RepositoryErrorRetryable, "remove preparation marker failed")
+	}
+	if err := syncDirectory(root); err != nil {
+		return repositoryError(RepositoryErrorRetryable, "sync worktrees root failed")
+	}
+	return nil
+}
+
+func recoverOwnedPartialCandidate(root, candidate, handoffID string, want preparationMarker) (bool, error) {
+	opened, err := os.OpenRoot(root)
+	if err != nil {
+		return false, repositoryError(RepositoryErrorRetryable, "open worktrees root failed")
+	}
+	defer opened.Close()
+	exists, err := verifyPreparationMarker(opened, preparationMarkerName(handoffID), want)
+	if err != nil {
+		return false, err
+	}
+	if !exists {
+		return false, nil
+	}
+	if err := verifyOwnedRemovalTree(root, candidate); err != nil {
+		return false, err
+	}
+	if err := os.RemoveAll(candidate); err != nil {
+		return false, repositoryError(RepositoryErrorRetryable, "remove interrupted worktree failed")
+	}
+	if err := syncDirectory(root); err != nil {
+		return false, repositoryError(RepositoryErrorRetryable, "sync worktrees root failed")
+	}
+	return true, nil
+}
+
+func verifyOwnedRemovalTree(root, candidate string) error {
+	if !withinResolvedRoot(root, candidate) {
+		return repositoryError(RepositoryErrorDeterministic, "interrupted worktree escapes declared root")
+	}
+	rootInfo, err := os.Lstat(root)
+	if err != nil {
+		return repositoryError(RepositoryErrorRetryable, "inspect worktrees root failed")
+	}
+	rootStat, ok := rootInfo.Sys().(*syscall.Stat_t)
+	if !ok {
+		return repositoryError(RepositoryErrorDeterministic, "worktrees root ownership is unavailable")
+	}
+	return filepath.Walk(candidate, func(_ string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return repositoryError(RepositoryErrorRetryable, "inspect interrupted worktree failed")
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || int(stat.Uid) != os.Geteuid() || stat.Dev != rootStat.Dev {
+			return repositoryError(RepositoryErrorDeterministic, "interrupted worktree is not safely owned")
+		}
+		if info.Mode()&os.ModeSymlink == 0 && info.Mode().Perm()&0o022 != 0 {
+			return repositoryError(RepositoryErrorDeterministic, "interrupted worktree has unsafe permissions")
+		}
+		return nil
+	})
 }
 
 func gitOutput(ctx context.Context, checkout string, args ...string) (string, error) {
