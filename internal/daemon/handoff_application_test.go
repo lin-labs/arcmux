@@ -16,6 +16,7 @@ import (
 
 	"github.com/lin-labs/arcmux/internal/handoff"
 	arcmuxmesh "github.com/lin-labs/arcmux/internal/mesh"
+	"github.com/lin-labs/arcmux/internal/profile"
 	"github.com/lin-labs/arcmux/internal/project"
 )
 
@@ -34,6 +35,40 @@ func TestHandoffPrepareBindsAuthenticatedSourceAndLocalTargetBeforePersist(t *te
 	}
 	if _, err := app.store.GetTarget(manifest.HandoffID); !errors.Is(err, handoff.ErrNotFound) {
 		t.Fatalf("target mismatch persisted target record: %v", err)
+	}
+}
+
+func TestHandoffPrepareRejectsUnavailableTargetProfileBeforeAssetSideEffects(t *testing.T) {
+	for _, targetProfile := range []string{"unknown", "codex_exec"} {
+		t.Run(targetProfile, func(t *testing.T) {
+			app, manifest := newHandoffTestApplication(t, true)
+			manifest.HandoffID = "handoff-profile-" + targetProfile
+			manifest.Target.Profile = targetProfile
+			var historyCalls, repositoryCalls atomic.Int32
+			app.snapshotHistory = func(string, string, string, handoff.HistoryRef) (string, error) {
+				historyCalls.Add(1)
+				return "", nil
+			}
+			app.prepareRepository = func(context.Context, handoff.Manifest, project.ResolvedProject) error {
+				repositoryCalls.Add(1)
+				return nil
+			}
+
+			status, err := app.prepare(context.Background(), arcmuxmesh.Principal{PeerID: "client"}, "server", meshHandoffPrepareRequest{Manifest: manifest})
+			if err != nil {
+				t.Fatalf("prepare: %v", err)
+			}
+			if status.State != handoff.TargetRejected || status.Failure == nil ||
+				status.Failure.Code != handoff.FailureVerification || status.Failure.Retryable {
+				t.Fatalf("profile rejection = %+v", status)
+			}
+			if strings.Contains(status.Failure.Message, targetProfile) {
+				t.Fatalf("safe failure leaked target profile: %+v", status.Failure)
+			}
+			if historyCalls.Load() != 0 || repositoryCalls.Load() != 0 {
+				t.Fatalf("profile rejection ran history=%d repository=%d side effects", historyCalls.Load(), repositoryCalls.Load())
+			}
+		})
 	}
 }
 
@@ -209,6 +244,183 @@ func TestHandoffPrepareResumesPersistedReceivedAndValidating(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTargetHandoffReconcilerRecoversPrepareStatesAndHonorsRetryDueTime(t *testing.T) {
+	seed, base := newHandoffTestApplication(t, true)
+	seedRecord := func(id string, state handoff.TargetState, retryDelay time.Duration) handoff.TargetRecord {
+		t.Helper()
+		manifest := base
+		manifest.HandoffID = id
+		record, replay, err := seed.store.ReceiveTarget(manifest)
+		if err != nil || replay {
+			t.Fatalf("seed %s receive record=%+v replay=%t err=%v", id, record, replay, err)
+		}
+		if state == handoff.TargetReceived {
+			return record
+		}
+		record, err = seed.store.TransitionTarget(id, record.Revision, handoff.TargetValidating, handoff.Transition{})
+		if err != nil {
+			t.Fatalf("seed %s validating: %v", id, err)
+		}
+		switch state {
+		case handoff.TargetValidating:
+			return record
+		case handoff.TargetWaitingAssets:
+			next := record.Updated.Add(retryDelay)
+			failure := &handoff.Failure{
+				Code: handoff.FailureMissingAsset, Message: "history not synced", Retryable: true, At: record.Updated,
+			}
+			record, err = seed.store.TransitionTarget(id, record.Revision, state, handoff.Transition{
+				At: record.Updated, NextRetry: &next, Failure: failure,
+			})
+		case handoff.TargetRejected:
+			failure := &handoff.Failure{Code: handoff.FailureVerification, Message: "terminal rejection", At: record.Updated}
+			record, err = seed.store.TransitionTarget(id, record.Revision, state, handoff.Transition{At: record.Updated, Failure: failure})
+		default:
+			t.Fatalf("unsupported seed state %s", state)
+		}
+		if err != nil {
+			t.Fatalf("seed %s %s: %v", id, state, err)
+		}
+		return record
+	}
+
+	received := seedRecord("recovery-received", handoff.TargetReceived, 0)
+	validating := seedRecord("recovery-validating", handoff.TargetValidating, 0)
+	due := seedRecord("recovery-due", handoff.TargetWaitingAssets, time.Second)
+	future := seedRecord("recovery-future", handoff.TargetWaitingAssets, time.Hour)
+	rejected := seedRecord("recovery-rejected", handoff.TargetRejected, 0)
+	wrongDeviceManifest := base
+	wrongDeviceManifest.HandoffID = "recovery-wrong-device"
+	wrongDeviceManifest.Target.DeviceID = "other-server"
+	wrongDevice, replay, err := seed.store.ReceiveTarget(wrongDeviceManifest)
+	if err != nil || replay {
+		t.Fatalf("seed wrong-device record=%+v replay=%t err=%v", wrongDevice, replay, err)
+	}
+
+	reopened, err := handoff.Open(seed.store.Root())
+	if err != nil {
+		t.Fatalf("reopen handoff store: %v", err)
+	}
+	recovered := newHandoffApplication(reopened, map[string]profile.Profile{
+		"codex": {Transport: profile.TransportTmux, StartCommand: "codex"},
+	})
+	recovered.historyRoot = seed.historyRoot
+	recovered.projectsPath = seed.projectsPath
+	var repositoryCalls atomic.Int32
+	recovered.prepareRepository = func(context.Context, handoff.Manifest, project.ResolvedProject) error {
+		repositoryCalls.Add(1)
+		return nil
+	}
+	d := newMeshApplicationTestDaemon(t, "server")
+	d.meshMu.Lock()
+	d.meshApp.handoffs = recovered
+	d.meshMu.Unlock()
+
+	firstPassAt := due.NextRetry.Add(time.Second)
+	if !firstPassAt.Before(*future.NextRetry) {
+		t.Fatal("test retry times do not separate due and future records")
+	}
+	d.reconcileTargetHandoffs(context.Background(), firstPassAt)
+	for _, record := range []handoff.TargetRecord{received, validating, due} {
+		got, err := reopened.GetTarget(record.Manifest.HandoffID)
+		if err != nil || got.State != handoff.TargetPrepared {
+			t.Fatalf("recovered %s = %+v err=%v", record.Manifest.HandoffID, got, err)
+		}
+	}
+	gotFuture, err := reopened.GetTarget(future.Manifest.HandoffID)
+	if err != nil || gotFuture.State != handoff.TargetWaitingAssets || gotFuture.Attempts != 1 {
+		t.Fatalf("future retry changed early: %+v err=%v", gotFuture, err)
+	}
+	gotRejected, err := reopened.GetTarget(rejected.Manifest.HandoffID)
+	if err != nil || gotRejected.State != handoff.TargetRejected {
+		t.Fatalf("terminal rejection changed: %+v err=%v", gotRejected, err)
+	}
+	gotWrongDevice, err := reopened.GetTarget(wrongDevice.Manifest.HandoffID)
+	if err != nil || gotWrongDevice.State != handoff.TargetRejected || gotWrongDevice.Failure == nil ||
+		gotWrongDevice.Failure.Code != handoff.FailureVerification {
+		t.Fatalf("wrong-device recovery = %+v err=%v", gotWrongDevice, err)
+	}
+	if got := repositoryCalls.Load(); got != 3 {
+		t.Fatalf("first pass repository calls = %d, want 3", got)
+	}
+
+	d.reconcileTargetHandoffs(context.Background(), future.NextRetry.Add(time.Second))
+	gotFuture, err = reopened.GetTarget(future.Manifest.HandoffID)
+	if err != nil || gotFuture.State != handoff.TargetPrepared || gotFuture.Attempts != 2 {
+		t.Fatalf("due retry did not prepare: %+v err=%v", gotFuture, err)
+	}
+	if got := repositoryCalls.Load(); got != 4 {
+		t.Fatalf("second pass repository calls = %d, want 4", got)
+	}
+
+	// Prepared/rejected records are inert on later reconciliation passes.
+	d.reconcileTargetHandoffs(context.Background(), future.NextRetry.Add(2*time.Second))
+	if got := repositoryCalls.Load(); got != 4 {
+		t.Fatalf("terminal pass repository calls = %d, want 4", got)
+	}
+}
+
+func TestMeshRuntimeImmediatelyAndPeriodicallyReconcilesTargetHandoffs(t *testing.T) {
+	app, base := newHandoffTestApplication(t, true)
+	receivedManifest := base
+	receivedManifest.HandoffID = "runtime-received"
+	if _, _, err := app.store.ReceiveTarget(receivedManifest); err != nil {
+		t.Fatalf("seed received: %v", err)
+	}
+	waitingManifest := base
+	waitingManifest.HandoffID = "runtime-waiting"
+	waiting, _, err := app.store.ReceiveTarget(waitingManifest)
+	if err != nil {
+		t.Fatalf("seed waiting receive: %v", err)
+	}
+	waiting, err = app.store.TransitionTarget(waitingManifest.HandoffID, waiting.Revision, handoff.TargetValidating, handoff.Transition{})
+	if err != nil {
+		t.Fatalf("seed waiting validating: %v", err)
+	}
+	nextRetry := time.Now().UTC().Add(250 * time.Millisecond)
+	if !nextRetry.After(waiting.Updated) {
+		nextRetry = waiting.Updated.Add(250 * time.Millisecond)
+	}
+	failure := &handoff.Failure{Code: handoff.FailureMissingAsset, Message: "asset pending", Retryable: true, At: waiting.Updated}
+	if _, err := app.store.TransitionTarget(waitingManifest.HandoffID, waiting.Revision, handoff.TargetWaitingAssets, handoff.Transition{
+		At: waiting.Updated, NextRetry: &nextRetry, Failure: failure,
+	}); err != nil {
+		t.Fatalf("seed waiting: %v", err)
+	}
+
+	d := newMeshApplicationTestDaemon(t, "server")
+	d.meshMu.Lock()
+	d.meshApp.handoffs = app
+	d.meshApp.reconcileInterval = 25 * time.Millisecond
+	d.meshMu.Unlock()
+	manager := arcmuxmesh.New(meshApplicationTestConfig("127.0.0.1:0"), &arcmuxmesh.Registry{
+		Version: arcmuxmesh.RegistryVersion, DeviceID: "server",
+	}, testDiscardLogger())
+	d.startMeshApplicationRuntime(manager)
+	t.Cleanup(func() {
+		d.meshMu.RLock()
+		meshApp := d.meshApp
+		d.meshMu.RUnlock()
+		meshApp.stopRuntime()
+	})
+
+	waitForTargetState := func(id string, want handoff.TargetState) {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			record, err := app.store.GetTarget(id)
+			if err == nil && record.State == want {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		record, err := app.store.GetTarget(id)
+		t.Fatalf("target %s state=%s err=%v, want %s", id, record.State, err, want)
+	}
+	waitForTargetState(receivedManifest.HandoffID, handoff.TargetPrepared)
+	waitForTargetState(waitingManifest.HandoffID, handoff.TargetPrepared)
 }
 
 func TestHandoffPrepareClassifiesRepositoryValidation(t *testing.T) {
@@ -394,7 +606,10 @@ func newHandoffTestApplication(t *testing.T, writeHistory bool) (*handoffApplica
 	if err := manifest.Validate(); err != nil {
 		t.Fatalf("test manifest: %v", err)
 	}
-	app := newHandoffApplication(store)
+	app := newHandoffApplication(store, map[string]profile.Profile{
+		"codex":      {Transport: profile.TransportTmux, StartCommand: "codex"},
+		"codex_exec": {Transport: profile.TransportExec},
+	})
 	app.historyRoot = historyRoot
 	app.projectsPath = projectsPath
 	app.prepareRepository = func(context.Context, handoff.Manifest, project.ResolvedProject) error { return nil }

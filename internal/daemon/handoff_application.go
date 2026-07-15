@@ -10,6 +10,7 @@ import (
 
 	"github.com/lin-labs/arcmux/internal/handoff"
 	arcmuxmesh "github.com/lin-labs/arcmux/internal/mesh"
+	"github.com/lin-labs/arcmux/internal/profile"
 	"github.com/lin-labs/arcmux/internal/project"
 )
 
@@ -41,6 +42,7 @@ type meshHandoffFailureDTO struct {
 }
 
 type repositoryPreparer func(context.Context, handoff.Manifest, project.ResolvedProject) error
+type targetProfileValidator func(string) error
 
 type handoffPrepareLock struct {
 	mu   sync.Mutex
@@ -55,11 +57,12 @@ type handoffApplication struct {
 	snapshotHistory   func(string, string, string, handoff.HistoryRef) (string, error)
 	loadProjects      func(string) (*project.ConsolidatedRegistry, error)
 	prepareRepository repositoryPreparer
+	validateProfile   targetProfileValidator
 	prepareMu         sync.Mutex
 	prepareLocks      map[string]*handoffPrepareLock
 }
 
-func newHandoffApplication(store *handoff.Store) *handoffApplication {
+func newHandoffApplication(store *handoff.Store, profiles map[string]profile.Profile) *handoffApplication {
 	return &handoffApplication{
 		store:             store,
 		historyRoot:       defaultHandoffHistoryRoot(),
@@ -68,8 +71,22 @@ func newHandoffApplication(store *handoff.Store) *handoffApplication {
 		snapshotHistory:   handoff.SnapshotHistory,
 		loadProjects:      project.LoadConsolidated,
 		prepareRepository: prepareHandoffRepository,
-		prepareLocks:      make(map[string]*handoffPrepareLock),
+		validateProfile: func(name string) error {
+			return validateHandoffTargetProfile(profiles, name)
+		},
+		prepareLocks: make(map[string]*handoffPrepareLock),
 	}
+}
+
+func validateHandoffTargetProfile(profiles map[string]profile.Profile, name string) error {
+	target, ok := profiles[name]
+	if !ok {
+		return errors.New("target agent profile is not configured")
+	}
+	if target.Transport != profile.TransportTmux || target.StartCommand == "" {
+		return errors.New("target agent profile is not available for supervised launch")
+	}
+	return nil
 }
 
 func defaultHandoffHistoryRoot() string {
@@ -90,6 +107,85 @@ func (d *Daemon) handoffApplication() (*handoffApplication, error) {
 	return app.handoffs, nil
 }
 
+func (d *Daemon) scheduleTargetHandoffReconcile() {
+	d.meshMu.RLock()
+	app := d.meshApp
+	d.meshMu.RUnlock()
+	if app == nil {
+		return
+	}
+	app.runtimeMu.Lock()
+	wake := app.handoffWake
+	app.runtimeMu.Unlock()
+	if wake == nil {
+		return
+	}
+	select {
+	case wake <- struct{}{}:
+	default:
+		// One serialized worker drains the complete durable recoverable set,
+		// so additional wakeups can safely coalesce while a pass is pending.
+	}
+}
+
+// reconcileTargetHandoffs resumes only prepare-phase target work. Launching
+// and launch-retry states are deliberately reserved for the future launch
+// driver even though the store exposes them in its broader recovery query.
+func (d *Daemon) reconcileTargetHandoffs(ctx context.Context, at time.Time) {
+	app, err := d.handoffApplication()
+	if err != nil {
+		return
+	}
+	records, err := app.store.RecoverableTarget(at)
+	if err != nil {
+		d.logger.Warn("target handoff recovery scan failed")
+		return
+	}
+	for _, candidate := range records {
+		if ctx.Err() != nil {
+			return
+		}
+		switch candidate.State {
+		case handoff.TargetReceived, handoff.TargetValidating, handoff.TargetWaitingAssets:
+		default:
+			continue
+		}
+
+		release := app.lockPrepare(candidate.Manifest.HandoffID)
+		current, getErr := app.store.GetTarget(candidate.Manifest.HandoffID)
+		if getErr != nil {
+			release()
+			d.logger.Warn("target handoff recovery reload failed", "handoff_id", candidate.Manifest.HandoffID)
+			continue
+		}
+		if current.State == handoff.TargetWaitingAssets && (current.NextRetry == nil || current.NextRetry.After(at)) {
+			release()
+			continue
+		}
+		switch current.State {
+		case handoff.TargetReceived, handoff.TargetValidating, handoff.TargetWaitingAssets:
+			_, resumeErr := app.resumeTarget(ctx, current, d.meshDeviceID())
+			release()
+			if resumeErr != nil && ctx.Err() == nil {
+				d.logger.Warn("target handoff recovery attempt failed",
+					"handoff_id", current.Manifest.HandoffID,
+					"state", current.State,
+					"error_code", safeMeshRPCErrorCode(resumeErr))
+			}
+		default:
+			release()
+		}
+	}
+}
+
+func safeMeshRPCErrorCode(err error) string {
+	var rpcErr *arcmuxmesh.RPCError
+	if errors.As(err, &rpcErr) && rpcErr.Code != "" {
+		return rpcErr.Code
+	}
+	return arcmuxmesh.ErrorInternal
+}
+
 func (a *handoffApplication) prepare(ctx context.Context, principal arcmuxmesh.Principal, localDeviceID string, request meshHandoffPrepareRequest) (meshHandoffStatus, error) {
 	manifest := request.Manifest
 	if err := manifest.Validate(); err != nil {
@@ -104,35 +200,46 @@ func (a *handoffApplication) prepare(ctx context.Context, principal arcmuxmesh.P
 	release := a.lockPrepare(manifest.HandoffID)
 	defer release()
 
-	record, replay, err := a.store.ReceiveTarget(manifest)
+	record, _, err := a.store.ReceiveTarget(manifest)
 	if err != nil {
 		if errors.Is(err, handoff.ErrManifestConflict) {
 			return meshHandoffStatus{}, meshInvalidRequest(errors.New("handoff id conflicts with an existing manifest"))
 		}
 		return meshHandoffStatus{}, &arcmuxmesh.RPCError{Code: arcmuxmesh.ErrorInternal, Message: "unable to persist handoff"}
 	}
-	if replay {
-		switch record.State {
-		case handoff.TargetReceived, handoff.TargetWaitingAssets:
-			// An explicit duplicate prepare accelerates a retry. This also
-			// resumes a record persisted immediately before a process restart.
-		case handoff.TargetValidating:
-			// Resume validation after a process restart without an illegal
-			// self-transition or a second attempt increment.
-		case handoff.TargetPrepared, handoff.TargetRejected, handoff.TargetLaunching, handoff.TargetAccepted:
-			return handoffStatusDTO(record), nil
-		default:
-			return meshHandoffStatus{}, &arcmuxmesh.RPCError{Code: arcmuxmesh.ErrorInternal, Message: "handoff has an unsupported state"}
-		}
-	}
+	return a.resumeTarget(ctx, record, localDeviceID)
+}
 
-	if record.State == handoff.TargetReceived || record.State == handoff.TargetWaitingAssets {
-		record, err = a.store.TransitionTarget(manifest.HandoffID, record.Revision, handoff.TargetValidating, handoff.Transition{})
+// resumeTarget performs the target-local preparation shared by inbound RPCs
+// and restart reconciliation. The caller must hold lockPrepare for this ID.
+func (a *handoffApplication) resumeTarget(ctx context.Context, record handoff.TargetRecord, localDeviceID string) (meshHandoffStatus, error) {
+	if err := ctx.Err(); err != nil {
+		return meshHandoffStatus{}, err
+	}
+	switch record.State {
+	case handoff.TargetReceived, handoff.TargetWaitingAssets:
+		var err error
+		record, err = a.store.TransitionTarget(record.Manifest.HandoffID, record.Revision, handoff.TargetValidating, handoff.Transition{})
 		if err != nil {
 			return meshHandoffStatus{}, &arcmuxmesh.RPCError{Code: arcmuxmesh.ErrorInternal, Message: "unable to validate handoff"}
 		}
+	case handoff.TargetValidating:
+		// Resume validation after a process restart without an illegal
+		// self-transition or a second attempt increment.
+	case handoff.TargetPrepared, handoff.TargetRejected, handoff.TargetLaunching, handoff.TargetLaunchWaitingAssets, handoff.TargetAccepted:
+		return handoffStatusDTO(record), nil
+	default:
+		return meshHandoffStatus{}, &arcmuxmesh.RPCError{Code: arcmuxmesh.ErrorInternal, Message: "handoff has an unsupported state"}
 	}
 
+	if localDeviceID == "" || record.Manifest.Target.DeviceID != localDeviceID {
+		return a.reject(record, handoff.FailureVerification, "target device binding no longer matches this runtime")
+	}
+	if err := a.validateProfile(record.Manifest.Target.Profile); err != nil {
+		return a.reject(record, handoff.FailureVerification, "target agent profile is not available for supervised launch")
+	}
+
+	manifest := record.Manifest
 	registry, err := a.loadProjects(a.projectsPath)
 	if err != nil {
 		return a.reject(record, handoff.FailureVerification, "target project registry is invalid")

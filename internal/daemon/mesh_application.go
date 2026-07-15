@@ -102,10 +102,11 @@ type meshApplication struct {
 	sessionPages  map[string]cachedSessionInventory
 	artifactPages map[string]cachedArtifactInventory
 
-	runtimeMu  sync.Mutex
-	cancel     context.CancelFunc
-	runtimeCtx context.Context
-	wg         sync.WaitGroup
+	runtimeMu   sync.Mutex
+	cancel      context.CancelFunc
+	runtimeCtx  context.Context
+	handoffWake chan struct{}
+	wg          sync.WaitGroup
 
 	syncMu            sync.Mutex
 	syncing           map[string]*meshSyncState
@@ -264,7 +265,7 @@ func (d *Daemon) initMeshApplication() error {
 	d.meshMu.Lock()
 	if d.meshApp == nil {
 		d.meshApp = &meshApplication{
-			store: store, handoffs: newHandoffApplication(handoffStore), epoch: fmt.Sprintf("boot-%d", time.Now().UTC().UnixNano()),
+			store: store, handoffs: newHandoffApplication(handoffStore, d.profiles), epoch: fmt.Sprintf("boot-%d", time.Now().UTC().UnixNano()),
 			subs: make(map[string]meshPeerSubscription), outbound: outbound,
 			sessionPages: make(map[string]cachedSessionInventory), artifactPages: make(map[string]cachedArtifactInventory),
 			syncing: make(map[string]*meshSyncState), reconcileInterval: 15 * time.Second,
@@ -1119,6 +1120,7 @@ func (app *meshApplication) stopRuntime() {
 	cancel := app.cancel
 	app.cancel = nil
 	app.runtimeCtx = nil
+	app.handoffWake = nil
 	app.runtimeMu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -1151,7 +1153,9 @@ func (d *Daemon) startMeshApplicationRuntime(manager *arcmuxmesh.Manager) {
 	app.runtimeMu.Lock()
 	app.cancel = cancel
 	app.runtimeCtx = ctx
-	app.wg.Add(1)
+	app.handoffWake = make(chan struct{}, 1)
+	handoffWake := app.handoffWake
+	app.wg.Add(2)
 	app.runtimeMu.Unlock()
 	go func() {
 		defer app.wg.Done()
@@ -1194,12 +1198,25 @@ func (d *Daemon) startMeshApplicationRuntime(manager *arcmuxmesh.Manager) {
 				d.reconcileMeshStatuses(manager, knownConnections)
 				d.retryMeshGaps(manager)
 			case <-reconcileTicker.C:
+				d.scheduleTargetHandoffReconcile()
 				for _, peer := range d.connectedDesiredMeshPeers(manager) {
 					d.scheduleMeshSync(peer, d.meshSubscriptionNeedsRestore(manager, peer))
 				}
 			}
 		}
 	}()
+	go func() {
+		defer app.wg.Done()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-handoffWake:
+				d.reconcileTargetHandoffs(ctx, time.Now().UTC())
+			}
+		}
+	}()
+	d.scheduleTargetHandoffReconcile()
 }
 
 func (d *Daemon) reconcileMeshStatuses(manager *arcmuxmesh.Manager, known map[string]time.Time) {
@@ -1219,6 +1236,7 @@ func (d *Daemon) reconcileMeshStatuses(manager *arcmuxmesh.Manager, known map[st
 				known[status.PeerID] = *status.ConnectedAt
 				d.clearSubscriptionUnlessConnection(status.PeerID, *status.ConnectedAt)
 				d.scheduleMeshSync(status.PeerID, true)
+				d.scheduleTargetHandoffReconcile()
 			}
 			continue
 		}
