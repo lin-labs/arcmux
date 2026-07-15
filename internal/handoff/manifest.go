@@ -18,13 +18,11 @@ import (
 const ManifestVersion = 1
 
 const (
-	maxArtifacts         = 64
-	maxGoalRunes         = 2048
-	maxVerificationRunes = 1024
-	maxNextStepRunes     = 1024
-	maxHistoryBytes      = 64 << 20
-	maxPatchBytes        = 256 << 20
-	maxRefRunes          = 256
+	maxArtifacts    = 64
+	maxGoalRunes    = 2048
+	maxHistoryBytes = 64 << 20
+	maxPatchBytes   = 256 << 20
+	maxRefRunes     = 256
 )
 
 var (
@@ -33,9 +31,10 @@ var (
 	repoSlug          = regexp.MustCompile(`^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$`)
 	objectID          = regexp.MustCompile(`^[0-9a-f]{40,64}$`)
 	sha256Hex         = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	secretAssignment  = regexp.MustCompile(`(?i)\b(api[_ -]?key|access[_ -]?token|auth[_ -]?token|authorization|password|secret)\s*[:=]\s*\S+`)
+	secretAssignment  = regexp.MustCompile(`(?i)(api[_ -]?key|access[_ -]?token|auth[_ -]?token|authorization|password|secret)\s*[:=]\s*\S+`)
 	bearerCredential  = regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}`)
-	keyLikeCredential = regexp.MustCompile(`\b(?:sk|ghp|github_pat)-[A-Za-z0-9_-]{12,}`)
+	privateKey        = regexp.MustCompile(`(?i)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----`)
+	keyLikeCredential = regexp.MustCompile(`(?i)\b(?:ghp[_-]|github_pat[_-]|xox[baprs]-|xai[_-]|sk[_-])[A-Za-z0-9_-]{8,}`)
 )
 
 // Manifest is immutable once queued or received. Other than the explicitly
@@ -77,11 +76,9 @@ type TargetAgent struct {
 }
 
 type GoalSummary struct {
-	Text                string    `json:"text"`
-	Provenance          string    `json:"provenance"`
-	SuccessVerification string    `json:"success_verification"`
-	NextStep            string    `json:"next_step"`
-	UpdatedAt           time.Time `json:"updated_at"`
+	Text       string    `json:"text"`
+	Provenance string    `json:"provenance"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 type HistoryRef struct {
@@ -165,9 +162,9 @@ const (
 )
 
 type ValidationEvidence struct {
-	State       ValidationState `json:"state"`
-	Revision    string          `json:"revision"`
-	CompletedAt *time.Time      `json:"completed_at"`
+	State              ValidationState `json:"state"`
+	RepositoryRevision string          `json:"repository_revision"`
+	CompletedAt        *time.Time      `json:"completed_at"`
 }
 
 func (m Manifest) Validate() error {
@@ -222,7 +219,7 @@ func (m Manifest) Validate() error {
 			}
 		}
 	}
-	if err := m.Validation.validate(); err != nil {
+	if err := m.Validation.validate(m.Repository); err != nil {
 		return fmt.Errorf("validation: %w", err)
 	}
 	if err := validateUTCTime("created_at", m.CreatedAt); err != nil {
@@ -269,12 +266,6 @@ func (g GoalSummary) validate() error {
 	}
 	if g.Provenance != "explicit_operator" {
 		return errors.New("provenance must be explicit_operator")
-	}
-	if err := validateOperatorText("success_verification", g.SuccessVerification, maxVerificationRunes, true); err != nil {
-		return err
-	}
-	if err := validateOperatorText("next_step", g.NextStep, maxNextStepRunes, true); err != nil {
-		return err
 	}
 	return validateUTCTime("updated_at", g.UpdatedAt)
 }
@@ -339,6 +330,9 @@ func (r RepositorySnapshot) validate() error {
 		if err := r.Patch.validate(); err != nil {
 			return err
 		}
+		if r.Patch.ResultTree != r.TreeDigest {
+			return errors.New("stored patch result_tree must equal repository tree_digest")
+		}
 	default:
 		return fmt.Errorf("invalid transfer %q", r.Transfer)
 	}
@@ -389,15 +383,28 @@ func (a ArtifactRef) validate() error {
 	return nil
 }
 
-func (v ValidationEvidence) validate() error {
+func (v ValidationEvidence) validate(repository RepositorySnapshot) error {
 	switch v.State {
 	case ValidationNotRun:
-		if v.Revision != "" || v.CompletedAt != nil {
-			return errors.New("not_run validation must not have revision or completed_at")
+		if v.RepositoryRevision != "" || v.CompletedAt != nil {
+			return errors.New("not_run validation must not have repository_revision or completed_at")
 		}
 	case ValidationPassed, ValidationFailed:
-		if err := validateOpaqueRevision(v.Revision); err != nil {
+		if err := validateOpaqueRevision(v.RepositoryRevision); err != nil {
 			return err
+		}
+		expected := repository.SourceHead
+		if repository.Transfer == TransferStoredPatch {
+			if repository.Patch == nil {
+				return errors.New("stored_patch validation requires repository patch")
+			}
+			expected = repository.Patch.ResultTree
+			if expected != repository.TreeDigest {
+				return errors.New("stored_patch validation revision does not match repository tree_digest")
+			}
+		}
+		if v.RepositoryRevision != expected {
+			return errors.New("validation repository_revision does not match repository state")
 		}
 		if v.CompletedAt == nil {
 			return errors.New("completed validation requires completed_at")
@@ -431,7 +438,7 @@ func validateOperatorText(name, value string, maxRunes int, required bool) error
 			return fmt.Errorf("%s contains control characters", name)
 		}
 	}
-	if strings.Contains(value, "-----BEGIN ") || secretAssignment.MatchString(value) || bearerCredential.MatchString(value) || keyLikeCredential.MatchString(value) {
+	if privateKey.MatchString(value) || secretAssignment.MatchString(value) || bearerCredential.MatchString(value) || keyLikeCredential.MatchString(value) {
 		return fmt.Errorf("%s appears to contain credential material", name)
 	}
 	return nil
@@ -457,11 +464,16 @@ func validateUTCTime(name string, value time.Time) error {
 }
 
 func validateGitRef(value string) error {
-	if value == "" || len([]rune(value)) > maxRefRunes || strings.HasPrefix(value, "/") || strings.HasSuffix(value, "/") ||
+	if value == "" || len([]rune(value)) > maxRefRunes || strings.HasPrefix(value, "-") || strings.HasPrefix(value, "/") || strings.HasSuffix(value, "/") ||
 		strings.HasPrefix(value, ".") || strings.HasSuffix(value, ".") || strings.Contains(value, "..") ||
 		strings.Contains(value, "//") || strings.Contains(value, "@{") || strings.Contains(value, "\\") ||
 		strings.HasSuffix(value, ".lock") {
 		return fmt.Errorf("invalid repository branch %q", value)
+	}
+	for _, component := range strings.Split(value, "/") {
+		if component == "" || strings.HasPrefix(component, ".") || strings.HasSuffix(component, ".lock") {
+			return fmt.Errorf("invalid repository branch %q", value)
+		}
 	}
 	for _, r := range value {
 		if r <= ' ' || r == 0x7f || strings.ContainsRune("~^:?*[", r) {

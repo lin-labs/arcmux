@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -103,7 +104,7 @@ func TestManifestReplayAndConflict(t *testing.T) {
 	if err != nil || !replay || second.Revision != first.Revision || second.Digest != first.Digest {
 		t.Fatalf("source replay record=%+v replay=%v err=%v", second, replay, err)
 	}
-	manifest.Goal.NextStep = "A conflicting next step."
+	manifest.Goal.Text = "A conflicting next goal."
 	if _, _, err := store.QueueSource(manifest); !errors.Is(err, ErrManifestConflict) {
 		t.Fatalf("source conflict error = %v", err)
 	}
@@ -172,12 +173,12 @@ func TestSourceTransitionsUseCASAndPreserveManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	accepting, err := store.TransitionSource(queued.Manifest.HandoffID, prepared.Revision, SourceAcceptingRemote, Transition{At: start.Add(3 * time.Second)})
+	launching, err := store.TransitionSource(queued.Manifest.HandoffID, prepared.Revision, SourceLaunchingRemote, Transition{At: start.Add(3 * time.Second)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	locator := testTargetLocator()
-	accepted, err := store.TransitionSource(queued.Manifest.HandoffID, accepting.Revision, SourceAccepted, Transition{At: start.Add(4 * time.Second), TargetLocator: &locator})
+	accepted, err := store.TransitionSource(queued.Manifest.HandoffID, launching.Revision, SourceAccepted, Transition{At: start.Add(4 * time.Second), TargetLocator: &locator})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,8 +218,101 @@ func TestTargetTransitionsLaunchToAccepted(t *testing.T) {
 	if accepted.TargetLocator == nil || accepted.TargetLocator.SessionID != locator.SessionID {
 		t.Fatalf("target locator was not preserved: %+v", accepted)
 	}
+	if accepted.TargetLocator.ProfileScope != "root" || accepted.Manifest.Target.Profile != "codex" {
+		t.Fatalf("session scope was incorrectly coupled to requested agent profile: %+v", accepted)
+	}
 	if _, err := store.TransitionTarget(received.Manifest.HandoffID, accepted.Revision, TargetLaunching, Transition{At: start.Add(5 * time.Second)}); !errors.Is(err, ErrIllegalTransition) {
 		t.Fatalf("accepted state was not terminal: %v", err)
+	}
+}
+
+func TestTargetLocatorLifecycleIsStateBound(t *testing.T) {
+	store, _ := openTestStore(t)
+	start := time.Date(2026, 7, 15, 1, 30, 0, 0, time.UTC)
+	store.now = func() time.Time { return start }
+
+	source, _, err := store.QueueSource(testManifest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	locator := testTargetLocator()
+	failure := Failure{Code: FailureInternal, Message: "stopped", At: start.Add(time.Second)}
+	if _, err := store.TransitionSource(source.Manifest.HandoffID, source.Revision, SourceFailed, Transition{
+		At: start.Add(time.Second), Failure: &failure, TargetLocator: &locator,
+	}); err == nil {
+		t.Fatal("source failure accepted a target locator")
+	}
+	unchanged, err := store.GetSource(source.Manifest.HandoffID)
+	if err != nil || unchanged.State != SourceQueued || unchanged.TargetLocator != nil {
+		t.Fatalf("rejected source transition mutated record: %+v err=%v", unchanged, err)
+	}
+
+	target, _, err := store.ReceiveTarget(testManifest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	validating, _ := store.TransitionTarget(target.Manifest.HandoffID, target.Revision, TargetValidating, Transition{At: start.Add(time.Second)})
+	prepared, _ := store.TransitionTarget(target.Manifest.HandoffID, validating.Revision, TargetPrepared, Transition{At: start.Add(2 * time.Second)})
+	launching, err := store.TransitionTarget(target.Manifest.HandoffID, prepared.Revision, TargetLaunching, Transition{
+		At: start.Add(3 * time.Second), TargetLocator: &locator,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	retryAt := start.Add(time.Minute)
+	retryFailure := Failure{Code: FailureUnavailable, Message: "launch interrupted", Retryable: true, At: start.Add(4 * time.Second)}
+	if _, err := store.TransitionTarget(target.Manifest.HandoffID, launching.Revision, TargetWaitingAssets, Transition{
+		At: start.Add(4 * time.Second), NextRetry: &retryAt, Failure: &retryFailure, TargetLocator: &locator,
+	}); err == nil {
+		t.Fatal("retry transition accepted a supplied target locator")
+	}
+	waiting, err := store.TransitionTarget(target.Manifest.HandoffID, launching.Revision, TargetWaitingAssets, Transition{
+		At: start.Add(4 * time.Second), NextRetry: &retryAt, Failure: &retryFailure,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if waiting.TargetLocator != nil {
+		t.Fatalf("retry retained target locator: %+v", waiting.TargetLocator)
+	}
+	validating, _ = store.TransitionTarget(target.Manifest.HandoffID, waiting.Revision, TargetValidating, Transition{At: retryAt})
+	prepared, _ = store.TransitionTarget(target.Manifest.HandoffID, validating.Revision, TargetPrepared, Transition{At: retryAt.Add(time.Second)})
+	launching, _ = store.TransitionTarget(target.Manifest.HandoffID, prepared.Revision, TargetLaunching, Transition{
+		At: retryAt.Add(2 * time.Second), TargetLocator: &locator,
+	})
+	rejectedFailure := Failure{Code: FailureLaunch, Message: "launch rejected", At: retryAt.Add(3 * time.Second)}
+	if _, err := store.TransitionTarget(target.Manifest.HandoffID, launching.Revision, TargetRejected, Transition{
+		At: retryAt.Add(3 * time.Second), Failure: &rejectedFailure, TargetLocator: &locator,
+	}); err == nil {
+		t.Fatal("rejection transition accepted a supplied target locator")
+	}
+	rejected, err := store.TransitionTarget(target.Manifest.HandoffID, launching.Revision, TargetRejected, Transition{
+		At: retryAt.Add(3 * time.Second), Failure: &rejectedFailure,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rejected.TargetLocator != nil {
+		t.Fatalf("rejection retained target locator: %+v", rejected.TargetLocator)
+	}
+}
+
+func TestTargetLocatorRejectsInvalidScopeAndWrongDevice(t *testing.T) {
+	for _, locator := range []TargetLocator{
+		{DeviceID: "devbox", ProfileScope: "codex", SessionID: "target-session"},
+		{DeviceID: "labs", ProfileScope: "root", SessionID: "target-session"},
+	} {
+		store, _ := openTestStore(t)
+		start := time.Date(2026, 7, 15, 1, 45, 0, 0, time.UTC)
+		store.now = func() time.Time { return start }
+		received, _, _ := store.ReceiveTarget(testManifest())
+		validating, _ := store.TransitionTarget(received.Manifest.HandoffID, received.Revision, TargetValidating, Transition{At: start.Add(time.Second)})
+		prepared, _ := store.TransitionTarget(received.Manifest.HandoffID, validating.Revision, TargetPrepared, Transition{At: start.Add(2 * time.Second)})
+		if _, err := store.TransitionTarget(received.Manifest.HandoffID, prepared.Revision, TargetLaunching, Transition{
+			At: start.Add(3 * time.Second), TargetLocator: &locator,
+		}); err == nil {
+			t.Fatalf("invalid locator accepted: %+v", locator)
+		}
 	}
 }
 
@@ -324,6 +418,192 @@ func TestListRecordsIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestRunnableSourceAfterRestart(t *testing.T) {
+	store, root := openTestStore(t)
+	start := time.Date(2026, 7, 15, 4, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return start }
+	dueAt := start.Add(time.Hour)
+	for _, state := range []SourceState{
+		SourceQueued, SourcePreparingRemote, SourceRemotePrepared, SourceLaunchingRemote,
+		SourceAccepted, SourceRetryWait, SourceFailed,
+	} {
+		id := "source-" + string(state)
+		retryAt := dueAt.Add(-time.Minute)
+		createSourceInState(t, store, id, state, start, retryAt)
+	}
+	createSourceInState(t, store, "source-retry-future", SourceRetryWait, start, dueAt.Add(time.Minute))
+
+	reopened, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := reopened.RunnableSource(dueAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"source-launching_remote", "source-preparing_remote", "source-queued", "source-retry_wait"}
+	if got := sourceIDs(records); !reflect.DeepEqual(got, want) {
+		t.Fatalf("runnable source ids = %v, want %v", got, want)
+	}
+}
+
+func TestRecoverableTargetAfterRestart(t *testing.T) {
+	store, root := openTestStore(t)
+	start := time.Date(2026, 7, 15, 5, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return start }
+	dueAt := start.Add(time.Hour)
+	for _, state := range []TargetState{
+		TargetReceived, TargetValidating, TargetPrepared, TargetLaunching,
+		TargetAccepted, TargetWaitingAssets, TargetRejected,
+	} {
+		id := "target-" + string(state)
+		retryAt := dueAt.Add(-time.Minute)
+		createTargetInState(t, store, id, state, start, retryAt)
+	}
+	createTargetInState(t, store, "target-waiting-future", TargetWaitingAssets, start, dueAt.Add(time.Minute))
+
+	reopened, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := reopened.RecoverableTarget(dueAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"target-launching", "target-received", "target-validating", "target-waiting_assets"}
+	if got := targetIDs(records); !reflect.DeepEqual(got, want) {
+		t.Fatalf("recoverable target ids = %v, want %v", got, want)
+	}
+}
+
+func createSourceInState(t *testing.T, store *Store, id string, state SourceState, start, retryAt time.Time) SourceRecord {
+	t.Helper()
+	manifest := testManifest()
+	manifest.HandoffID = id
+	record, _, err := store.QueueSource(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == SourceQueued {
+		return record
+	}
+	if state == SourceFailed {
+		failure := Failure{Code: FailureInternal, Message: "failed", At: start.Add(time.Second)}
+		record, err = store.TransitionSource(id, record.Revision, state, Transition{At: start.Add(time.Second), Failure: &failure})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return record
+	}
+	record, err = store.TransitionSource(id, record.Revision, SourcePreparingRemote, Transition{At: start.Add(time.Second)})
+	if err != nil || state == SourcePreparingRemote {
+		if err != nil {
+			t.Fatal(err)
+		}
+		return record
+	}
+	if state == SourceRetryWait {
+		failure := Failure{Code: FailureUnavailable, Message: "offline", Retryable: true, At: start.Add(2 * time.Second)}
+		record, err = store.TransitionSource(id, record.Revision, state, Transition{At: start.Add(2 * time.Second), NextRetry: &retryAt, Failure: &failure})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return record
+	}
+	record, err = store.TransitionSource(id, record.Revision, SourceRemotePrepared, Transition{At: start.Add(2 * time.Second)})
+	if err != nil || state == SourceRemotePrepared {
+		if err != nil {
+			t.Fatal(err)
+		}
+		return record
+	}
+	record, err = store.TransitionSource(id, record.Revision, SourceLaunchingRemote, Transition{At: start.Add(3 * time.Second)})
+	if err != nil || state == SourceLaunchingRemote {
+		if err != nil {
+			t.Fatal(err)
+		}
+		return record
+	}
+	locator := testTargetLocator()
+	record, err = store.TransitionSource(id, record.Revision, SourceAccepted, Transition{At: start.Add(4 * time.Second), TargetLocator: &locator})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return record
+}
+
+func createTargetInState(t *testing.T, store *Store, id string, state TargetState, start, retryAt time.Time) TargetRecord {
+	t.Helper()
+	manifest := testManifest()
+	manifest.HandoffID = id
+	record, _, err := store.ReceiveTarget(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == TargetReceived {
+		return record
+	}
+	if state == TargetRejected {
+		failure := Failure{Code: FailureInternal, Message: "rejected", At: start.Add(time.Second)}
+		record, err = store.TransitionTarget(id, record.Revision, state, Transition{At: start.Add(time.Second), Failure: &failure})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return record
+	}
+	record, err = store.TransitionTarget(id, record.Revision, TargetValidating, Transition{At: start.Add(time.Second)})
+	if err != nil || state == TargetValidating {
+		if err != nil {
+			t.Fatal(err)
+		}
+		return record
+	}
+	if state == TargetWaitingAssets {
+		failure := Failure{Code: FailureMissingAsset, Message: "waiting", Retryable: true, At: start.Add(2 * time.Second)}
+		record, err = store.TransitionTarget(id, record.Revision, state, Transition{At: start.Add(2 * time.Second), NextRetry: &retryAt, Failure: &failure})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return record
+	}
+	record, err = store.TransitionTarget(id, record.Revision, TargetPrepared, Transition{At: start.Add(2 * time.Second)})
+	if err != nil || state == TargetPrepared {
+		if err != nil {
+			t.Fatal(err)
+		}
+		return record
+	}
+	record, err = store.TransitionTarget(id, record.Revision, TargetLaunching, Transition{At: start.Add(3 * time.Second)})
+	if err != nil || state == TargetLaunching {
+		if err != nil {
+			t.Fatal(err)
+		}
+		return record
+	}
+	locator := testTargetLocator()
+	record, err = store.TransitionTarget(id, record.Revision, TargetAccepted, Transition{At: start.Add(4 * time.Second), TargetLocator: &locator})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return record
+}
+
+func sourceIDs(records []SourceRecord) []string {
+	ids := make([]string, len(records))
+	for i, record := range records {
+		ids[i] = record.Manifest.HandoffID
+	}
+	return ids
+}
+
+func targetIDs(records []TargetRecord) []string {
+	ids := make([]string, len(records))
+	for i, record := range records {
+		ids[i] = record.Manifest.HandoffID
+	}
+	return ids
+}
+
 func testTargetLocator() TargetLocator {
-	return TargetLocator{DeviceID: "devbox", Profile: "codex", SessionID: "target-session-1"}
+	return TargetLocator{DeviceID: "devbox", ProfileScope: "root", SessionID: "target-session-1"}
 }

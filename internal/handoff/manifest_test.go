@@ -25,7 +25,7 @@ func testManifest() Manifest {
 		Target:      TargetAgent{DeviceID: "devbox", Profile: "codex"},
 		Goal: GoalSummary{
 			Text: "Continue the arcmux handoff implementation.", Provenance: "explicit_operator",
-			SuccessVerification: "Focused tests pass.", NextStep: "Review the prepared branch.", UpdatedAt: now,
+			UpdatedAt: now,
 		},
 		History: HistoryRef{
 			ArtifactID: "history-1", Basename: "2026-07-14-arcmux.md", SHA256: historyDigest,
@@ -105,7 +105,7 @@ func TestManifestRejectsPathCredentialAndUnsafeRepository(t *testing.T) {
 	}{
 		{"history path", func(m *Manifest) { m.History.Basename = "../history.md" }},
 		{"credential in goal", func(m *Manifest) { m.Goal.Text = "OPENAI_API_KEY=sk-abcdefghijklmnop" }},
-		{"control in next step", func(m *Manifest) { m.Goal.NextStep = "launch\nnow" }},
+		{"control in goal", func(m *Manifest) { m.Goal.Text = "launch\nnow" }},
 		{"repository traversal", func(m *Manifest) { m.Repository.RepoSlug = "lin-labs/../secret" }},
 		{"dirty remote branch", func(m *Manifest) { m.Repository.Cleanliness = RepositoryDirty }},
 		{"patch on remote branch", func(m *Manifest) { m.Repository.Patch = testPatch() }},
@@ -130,6 +130,7 @@ func TestStoredPatchTransferRequiresBoundedPatch(t *testing.T) {
 		t.Fatal("stored_patch without patch accepted")
 	}
 	manifest.Repository.Patch = testPatch()
+	manifest.Repository.TreeDigest = manifest.Repository.Patch.ResultTree
 	if err := manifest.Validate(); err != nil {
 		t.Fatalf("valid stored patch rejected: %v", err)
 	}
@@ -142,13 +143,73 @@ func TestStoredPatchTransferRequiresBoundedPatch(t *testing.T) {
 func TestValidationEvidenceStateShape(t *testing.T) {
 	manifest := testManifest()
 	completed := manifest.CreatedAt.Add(-time.Minute)
-	manifest.Validation = ValidationEvidence{State: ValidationPassed, Revision: "test-run-7", CompletedAt: &completed}
+	manifest.Validation = ValidationEvidence{State: ValidationPassed, RepositoryRevision: manifest.Repository.SourceHead, CompletedAt: &completed}
 	if err := manifest.Validate(); err != nil {
 		t.Fatalf("valid completed evidence rejected: %v", err)
 	}
+	manifest.Validation.RepositoryRevision = strings.Repeat("e", 40)
+	if err := manifest.Validate(); err == nil {
+		t.Fatal("validation evidence for a different repository revision accepted")
+	}
+	manifest.Validation.RepositoryRevision = manifest.Repository.SourceHead
 	manifest.Validation.CompletedAt = nil
 	if err := manifest.Validate(); err == nil {
 		t.Fatal("completed evidence without timestamp accepted")
+	}
+}
+
+func TestStoredPatchValidationBindsResultTree(t *testing.T) {
+	manifest := testManifest()
+	manifest.Repository.Transfer = TransferStoredPatch
+	manifest.Repository.Cleanliness = RepositoryDirty
+	manifest.Repository.Patch = testPatch()
+	manifest.Repository.TreeDigest = manifest.Repository.Patch.ResultTree
+	completed := manifest.CreatedAt.Add(-time.Minute)
+	manifest.Validation = ValidationEvidence{
+		State: ValidationPassed, RepositoryRevision: manifest.Repository.Patch.ResultTree, CompletedAt: &completed,
+	}
+	if err := manifest.Validate(); err != nil {
+		t.Fatalf("matching patch validation rejected: %v", err)
+	}
+	manifest.Repository.TreeDigest = strings.Repeat("d", 40)
+	if err := manifest.Validate(); err == nil {
+		t.Fatal("patch result tree different from repository tree accepted")
+	}
+}
+
+func TestGoalRejectsKnownCredentialForms(t *testing.T) {
+	credential := func(parts ...string) string { return strings.Join(parts, "") }
+	credentials := []string{
+		credential("ghp_", "abcdefghijklmnopqrstuvwxyz123456"),
+		credential("github_pat_", "abcdefghijklmnopqrstuvwxyz123456"),
+		credential("xoxb-", "1234567890-", "abcdefghijklmnop"),
+		credential("xai-", "abcdefghijklmnopqrstuvwxyz123456"),
+		credential("sk-", "abcdefghijklmnopqrstuvwxyz123456"),
+		credential("sk_", "abcdefghijklmnopqrstuvwxyz123456"),
+		"Bearer abcdefghijklmnopqrstuvwxyz",
+		credential("-----BEGIN OPENSSH ", "PRIVATE KEY-----"),
+		"OPENAI_API_KEY = abcdefghijklmnop",
+	}
+	for _, credential := range credentials {
+		t.Run(credential[:min(12, len(credential))], func(t *testing.T) {
+			manifest := testManifest()
+			manifest.Goal.Text = "Continue with " + credential
+			if err := manifest.Validate(); err == nil {
+				t.Fatalf("credential form accepted: %s", credential)
+			}
+		})
+	}
+}
+
+func TestGitRefRejectsOptionAndDotComponents(t *testing.T) {
+	for _, branch := range []string{"--upload-pack=evil", "-c", "foo/.bar", "foo/./bar", "foo/../bar"} {
+		t.Run(branch, func(t *testing.T) {
+			manifest := testManifest()
+			manifest.Repository.Branch = branch
+			if err := manifest.Validate(); err == nil {
+				t.Fatalf("unsafe git ref accepted: %s", branch)
+			}
+		})
 	}
 }
 

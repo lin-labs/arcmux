@@ -15,7 +15,7 @@ const (
 	SourceQueued          SourceState = "queued"
 	SourcePreparingRemote SourceState = "preparing_remote"
 	SourceRemotePrepared  SourceState = "remote_prepared"
-	SourceAcceptingRemote SourceState = "accepting_remote"
+	SourceLaunchingRemote SourceState = "launching_remote"
 	SourceAccepted        SourceState = "accepted"
 	SourceRetryWait       SourceState = "retry_wait"
 	SourceFailed          SourceState = "failed"
@@ -56,9 +56,9 @@ type Failure struct {
 }
 
 type TargetLocator struct {
-	DeviceID  string `json:"device_id"`
-	Profile   string `json:"profile"`
-	SessionID string `json:"session_id"`
+	DeviceID     string `json:"device_id"`
+	ProfileScope string `json:"profile_scope"`
+	SessionID    string `json:"session_id"`
 }
 
 type SourceRecord struct {
@@ -108,7 +108,7 @@ func (r SourceRecord) validate() error {
 		return fmt.Errorf("invalid source state %q", r.State)
 	}
 	return validateRecordFields(r.Manifest.Target, string(r.State), r.NextRetry, r.Failure, r.TargetLocator, r.Revision, r.Updated,
-		r.State == SourceRetryWait, r.State == SourceFailed, r.State == SourceAccepted)
+		r.State == SourceRetryWait, r.State == SourceFailed, r.State == SourceAccepted, r.State == SourceAccepted)
 }
 
 func (r TargetRecord) validate() error {
@@ -122,7 +122,8 @@ func (r TargetRecord) validate() error {
 		return fmt.Errorf("invalid target state %q", r.State)
 	}
 	return validateRecordFields(r.Manifest.Target, string(r.State), r.NextRetry, r.Failure, r.TargetLocator, r.Revision, r.Updated,
-		r.State == TargetWaitingAssets, r.State == TargetRejected, r.State == TargetAccepted)
+		r.State == TargetWaitingAssets, r.State == TargetRejected,
+		r.State == TargetLaunching || r.State == TargetAccepted, r.State == TargetAccepted)
 }
 
 func validateStoredManifest(manifest Manifest, digest string) error {
@@ -136,7 +137,7 @@ func validateStoredManifest(manifest Manifest, digest string) error {
 	return nil
 }
 
-func validateRecordFields(target TargetAgent, state string, nextRetry *time.Time, failure *Failure, locator *TargetLocator, revision uint64, updated time.Time, retry, terminalFailure, accepted bool) error {
+func validateRecordFields(target TargetAgent, state string, nextRetry *time.Time, failure *Failure, locator *TargetLocator, revision uint64, updated time.Time, retry, terminalFailure, locatorAllowed, locatorRequired bool) error {
 	if revision == 0 {
 		return errors.New("record revision must be positive")
 	}
@@ -167,15 +168,18 @@ func validateRecordFields(target TargetAgent, state string, nextRetry *time.Time
 			return errors.New("failure timestamp is after record update")
 		}
 	}
-	if accepted && locator == nil {
-		return errors.New("accepted state requires a target locator")
+	if locatorRequired && locator == nil {
+		return fmt.Errorf("state %s requires a target locator", state)
 	}
 	if locator != nil {
+		if !locatorAllowed {
+			return fmt.Errorf("state %s must not have a target locator", state)
+		}
 		if err := locator.validate(); err != nil {
 			return err
 		}
-		if locator.DeviceID != target.DeviceID || locator.Profile != target.Profile {
-			return errors.New("target locator does not match manifest target")
+		if locator.DeviceID != target.DeviceID {
+			return errors.New("target locator device does not match manifest target")
 		}
 	}
 	return nil
@@ -200,15 +204,15 @@ func (l TargetLocator) validate() error {
 	if err := validateID("target locator device_id", l.DeviceID); err != nil {
 		return err
 	}
-	if err := validateID("target locator profile", l.Profile); err != nil {
-		return err
+	if !profileScope.MatchString(l.ProfileScope) {
+		return fmt.Errorf("invalid target locator profile_scope %q", l.ProfileScope)
 	}
 	return validateID("target locator session_id", l.SessionID)
 }
 
 func validSourceState(state SourceState) bool {
 	switch state {
-	case SourceQueued, SourcePreparingRemote, SourceRemotePrepared, SourceAcceptingRemote, SourceAccepted, SourceRetryWait, SourceFailed:
+	case SourceQueued, SourcePreparingRemote, SourceRemotePrepared, SourceLaunchingRemote, SourceAccepted, SourceRetryWait, SourceFailed:
 		return true
 	default:
 		return false
@@ -231,8 +235,8 @@ func legalSourceTransition(from, to SourceState) bool {
 	case SourcePreparingRemote:
 		return to == SourceRemotePrepared || to == SourceRetryWait || to == SourceFailed
 	case SourceRemotePrepared:
-		return to == SourceAcceptingRemote || to == SourceRetryWait || to == SourceFailed
-	case SourceAcceptingRemote:
+		return to == SourceLaunchingRemote || to == SourceRetryWait || to == SourceFailed
+	case SourceLaunchingRemote:
 		return to == SourceAccepted || to == SourceRetryWait || to == SourceFailed
 	case SourceRetryWait:
 		return to == SourcePreparingRemote || to == SourceFailed

@@ -45,7 +45,7 @@ func Open(root string) (*Store, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := ensurePrivateDir(store.root, dir); err != nil {
+		if err := ensureHandoffPrivateDir(store.root, dir); err != nil {
 			return nil, err
 		}
 	}
@@ -226,6 +226,55 @@ func (s *Store) DueTarget(at time.Time) ([]TargetRecord, error) {
 	return out, nil
 }
 
+// RunnableSource enumerates source work that may resume after process restart.
+// RemotePrepared is intentionally absent: launch authorization must be
+// explicit and must not be inferred from a daemon restart.
+func (s *Store) RunnableSource(at time.Time) ([]SourceRecord, error) {
+	if at.IsZero() {
+		return nil, errors.New("runnable time is required")
+	}
+	records, err := s.ListSource()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SourceRecord, 0)
+	for _, record := range records {
+		switch record.State {
+		case SourceQueued, SourcePreparingRemote, SourceLaunchingRemote:
+			out = append(out, record)
+		case SourceRetryWait:
+			if record.NextRetry != nil && !record.NextRetry.After(at) {
+				out = append(out, record)
+			}
+		}
+	}
+	return out, nil
+}
+
+// RecoverableTarget enumerates target work that may resume after process
+// restart. Prepared is intentionally absent until an explicit launch grant.
+func (s *Store) RecoverableTarget(at time.Time) ([]TargetRecord, error) {
+	if at.IsZero() {
+		return nil, errors.New("recovery time is required")
+	}
+	records, err := s.ListTarget()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]TargetRecord, 0)
+	for _, record := range records {
+		switch record.State {
+		case TargetReceived, TargetValidating, TargetLaunching:
+			out = append(out, record)
+		case TargetWaitingAssets:
+			if record.NextRetry != nil && !record.NextRetry.After(at) {
+				out = append(out, record)
+			}
+		}
+	}
+	return out, nil
+}
+
 func (s *Store) TransitionSource(id string, expectedRevision uint64, next SourceState, transition Transition) (SourceRecord, error) {
 	if !validSourceState(next) {
 		return SourceRecord{}, fmt.Errorf("invalid source state %q", next)
@@ -252,7 +301,10 @@ func (s *Store) TransitionSource(id string, expectedRevision uint64, next Source
 	record.State = next
 	record.Revision++
 	record.Updated = at
-	applyTransition(&record.NextRetry, &record.Failure, &record.TargetLocator, transition, next == SourceRetryWait, next == SourceFailed, next == SourceAccepted)
+	if err := applyTransition(&record.NextRetry, &record.Failure, &record.TargetLocator, transition,
+		next == SourceRetryWait, next == SourceFailed, next == SourceAccepted); err != nil {
+		return SourceRecord{}, err
+	}
 	if next == SourcePreparingRemote {
 		record.Attempts++
 	}
@@ -292,7 +344,10 @@ func (s *Store) TransitionTarget(id string, expectedRevision uint64, next Target
 	record.State = next
 	record.Revision++
 	record.Updated = at
-	applyTransition(&record.NextRetry, &record.Failure, &record.TargetLocator, transition, next == TargetWaitingAssets, next == TargetRejected, next == TargetAccepted)
+	if err := applyTransition(&record.NextRetry, &record.Failure, &record.TargetLocator, transition,
+		next == TargetWaitingAssets, next == TargetRejected, next == TargetLaunching || next == TargetAccepted); err != nil {
+		return TargetRecord{}, err
+	}
 	if next == TargetValidating {
 		record.Attempts++
 	}
@@ -306,7 +361,7 @@ func (s *Store) TransitionTarget(id string, expectedRevision uint64, next Target
 	return cloneTargetRecord(record), nil
 }
 
-func applyTransition(nextRetry **time.Time, failure **Failure, locator **TargetLocator, transition Transition, retry, terminalFailure, accepted bool) {
+func applyTransition(nextRetry **time.Time, failure **Failure, locator **TargetLocator, transition Transition, retry, terminalFailure, locatorAllowed bool) error {
 	*nextRetry = nil
 	*failure = nil
 	if retry {
@@ -315,13 +370,15 @@ func applyTransition(nextRetry **time.Time, failure **Failure, locator **TargetL
 	} else if terminalFailure {
 		*failure = cloneFailure(transition.Failure)
 	}
-	if transition.TargetLocator != nil {
+	if transition.TargetLocator != nil && !locatorAllowed {
+		return errors.New("target locator is not allowed in the next state")
+	}
+	if !locatorAllowed {
+		*locator = nil
+	} else if transition.TargetLocator != nil {
 		*locator = cloneLocator(transition.TargetLocator)
 	}
-	if accepted && transition.TargetLocator == nil {
-		// Preserve a locator learned during an earlier prepared/launching state.
-		return
-	}
+	return nil
 }
 
 func (s *Store) getSourceLocked(id string) (SourceRecord, error) {
@@ -436,7 +493,7 @@ func writeJSONFile(root, file string, value any) error {
 	}
 	data = append(data, '\n')
 	dir := filepath.Dir(file)
-	if err := ensurePrivateDir(root, dir); err != nil {
+	if err := ensureHandoffPrivateDir(root, dir); err != nil {
 		return err
 	}
 	if info, err := os.Lstat(file); err == nil {
@@ -522,7 +579,7 @@ func ensurePrivateRoot(root string) error {
 	return os.Chmod(root, 0o700)
 }
 
-func ensurePrivateDir(root, dir string) error {
+func ensureHandoffPrivateDir(root, dir string) error {
 	rel, err := filepath.Rel(root, dir)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return errors.New("handoff state directory escapes root")
