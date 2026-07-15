@@ -124,6 +124,26 @@ func TestManifestReplayAndConflict(t *testing.T) {
 	}
 }
 
+func TestQueueSourcePreservesPresentEmptyArtifacts(t *testing.T) {
+	store, _ := openTestStore(t)
+	manifest := testManifest()
+	manifest.Artifacts = []ArtifactRef{}
+	queued, _, err := store.QueueSource(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queued.Manifest.Artifacts == nil || len(queued.Manifest.Artifacts) != 0 {
+		t.Fatalf("queued artifacts = %#v, want present empty slice", queued.Manifest.Artifacts)
+	}
+	loaded, err := store.GetSource(manifest.HandoffID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Manifest.Artifacts == nil || len(loaded.Manifest.Artifacts) != 0 {
+		t.Fatalf("loaded artifacts = %#v, want present empty slice", loaded.Manifest.Artifacts)
+	}
+}
+
 func TestStoredManifestIsImmutableFromCallerMutations(t *testing.T) {
 	store, _ := openTestStore(t)
 	manifest := testManifest()

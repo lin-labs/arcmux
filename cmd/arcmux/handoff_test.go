@@ -1,0 +1,208 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+func TestReadHandoffGoalFromStdinAndNoFollowFile(t *testing.T) {
+	goal, err := readHandoffGoal("-", strings.NewReader("  continue from stdin  \n"))
+	if err != nil || goal != "continue from stdin" {
+		t.Fatalf("stdin goal=%q err=%v", goal, err)
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "goal.txt")
+	if err := os.WriteFile(path, []byte("original safe goal"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if goal, err := readHandoffGoal(path, strings.NewReader("")); err != nil || goal != "original safe goal" {
+		t.Fatalf("file goal=%q err=%v", goal, err)
+	}
+
+	symlink := filepath.Join(dir, "goal-link.txt")
+	if err := os.Symlink(path, symlink); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readHandoffGoal(symlink, strings.NewReader("")); err == nil {
+		t.Fatal("symlink goal file accepted")
+	}
+
+	replacement := filepath.Join(dir, "replacement.txt")
+	if err := os.WriteFile(replacement, []byte("API_KEY=sk_replacementsecret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	data, err := readHandoffGoalFile(path, func() {
+		if err := os.Rename(replacement, path); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err != nil || string(data) != "original safe goal" {
+		t.Fatalf("path swap changed opened content=%q err=%v", data, err)
+	}
+}
+
+func TestHandoffPrepareRoutesGoalFileAndRejectsInlineGoal(t *testing.T) {
+	var captured handoffPrepareInput
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/mesh/handoffs" {
+			t.Fatalf("request %s %s", r.Method, r.URL.RequestURI())
+		}
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte(`{"handoff_id":"handoff-1","state":"remote_prepared"}` + "\n"))
+	}))
+	defer server.Close()
+	cfg, _ := meshDataTestConfig(t, server.URL)
+	var out bytes.Buffer
+	err := cmdHandoff([]string{
+		"prepare", "devbox", "root", "session-1", "--project", "demo", "--agent", "codex",
+		"--goal-file", "-", "--history", "history.md", "--conversation", "conversation-1", "--config", cfg,
+	}, strings.NewReader("Continue the exact branch.\n"), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if captured.Goal != "Continue the exact branch." || captured.TargetPeer != "devbox" || captured.ProfileScope != "root" || captured.SessionID != "session-1" {
+		t.Fatalf("captured request = %#v", captured)
+	}
+	if !strings.Contains(out.String(), "remote_prepared") {
+		t.Fatalf("output=%s", out.String())
+	}
+	if err := cmdHandoff([]string{
+		"prepare", "devbox", "root", "session-1", "--project", "demo", "--agent", "codex", "--goal", "shell history leak", "--config", cfg,
+	}, strings.NewReader(""), &bytes.Buffer{}); err == nil {
+		t.Fatal("inline --goal was accepted")
+	}
+}
+
+func TestHandoffPrepareWaitPollsWithoutImplicitRetry(t *testing.T) {
+	var mu sync.Mutex
+	requests := make([]string, 0)
+	gets := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests = append(requests, r.Method+" "+r.URL.RequestURI())
+		mu.Unlock()
+		if r.Method == http.MethodPost {
+			_, _ = w.Write([]byte(`{"handoff_id":"handoff-1","state":"retry_wait"}` + "\n"))
+			return
+		}
+		gets++
+		state := "retry_wait"
+		if gets >= 2 {
+			state = "remote_prepared"
+		}
+		_, _ = w.Write([]byte(`{"handoff_id":"handoff-1","state":"` + state + `"}` + "\n"))
+	}))
+	defer server.Close()
+	cfg, _ := meshDataTestConfig(t, server.URL)
+	var out bytes.Buffer
+	err := cmdHandoff([]string{
+		"prepare", "devbox", "root", "session-1", "--project", "demo", "--agent", "codex",
+		"--goal-file", "-", "--wait", "2s", "--config", cfg,
+	}, strings.NewReader("Continue after runtime retry."), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "remote_prepared") {
+		t.Fatalf("wait output=%s", out.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, request := range requests {
+		if strings.Contains(request, "/retry") {
+			t.Fatalf("--wait implicitly retried: %v", requests)
+		}
+	}
+}
+
+func TestHandoffWaitDoesNotAdvanceOfflineRetryWait(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/retry") {
+			t.Fatal("wait called explicit retry endpoint")
+		}
+		_, _ = w.Write([]byte(`{"handoff_id":"handoff-offline","state":"retry_wait"}` + "\n"))
+	}))
+	defer server.Close()
+	cfg, _ := meshDataTestConfig(t, server.URL)
+	err := cmdHandoff([]string{
+		"prepare", "devbox", "root", "session-1", "--project", "demo", "--agent", "codex",
+		"--goal-file", "-", "--wait", "20ms", "--config", cfg,
+	}, strings.NewReader("Wait for reconnect."), &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("offline wait err=%v", err)
+	}
+}
+
+func TestHandoffListShowRetryAndMainRouting(t *testing.T) {
+	var mu sync.Mutex
+	requests := make([]string, 0, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests = append(requests, r.Method+" "+r.URL.RequestURI())
+		mu.Unlock()
+		_, _ = w.Write([]byte(`{"ok":true}` + "\n"))
+	}))
+	defer server.Close()
+	cfg, _ := meshDataTestConfig(t, server.URL)
+	if err := cmdHandoff([]string{"list", "--config", cfg}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdHandoff([]string{"show", "handoff-1", "--config", cfg}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdHandoff([]string{"retry", "handoff-1", "--config", cfg}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	// run cannot inject stdout, but reaching the HTTP server proves the main
+	// dispatcher recognizes the handoff command.
+	if err := run([]string{"handoff", "list", "--config", cfg}); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{
+		"GET /mesh/handoffs", "GET /mesh/handoffs?id=handoff-1", "POST /mesh/handoffs/retry?id=handoff-1", "GET /mesh/handoffs",
+	}
+	if len(requests) != len(want) {
+		t.Fatalf("requests=%v", requests)
+	}
+	for i := range want {
+		if requests[i] != want[i] {
+			t.Fatalf("request[%d]=%q want %q", i, requests[i], want[i])
+		}
+	}
+}
+
+func TestHandoffGoalBound(t *testing.T) {
+	tooLarge := strings.Repeat("x", maxHandoffGoalFile+1)
+	if _, err := readHandoffGoal("-", strings.NewReader(tooLarge)); err == nil {
+		t.Fatal("oversized stdin goal accepted")
+	}
+	path := filepath.Join(t.TempDir(), "goal.txt")
+	if err := os.WriteFile(path, []byte(tooLarge), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readHandoffGoal(path, strings.NewReader("")); err == nil {
+		t.Fatal("oversized file goal accepted")
+	}
+}
+
+func TestHandoffPrepareWaitRejectsNegativeDuration(t *testing.T) {
+	err := cmdHandoff([]string{
+		"prepare", "devbox", "root", "session-1", "--project", "demo", "--agent", "codex",
+		"--goal-file", "-", "--wait", (-time.Second).String(),
+	}, strings.NewReader("goal"), &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "must not be negative") {
+		t.Fatalf("negative wait err=%v", err)
+	}
+}

@@ -50,6 +50,8 @@ func run(args []string) error {
 		return cmdArtifact(args[1:], os.Stdout)
 	case "surface":
 		return cmdSurface(args[1:], os.Stdout)
+	case "handoff":
+		return cmdHandoff(args[1:], os.Stdin, os.Stdout)
 	case "hook-env":
 		return cmdHookEnv(args[1:], os.Stdout)
 	case "hook":
@@ -139,6 +141,8 @@ Usage:
   arcmux artifact list [--kind kind]                      List local and synchronized artifact references
   arcmux surface bind <device> <scope> <session-id>       Bind this cmux surface to an exact remote session
   arcmux surface show|list|unbind                         Inspect or remove durable cmux bindings
+  arcmux handoff prepare <peer> <scope> <session> ...     Queue and materialize a remote handoff; never launch it
+  arcmux handoff list|show|retry                          Inspect or retry the prepare-only handoff outbox
   arcmux pulse --project <slug> [--interval 10s] [--once] Debug-only: pulse one project (the daemon does this for all projects)
   arcmux version                                          Print version
   arcmux help                                             Show this help

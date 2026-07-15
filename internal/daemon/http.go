@@ -23,13 +23,14 @@ import (
 
 // HTTPServer exposes a small HTTP API for managing sessions.
 type HTTPServer struct {
-	daemon    *Daemon
-	srv       *http.Server
-	authToken string
+	daemon        *Daemon
+	srv           *http.Server
+	authToken     string
+	handoffOutbox func() (*sourceHandoffOutbox, error)
 }
 
 func NewHTTPServer(d *Daemon, addr string) *HTTPServer {
-	h := &HTTPServer{daemon: d, authToken: d.cfg.Daemon.HTTPAuthToken}
+	h := &HTTPServer{daemon: d, authToken: d.cfg.Daemon.HTTPAuthToken, handoffOutbox: d.sourceHandoffOutbox}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/session/new", h.handleSessionNew)
 	mux.HandleFunc("/session/close", h.handleSessionClose)
@@ -55,6 +56,8 @@ func NewHTTPServer(d *Daemon, addr string) *HTTPServer {
 	mux.HandleFunc("/mesh/artifact", h.meshOperatorOnly(h.handleMeshArtifact))
 	mux.HandleFunc("/mesh/subscribe", h.meshOperatorOnly(h.handleMeshSubscribe))
 	mux.HandleFunc("/mesh/surface-bindings", h.meshOperatorOnly(h.handleMeshSurfaceBindings))
+	mux.HandleFunc("/mesh/handoffs", h.meshOperatorOnly(h.handleMeshHandoffs))
+	mux.HandleFunc("/mesh/handoffs/retry", h.meshOperatorOnly(h.handleMeshHandoffRetry))
 	h.srv = &http.Server{Addr: addr, Handler: otelhttp.NewHandler(h.withAuth(mux), "arcmux-http")}
 	return h
 }

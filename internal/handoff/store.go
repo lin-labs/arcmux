@@ -669,7 +669,7 @@ func verifyPrivateDir(root, dir string) error {
 
 func cloneManifest(manifest Manifest) Manifest {
 	clone := manifest
-	clone.Artifacts = append([]ArtifactRef(nil), manifest.Artifacts...)
+	clone.Artifacts = append([]ArtifactRef{}, manifest.Artifacts...)
 	for i := range clone.Artifacts {
 		if manifest.Artifacts[i].Repo != nil {
 			repo := *manifest.Artifacts[i].Repo
