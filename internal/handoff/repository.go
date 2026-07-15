@@ -112,25 +112,38 @@ func PrepareRepository(ctx context.Context, manifest Manifest, resolved project.
 				return RepositoryPreparation{}, err
 			}
 			if ownedIncomplete {
+				if err := verifyOwnedRegisteredCandidate(ctx, checkout, root, candidate); err != nil {
+					return RepositoryPreparation{}, err
+				}
 				if err := configureWorktreePush(ctx, checkout, candidate); err != nil {
 					return RepositoryPreparation{}, err
 				}
 			}
 			prepared, err := validateRepositoryReplay(ctx, checkout, root, candidate, localBranch, snapshot)
+			if err == nil {
+				if err := clearPreparationMarker(root, manifest.HandoffID, marker); err != nil {
+					return RepositoryPreparation{}, err
+				}
+				return prepared, nil
+			}
+			if !ownedIncomplete {
+				return RepositoryPreparation{}, err
+			}
+			recovered, recoveryErr := recoverOwnedRegisteredCandidate(ctx, checkout, root, candidate)
+			if recoveryErr != nil {
+				return RepositoryPreparation{}, recoveryErr
+			}
+			if !recovered {
+				return RepositoryPreparation{}, err
+			}
+		} else {
+			recovered, err := recoverOwnedPartialCandidate(root, candidate, manifest.HandoffID, marker)
 			if err != nil {
 				return RepositoryPreparation{}, err
 			}
-			if err := clearPreparationMarker(root, manifest.HandoffID, marker); err != nil {
-				return RepositoryPreparation{}, err
+			if !recovered {
+				return RepositoryPreparation{}, repositoryError(RepositoryErrorDeterministic, "existing path is not a registered worktree")
 			}
-			return prepared, nil
-		}
-		recovered, err := recoverOwnedPartialCandidate(root, candidate, manifest.HandoffID, marker)
-		if err != nil {
-			return RepositoryPreparation{}, err
-		}
-		if !recovered {
-			return RepositoryPreparation{}, repositoryError(RepositoryErrorDeterministic, "existing path is not a registered worktree")
 		}
 	}
 
@@ -144,7 +157,7 @@ func PrepareRepository(ctx context.Context, manifest Manifest, resolved project.
 		return RepositoryPreparation{}, repositoryError(RepositoryErrorRetryable, "fetched branch is not available")
 	}
 	if fetchedHead != snapshot.SourceHead {
-		return RepositoryPreparation{}, repositoryError(RepositoryErrorRetryable, "fetched branch has not reached the declared head")
+		return RepositoryPreparation{}, repositoryError(RepositoryErrorDeterministic, "fetched source branch conflicts with the declared head")
 	}
 	if err := validateRepositoryCommitClaims(ctx, checkout, fetchedHead, snapshot); err != nil {
 		return RepositoryPreparation{}, err
@@ -714,6 +727,51 @@ func recoverOwnedPartialCandidate(root, candidate, handoffID string, want prepar
 		return false, repositoryError(RepositoryErrorRetryable, "sync worktrees root failed")
 	}
 	return true, nil
+}
+
+func recoverOwnedRegisteredCandidate(ctx context.Context, checkout, root, candidate string) (bool, error) {
+	if err := verifyOwnedRegisteredCandidate(ctx, checkout, root, candidate); err != nil {
+		return false, err
+	}
+	registered, err := registeredWorktree(ctx, checkout, candidate)
+	if err != nil {
+		return false, err
+	}
+	if !registered {
+		return false, nil
+	}
+	if _, err := gitOutput(ctx, checkout, "worktree", "remove", "--force", candidate); err != nil {
+		return false, repositoryError(RepositoryErrorRetryable, "remove registered interrupted worktree failed")
+	}
+	if exists, err := candidateExists(candidate); err != nil {
+		return false, err
+	} else if exists {
+		return false, repositoryError(RepositoryErrorRetryable, "registered interrupted worktree remains after removal")
+	}
+	if registered, err := registeredWorktree(ctx, checkout, candidate); err != nil {
+		return false, err
+	} else if registered {
+		return false, repositoryError(RepositoryErrorRetryable, "interrupted worktree registration remains after removal")
+	}
+	if err := syncDirectory(root); err != nil {
+		return false, repositoryError(RepositoryErrorRetryable, "sync worktrees root failed")
+	}
+	return true, nil
+}
+
+func verifyOwnedRegisteredCandidate(ctx context.Context, checkout, root, candidate string) error {
+	if err := verifyOwnedRemovalTree(root, candidate); err != nil {
+		return err
+	}
+	sourceCommon, err := gitCommonDir(ctx, checkout)
+	if err != nil {
+		return repositoryError(RepositoryErrorDeterministic, "configured checkout is not a usable repository")
+	}
+	candidateCommon, err := gitCommonDir(ctx, candidate)
+	if err != nil || sourceCommon != candidateCommon {
+		return repositoryError(RepositoryErrorDeterministic, "registered interrupted worktree belongs to a different repository")
+	}
+	return nil
 }
 
 func verifyOwnedRemovalTree(root, candidate string) error {

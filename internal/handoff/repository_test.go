@@ -134,12 +134,50 @@ func TestPrepareRepositoryFetchesExactRemoteBranch(t *testing.T) {
 	}
 }
 
-func TestPrepareRepositoryWrongRemoteHeadIsRetryable(t *testing.T) {
+func TestPrepareRepositorySuccessfulFetchHeadMismatchIsDeterministic(t *testing.T) {
 	fixture := newRepositoryFixture(t)
 	manifest := fixture.manifest("wrong-head")
 	manifest.Repository.SourceHead = strings.Repeat("0", 40)
 	_, err := PrepareRepository(context.Background(), manifest, fixture.project())
-	requireRepositoryCode(t, err, RepositoryErrorRetryable)
+	requireRepositoryCode(t, err, RepositoryErrorDeterministic)
+}
+
+func TestPrepareRepositoryRejectsPermanentlyStaleRemoteBranch(t *testing.T) {
+	t.Run("advanced", func(t *testing.T) {
+		fixture := newRepositoryFixture(t)
+		manifest := fixture.manifest("remote-advanced")
+		if err := os.WriteFile(filepath.Join(fixture.seed, "advanced.txt"), []byte("advanced\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		testGit(t, fixture.seed, "add", "advanced.txt")
+		testGit(t, fixture.seed, "commit", "-m", "advance remote")
+		testGit(t, fixture.seed, "push", "origin", "main")
+		_, err := PrepareRepository(context.Background(), manifest, fixture.project())
+		requireRepositoryCode(t, err, RepositoryErrorDeterministic)
+	})
+	t.Run("force pushed divergence", func(t *testing.T) {
+		fixture := newRepositoryFixture(t)
+		manifest := fixture.manifest("remote-diverged")
+		unrelated := testGit(t, fixture.seed, "commit-tree", fixture.tree, "-m", "unrelated root")
+		testGit(t, fixture.seed, "push", "--force", "origin", unrelated+":refs/heads/main")
+		_, err := PrepareRepository(context.Background(), manifest, fixture.project())
+		requireRepositoryCode(t, err, RepositoryErrorDeterministic)
+	})
+	t.Run("remote is ancestor of declared head", func(t *testing.T) {
+		fixture := newRepositoryFixture(t)
+		if err := os.WriteFile(filepath.Join(fixture.checkout, "local-only.txt"), []byte("local only\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		testGit(t, fixture.checkout, "add", "local-only.txt")
+		testGit(t, fixture.checkout, "commit", "-m", "declared but not pushed")
+		declared := testGit(t, fixture.checkout, "rev-parse", "HEAD")
+		manifest := fixture.manifest("remote-behind")
+		manifest.Repository.SourceHead = declared
+		manifest.Repository.TreeDigest = testGit(t, fixture.checkout, "rev-parse", "HEAD^{tree}")
+		manifest.Repository.BaseCommit = fixture.head
+		_, err := PrepareRepository(context.Background(), manifest, fixture.project())
+		requireRepositoryCode(t, err, RepositoryErrorDeterministic)
+	})
 }
 
 func TestPrepareRepositoryRejectsTreeOrBaseMismatch(t *testing.T) {
@@ -425,6 +463,81 @@ func TestPrepareRepositoryRecoversOwnedInterruptedCandidate(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(candidate, "partial-file")); !os.IsNotExist(err) {
 		t.Fatalf("partial file survived recovery: %v", err)
+	}
+}
+
+func setupRegisteredNoCheckout(t *testing.T, fixture *repositoryFixture, manifest Manifest, markerMode string) (string, preparationMarker) {
+	t.Helper()
+	candidate := filepath.Join(fixture.worktrees, "handoff-"+manifest.HandoffID)
+	localBranch, err := chooseLocalBranch(context.Background(), fixture.checkout, candidate, manifest.HandoffID, manifest.Repository.Branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker, err := newPreparationMarker(context.Background(), fixture.checkout, manifest.HandoffID, localBranch, manifest.Repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testGit(t, fixture.checkout, "fetch", "origin", "refs/heads/main:refs/remotes/origin/main")
+	testGit(t, fixture.checkout, "branch", "--track", localBranch, "refs/remotes/origin/main")
+	switch markerMode {
+	case "correct":
+		if err := writePreparationMarker(fixture.worktrees, manifest.HandoffID, marker); err != nil {
+			t.Fatal(err)
+		}
+	case "wrong":
+		wrong := marker
+		wrong.Head = fixture.baseCommit
+		if err := writePreparationMarker(fixture.worktrees, manifest.HandoffID, wrong); err != nil {
+			t.Fatal(err)
+		}
+	case "none":
+	default:
+		t.Fatalf("unknown marker mode %q", markerMode)
+	}
+	testGit(t, fixture.checkout, "worktree", "add", "--no-checkout", candidate, localBranch)
+	return candidate, marker
+}
+
+func TestPrepareRepositoryRecoversMarkerOwnedRegisteredNoCheckout(t *testing.T) {
+	fixture := newRepositoryFixture(t)
+	manifest := fixture.manifest("registered-partial")
+	candidate, _ := setupRegisteredNoCheckout(t, fixture, manifest, "correct")
+	prepared, err := PrepareRepository(context.Background(), manifest, fixture.project())
+	if err != nil {
+		t.Fatalf("PrepareRepository recovery: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.WorktreePath != resolved || prepared.Head != fixture.head {
+		t.Fatalf("preparation = %#v", prepared)
+	}
+	if status := testGit(t, candidate, "status", "--porcelain"); status != "" {
+		t.Fatalf("recovered checkout dirty: %q", status)
+	}
+}
+
+func TestPrepareRepositoryPreservesRegisteredPartialWithoutExactMarker(t *testing.T) {
+	for _, markerMode := range []string{"wrong", "none"} {
+		t.Run(markerMode, func(t *testing.T) {
+			fixture := newRepositoryFixture(t)
+			manifest := fixture.manifest("registered-" + markerMode)
+			candidate, _ := setupRegisteredNoCheckout(t, fixture, manifest, markerMode)
+			_, err := PrepareRepository(context.Background(), manifest, fixture.project())
+			requireRepositoryCode(t, err, RepositoryErrorDeterministic)
+			if info, statErr := os.Stat(candidate); statErr != nil || !info.IsDir() {
+				t.Fatalf("foreign registered candidate was removed: %v", statErr)
+			}
+			resolvedCandidate, resolveErr := filepath.EvalSymlinks(candidate)
+			if resolveErr != nil {
+				t.Fatal(resolveErr)
+			}
+			registered, registrationErr := registeredWorktree(context.Background(), fixture.checkout, resolvedCandidate)
+			if registrationErr != nil || !registered {
+				t.Fatalf("foreign registration changed: registered=%v err=%v", registered, registrationErr)
+			}
+		})
 	}
 }
 
