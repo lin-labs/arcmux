@@ -2,6 +2,7 @@ package hooks
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,14 +26,16 @@ const (
 	OverallGoalSummarizerProvenance = "hook.overall_goal_summarizer.v1"
 )
 
+var ErrStaleOverallGoal = errors.New("overall-goal summary is stale")
+
 // CanonicalEvents lists the accepted --event values for `arcmux hook`.
 var CanonicalEvents = []string{
 	EventPromptSubmit, EventToolStart, EventToolEnd, EventTurnEnd, EventNotification,
 }
 
 // SessionState is the cached per-session view the hooks judge reads. It is
-// mutated only through ApplyEvent (single-writer `arcmux hook`) and seeded by
-// InitSessionState (daemon on session start).
+// mutated only through the locked hook writers and seeded by InitSessionState
+// when the daemon starts watching a session.
 type SessionState struct {
 	SessionID  string    `json:"session_id"`
 	Agent      string    `json:"agent"`
@@ -95,14 +98,13 @@ type TurnContract struct {
 // Empty fields mean "leave the current value unchanged" so hook callers can
 // refresh one dimension without erasing the others.
 type TurnContractUpdate struct {
-	Goal                  string
-	OverallGoal           string
-	OverallGoalProvenance string
-	LastUserMessage       string
-	VaultLink             string
-	SuccessVerification   string
-	Path                  string
-	Source                string
+	Goal                string
+	OverallGoal         string
+	LastUserMessage     string
+	VaultLink           string
+	SuccessVerification string
+	Path                string
+	Source              string
 }
 
 // SessionStatePath returns the live state file path for a session.
@@ -177,10 +179,9 @@ func ApplyEvent(stateDir, sessionID, agent, event, tool string, now time.Time) e
 	return ApplyEventWithContract(stateDir, sessionID, agent, event, tool, TurnContractUpdate{}, now)
 }
 
-// ApplyContractOnly updates just the turn-contract recording fields without
-// recording an event — no counters move, Working/TurnCount/last_event are
-// untouched. It is the write path for the background overall-goal summarizer,
-// which refreshes OverallGoal out-of-band after a turn has already ended.
+// ApplyContractOnly updates untrusted recording fields without recording an
+// event. In particular, an OverallGoal written here never gains summarizer
+// provenance. Background summaries must use ApplySummarizedOverallGoal.
 func ApplyContractOnly(stateDir, sessionID, agent string, contract TurnContractUpdate, now time.Time) error {
 	return mutateSessionState(stateDir, sessionID, func(st *SessionState) {
 		st.SessionID = sessionID
@@ -191,6 +192,42 @@ func ApplyContractOnly(stateDir, sessionID, agent string, contract TurnContractU
 			st.CreatedAt = now
 		}
 		applyTurnContractUpdate(st, contract, now)
+		st.UpdatedAt = now
+	})
+}
+
+// ApplySummarizedOverallGoal is the writer-owned summary path. The provenance
+// is fixed here (callers cannot assert it) and the write is conditional on the
+// exact turn snapshot used by the summarizer. A slow turn N summary therefore
+// cannot overwrite turn N+1.
+func ApplySummarizedOverallGoal(stateDir, sessionID, agent, overallGoal string, expectedTurnCount int, expectedLastTurnEndAt, now time.Time) error {
+	overallGoal = compactContractText(overallGoal)
+	if overallGoal == "" {
+		return errors.New("summarized overall goal is required")
+	}
+	if expectedTurnCount < 1 || expectedLastTurnEndAt.IsZero() {
+		return errors.New("summary turn snapshot is required")
+	}
+	return mutateSessionStateChecked(stateDir, sessionID, func(st *SessionState) error {
+		if st.TurnCount != expectedTurnCount || !st.LastTurnEndAt.Equal(expectedLastTurnEndAt) {
+			return ErrStaleOverallGoal
+		}
+		st.SessionID = sessionID
+		if agent != "" {
+			st.Agent = agent
+		}
+		if st.CreatedAt.IsZero() {
+			st.CreatedAt = now
+		}
+		if st.TurnContract == nil {
+			st.TurnContract = &TurnContract{}
+		}
+		st.TurnContract.OverallGoal = overallGoal
+		st.TurnContract.OverallGoalProvenance = OverallGoalSummarizerProvenance
+		st.TurnContract.OverallGoalUpdatedAt = now
+		st.TurnContract.UpdatedAt = now
+		st.UpdatedAt = now
+		return nil
 	})
 }
 
@@ -244,7 +281,6 @@ func ApplyEventWithContract(stateDir, sessionID, agent, event, tool string, cont
 func applyTurnContractUpdate(st *SessionState, update TurnContractUpdate, now time.Time) {
 	goal := compactContractText(update.Goal)
 	overall := compactContractText(update.OverallGoal)
-	overallProvenance := compactContractText(update.OverallGoalProvenance)
 	lastMsg := truncateLines(update.LastUserMessage, 3)
 	vault := compactContractText(update.VaultLink)
 	verification := compactContractText(update.SuccessVerification)
@@ -266,7 +302,7 @@ func applyTurnContractUpdate(st *SessionState, update TurnContractUpdate, now ti
 		st.TurnContract.OverallGoal = overall
 		// Provenance is replaced together with the field. An unproven update
 		// deliberately revokes earlier proof instead of inheriting it.
-		st.TurnContract.OverallGoalProvenance = overallProvenance
+		st.TurnContract.OverallGoalProvenance = ""
 		st.TurnContract.OverallGoalUpdatedAt = now
 	}
 	if lastMsg != "" {
@@ -364,6 +400,13 @@ func ArchiveSessionState(stateDir, sessionID string) error {
 // concurrent `arcmux hook` invocations; the write itself is atomic via
 // temp-file + rename so a reader never sees a half-written document.
 func mutateSessionState(stateDir, sessionID string, mutate func(*SessionState)) error {
+	return mutateSessionStateChecked(stateDir, sessionID, func(st *SessionState) error {
+		mutate(st)
+		return nil
+	})
+}
+
+func mutateSessionStateChecked(stateDir, sessionID string, mutate func(*SessionState) error) error {
 	if !sessionIDRe.MatchString(sessionID) {
 		return fmt.Errorf("invalid session id %q", sessionID)
 	}
@@ -389,7 +432,9 @@ func mutateSessionState(stateDir, sessionID string, mutate func(*SessionState)) 
 		return fmt.Errorf("read session state: %w", err)
 	}
 
-	mutate(st)
+	if err := mutate(st); err != nil {
+		return err
+	}
 
 	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {

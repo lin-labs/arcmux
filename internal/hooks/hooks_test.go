@@ -129,10 +129,11 @@ func TestInstaller_EnsureGenericHook_WithoutSession(t *testing.T) {
 	}
 }
 
-func TestGenericHookSummarizerStampsFieldLevelProvenance(t *testing.T) {
-	if !strings.Contains(genericHookScript,
-		"--overall-goal-provenance "+OverallGoalSummarizerProvenance) {
-		t.Fatal("generic hook summarizer does not stamp trusted overall-goal provenance")
+func TestGenericHookCannotStampTrustedOverallGoal(t *testing.T) {
+	for _, forbidden := range []string{"hook-summary", "--overall-goal-provenance"} {
+		if strings.Contains(genericHookScript, forbidden) {
+			t.Fatalf("generic hook exposes trusted summary writer %q", forbidden)
+		}
 	}
 }
 

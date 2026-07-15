@@ -207,7 +207,7 @@ func TestSurfaceBindUsesStableCmuxUUIDAndExplicitReplace(t *testing.T) {
 	}
 }
 
-func TestMeshOpenValidatesCachedLocatorAndBindsCallingSurface(t *testing.T) {
+func TestMeshBindAtomicallyValidatesCachedLocatorAndBindsCallingSurface(t *testing.T) {
 	now := time.Now().UTC()
 	projection := meshstate.RemoteSessionProjection{
 		SchemaVersion: meshstate.SchemaVersion,
@@ -223,17 +223,16 @@ func TestMeshOpenValidatesCachedLocatorAndBindsCallingSurface(t *testing.T) {
 	var received meshstate.SurfaceBinding
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests = append(requests, r.Method+" "+r.URL.RequestURI())
-		switch r.Method {
-		case http.MethodGet:
-			_ = json.NewEncoder(w).Encode(projection)
-		case http.MethodPut:
-			if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
-				t.Fatal(err)
-			}
-			_ = json.NewEncoder(w).Encode(received)
-		default:
-			w.WriteHeader(http.StatusMethodNotAllowed)
+		if r.Method != http.MethodPost || r.URL.Path != "/mesh/surface-bindings/validated" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
 		}
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Fatal(err)
+		}
+		_ = json.NewEncoder(w).Encode(meshstate.ResolvedSurfaceBinding{
+			Binding: received, Projection: &projection,
+			PeerFreshness: meshstate.FreshnessStale, EffectiveFreshness: meshstate.FreshnessStale,
+		})
 	}))
 	defer server.Close()
 	cfg, _ := meshDataTestConfig(t, server.URL)
@@ -241,16 +240,13 @@ func TestMeshOpenValidatesCachedLocatorAndBindsCallingSurface(t *testing.T) {
 	workspaceID := "E17AFC74-4444-4555-8666-ABCDEF123456"
 	var out bytes.Buffer
 	err := cmdMesh([]string{
-		"open", "devbox", "root", "s-123",
+		"bind", "devbox", "root", "s-123",
 		"--surface", surfaceID, "--workspace", workspaceID, "--config", cfg,
 	}, strings.NewReader(""), &out)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantRequests := []string{
-		"GET /mesh/session?peer=devbox&profile=root&session=s-123",
-		"PUT /mesh/surface-bindings",
-	}
+	wantRequests := []string{"POST /mesh/surface-bindings/validated"}
 	if len(requests) != len(wantRequests) {
 		t.Fatalf("requests=%v", requests)
 	}
@@ -260,10 +256,10 @@ func TestMeshOpenValidatesCachedLocatorAndBindsCallingSurface(t *testing.T) {
 		}
 	}
 	if received.SurfaceID != surfaceID || received.WorkspaceID != workspaceID ||
-		received.Source != "mesh-open" || received.LocalDeviceID != "ref" {
+		received.Source != "mesh-bind" || received.LocalDeviceID != "ref" {
 		t.Fatalf("binding=%+v", received)
 	}
-	var result meshOpenResult
+	var result meshBindResult
 	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +270,7 @@ func TestMeshOpenValidatesCachedLocatorAndBindsCallingSurface(t *testing.T) {
 	}
 }
 
-func TestMeshOpenRejectsGoneOrMismatchedCachedSessionBeforeBinding(t *testing.T) {
+func TestMeshBindRejectsGoneOrMismatchedAtomicResponse(t *testing.T) {
 	now := time.Now().UTC()
 	base := meshstate.RemoteSessionProjection{
 		SchemaVersion: meshstate.SchemaVersion,
@@ -296,17 +292,15 @@ func TestMeshOpenRejectsGoneOrMismatchedCachedSessionBeforeBinding(t *testing.T)
 		t.Run(test.name, func(t *testing.T) {
 			projection := base
 			test.edit(&projection)
-			putCalled := false
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method == http.MethodPut {
-					putCalled = true
-				}
-				_ = json.NewEncoder(w).Encode(projection)
+				var binding meshstate.SurfaceBinding
+				_ = json.NewDecoder(r.Body).Decode(&binding)
+				_ = json.NewEncoder(w).Encode(meshstate.ResolvedSurfaceBinding{Binding: binding, Projection: &projection})
 			}))
 			defer server.Close()
 			cfg, _ := meshDataTestConfig(t, server.URL)
 			err := cmdMesh([]string{
-				"open", "devbox", "root", "s-123",
+				"bind", "devbox", "root", "s-123",
 				"--surface", "643895FC-1111-4222-8333-123456789ABC",
 				"--workspace", "E17AFC74-4444-4555-8666-ABCDEF123456",
 				"--config", cfg,
@@ -314,17 +308,14 @@ func TestMeshOpenRejectsGoneOrMismatchedCachedSessionBeforeBinding(t *testing.T)
 			if err == nil {
 				t.Fatal("unsafe cached projection was accepted")
 			}
-			if putCalled {
-				t.Fatal("surface binding was written before cached locator validation")
-			}
 		})
 	}
 }
 
-func TestMeshOpenRequiresCompleteCmuxIdentity(t *testing.T) {
+func TestMeshBindRequiresCompleteCmuxIdentity(t *testing.T) {
 	t.Setenv("CMUX_SURFACE_ID", "643895FC-1111-4222-8333-123456789ABC")
 	t.Setenv("CMUX_WORKSPACE_ID", "")
-	if err := cmdMeshOpen([]string{"devbox", "root", "s-123"}, &bytes.Buffer{}); err == nil ||
+	if err := cmdMeshBind([]string{"devbox", "root", "s-123"}, &bytes.Buffer{}); err == nil ||
 		!strings.Contains(err.Error(), "both required") {
 		t.Fatalf("partial cmux identity error=%v", err)
 	}

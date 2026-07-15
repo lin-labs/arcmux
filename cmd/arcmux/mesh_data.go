@@ -57,7 +57,7 @@ func cmdMeshSession(args []string, stdout io.Writer) error {
 	return writeMeshJSON(cfg, http.MethodGet, path, nil, stdout)
 }
 
-type meshOpenResult struct {
+type meshBindResult struct {
 	SchemaVersion int                               `json:"schema_version"`
 	SurfaceID     string                            `json:"surface_id"`
 	WorkspaceID   string                            `json:"workspace_id"`
@@ -66,22 +66,20 @@ type meshOpenResult struct {
 	Session       meshstate.RemoteSessionProjection `json:"session"`
 }
 
-// cmdMeshOpen is the one-command metadata open path for a cmux surface. It
-// deliberately does not transport or expose a terminal/tmux handle. Instead,
-// it validates one exact cached remote locator and durably binds the calling
-// stable cmux surface UUID to it, so Mission Control can render the remote
-// session as natively as a local one. Repeating the same open is idempotent;
-// retargeting still requires --replace.
-func cmdMeshOpen(args []string, stdout io.Writer) error {
+// cmdMeshBind atomically validates one exact cached remote locator and binds
+// the calling stable cmux surface UUID to it. It intentionally makes no claim
+// to open or own the terminal transport; the explicit binding is what lets
+// Mission Control render a remotely attached surface natively.
+func cmdMeshBind(args []string, stdout io.Writer) error {
 	cfg, rest, err := meshConfig(args)
 	if err != nil {
 		return err
 	}
 	if len(rest) < 3 {
-		return errors.New("usage: arcmux mesh open <device> <root|profile:name> <session-id> [--replace]")
+		return errors.New("usage: arcmux mesh bind <device> <root|profile:name> <session-id> [--replace]")
 	}
 	deviceID, profile, sessionID := rest[0], rest[1], rest[2]
-	fs := flag.NewFlagSet("mesh open", flag.ContinueOnError)
+	fs := flag.NewFlagSet("mesh bind", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	replace := fs.Bool("replace", false, "explicitly replace another target")
 	surfaceID := fs.String("surface", os.Getenv("CMUX_SURFACE_ID"), "cmux surface UUID")
@@ -91,7 +89,7 @@ func cmdMeshOpen(args []string, stdout io.Writer) error {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return errors.New("usage: arcmux mesh open <device> <root|profile:name> <session-id> [--replace]")
+		return errors.New("usage: arcmux mesh bind <device> <root|profile:name> <session-id> [--replace]")
 	}
 	if *surfaceID == "" || *workspaceID == "" {
 		return errors.New("CMUX_SURFACE_ID and CMUX_WORKSPACE_ID are both required (or pass --surface and --workspace)")
@@ -105,41 +103,44 @@ func cmdMeshOpen(args []string, stdout io.Writer) error {
 		return fmt.Errorf("remote session locator: %w", err)
 	}
 
-	// Validate the durable cached projection rather than requiring a live peer.
-	// A disconnected laptop can therefore reopen an exact stale session, while
-	// an authoritative gone record is rejected.
-	projectionPath := "/mesh/session?peer=" + url.QueryEscape(deviceID) +
-		"&profile=" + url.QueryEscape(profile) + "&session=" + url.QueryEscape(sessionID)
-	projectionBody, err := meshAPIBody(cfg, http.MethodGet, projectionPath, nil)
-	if err != nil {
-		return fmt.Errorf("validate cached remote session: %w", err)
-	}
-	var projection meshstate.RemoteSessionProjection
-	if err := json.Unmarshal(projectionBody, &projection); err != nil {
-		return fmt.Errorf("decode cached remote session: %w", err)
-	}
-	if err := projection.Validate(); err != nil {
-		return fmt.Errorf("invalid cached remote session: %w", err)
-	}
-	if !projection.Locator.EqualIdentity(requested) {
-		return errors.New("cached remote session locator does not match the requested identity")
-	}
-	if projection.Freshness == meshstate.FreshnessGone {
-		return errors.New("cached remote session is gone; choose a current exact session")
-	}
-
-	binding, err := buildSurfaceBinding(cfg, requested, *surfaceID, *workspaceID, "mesh-open")
+	binding, err := buildSurfaceBinding(cfg, requested, *surfaceID, *workspaceID, "mesh-bind")
 	if err != nil {
 		return err
 	}
-	stored, err := putSurfaceBinding(cfg, binding, *replace)
+	body, err := json.Marshal(binding)
 	if err != nil {
 		return err
 	}
-	result := meshOpenResult{
+	path := "/mesh/surface-bindings/validated"
+	if *replace {
+		path += "?replace=1"
+	}
+	response, err := meshAPIBody(cfg, http.MethodPost, path, body)
+	if err != nil {
+		return fmt.Errorf("validate and bind cached remote session: %w", err)
+	}
+	var resolved meshstate.ResolvedSurfaceBinding
+	if err := json.Unmarshal(response, &resolved); err != nil {
+		return fmt.Errorf("decode validated surface binding: %w", err)
+	}
+	if err := resolved.Binding.Validate(); err != nil {
+		return fmt.Errorf("invalid validated surface binding: %w", err)
+	}
+	if resolved.Projection == nil {
+		return errors.New("validated surface binding response omitted the cached session")
+	}
+	if err := resolved.Projection.Validate(); err != nil {
+		return fmt.Errorf("invalid validated cached session: %w", err)
+	}
+	if resolved.Binding.SurfaceID != binding.SurfaceID || resolved.Binding.WorkspaceID != binding.WorkspaceID ||
+		!resolved.Binding.Locator.EqualIdentity(requested) ||
+		!resolved.Projection.Locator.EqualIdentity(requested) || resolved.Projection.Freshness == meshstate.FreshnessGone {
+		return errors.New("validated surface binding response does not match requested live identity")
+	}
+	result := meshBindResult{
 		SchemaVersion: meshstate.SchemaVersion,
-		SurfaceID:     stored.SurfaceID, WorkspaceID: stored.WorkspaceID,
-		Locator: stored.Locator, Binding: stored, Session: projection,
+		SurfaceID:     resolved.Binding.SurfaceID, WorkspaceID: resolved.Binding.WorkspaceID,
+		Locator: resolved.Binding.Locator, Binding: resolved.Binding, Session: *resolved.Projection,
 	}
 	return json.NewEncoder(stdout).Encode(result)
 }

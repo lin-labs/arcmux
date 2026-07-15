@@ -93,6 +93,11 @@ type Daemon struct {
 	// <DataRoot>/arcmux/<project>/state.bolt.
 	stateMu sync.Mutex
 	state   *store.DB
+
+	goalSummaryMu       sync.Mutex
+	goalSummaryAttempts map[string]goalSummaryAttempt
+	goalSummaryRunner   func(context.Context, string, string) (string, error)
+	goalHistoryRoot     string
 }
 
 // New creates a new daemon instance.
@@ -118,21 +123,22 @@ func New(cfg *config.Config, logger *slog.Logger) *Daemon {
 		projects, _ = project.Load(filepath.Join(os.TempDir(), "arcmux-no-such-projects.toml"))
 	}
 	return &Daemon{
-		cfg:          cfg,
-		tmux:         tmux.NewClient(cfg.Tmux.SocketName),
-		mux:          backend,
-		hooks:        hooks.NewInstaller(cfg.Hooks.HookOutputDir),
-		watcher:      hooks.NewWatcher(cfg.Hooks.HookOutputDir, logger),
-		profiles:     cfg.Agents,
-		projects:     projects,
-		logger:       logger,
-		sessions:     make(map[string]*session.Session),
-		monitors:     make(map[string]context.CancelFunc),
-		processes:    make(map[string]*os.Process),
-		recorders:    make(map[string]*recorder),
-		healthEvents: make(chan health.HealthEvent, 64),
-		eventBus:     NewEventBus(),
-		delivery:     delivery.NewController(newDeliveryJudge(cfg, logger), delivery.DefaultControllerConfig()),
+		cfg:                 cfg,
+		tmux:                tmux.NewClient(cfg.Tmux.SocketName),
+		mux:                 backend,
+		hooks:               hooks.NewInstaller(cfg.Hooks.HookOutputDir),
+		watcher:             hooks.NewWatcher(cfg.Hooks.HookOutputDir, logger),
+		profiles:            cfg.Agents,
+		projects:            projects,
+		logger:              logger,
+		sessions:            make(map[string]*session.Session),
+		monitors:            make(map[string]context.CancelFunc),
+		processes:           make(map[string]*os.Process),
+		recorders:           make(map[string]*recorder),
+		healthEvents:        make(chan health.HealthEvent, 64),
+		eventBus:            NewEventBus(),
+		delivery:            delivery.NewController(newDeliveryJudge(cfg, logger), delivery.DefaultControllerConfig()),
+		goalSummaryAttempts: make(map[string]goalSummaryAttempt),
 	}
 }
 
@@ -283,6 +289,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 	go d.relayHealthEvents()
 	go d.watcher.Run(d.ctx)
 	go d.persistLoop()
+	go d.runOverallGoalSummarizer(d.ctx)
 
 	// Pulse supervisor: one Pulser per discovered project under
 	// <Pulse.DataRoot>/arcmux/*/state.bolt. Disabled? Skip silently.

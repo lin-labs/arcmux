@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/lin-labs/arcmux/internal/hooks"
+	"github.com/lin-labs/arcmux/internal/safetext"
 	"github.com/lin-labs/arcmux/internal/session"
 )
 
@@ -38,9 +39,11 @@ const (
 var (
 	profileNamePattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9_-]{0,61}[a-z0-9])?$`)
 	sessionIDPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$`)
-	secretAssignment   = regexp.MustCompile(`(?i)\b(api[_ -]?key|access[_ -]?token|auth[_ -]?token|password|secret)\s*[:=]\s*([^\s,;]+)`)
-	bearerToken        = regexp.MustCompile(`(?i)\bbearer\s+[a-z0-9._~+/=-]{8,}`)
-	commonToken        = regexp.MustCompile(`\b(?:sk|ghp|github_pat|xox[baprs])[-_][A-Za-z0-9_-]{8,}\b`)
+	// Non-mesh local fields retain their legacy best-effort redaction. The
+	// current_work boundary uses safetext and rejects the entire field instead.
+	secretAssignment = regexp.MustCompile(`(?i)\b(api[_ -]?key|access[_ -]?token|auth[_ -]?token|password|secret)\s*[:=]\s*([^\s,;]+)`)
+	bearerToken      = regexp.MustCompile(`(?i)\bbearer\s+[a-z0-9._~+/=-]{8,}`)
+	commonToken      = regexp.MustCompile(`\b(?:sk|ghp|github_pat|xox[baprs])[-_][A-Za-z0-9_-]{8,}\b`)
 )
 
 // ProfileScope disambiguates sessions that have the same ID in independent
@@ -265,19 +268,26 @@ func Build(scope ProfileScope, snap session.Snapshot, hookState *hooks.SessionSt
 }
 
 // NormalizeCurrentWork enforces the additive mesh contract on both producer
-// and receiver: one redacted line, a fixed proof source, a bounded size, and a
+// and receiver: one safe line, a fixed proof source, a bounded size, and a
 // non-zero field timestamp. A nil input remains nil for old JSON producers.
 func NormalizeCurrentWork(value *CurrentWorkSummary) (*CurrentWorkSummary, error) {
 	if value == nil {
 		return nil, nil
 	}
 	if value.Provenance != hooks.OverallGoalSummarizerProvenance {
-		return nil, fmt.Errorf("unsupported current-work provenance %q", value.Provenance)
+		return nil, fmt.Errorf("unsupported current-work provenance")
 	}
 	if value.UpdatedAt.IsZero() {
 		return nil, fmt.Errorf("current-work updated_at is required")
 	}
-	summary := cleanText(strings.Join(strings.Fields(value.Summary), " "), maxCurrentWorkRunes)
+	raw := strings.Join(strings.Fields(value.Summary), " ")
+	normalized := cleanControlText(raw)
+	if safetext.ContainsCredentialLike(raw) || safetext.ContainsCredentialLike(normalized) {
+		return nil, fmt.Errorf("current-work summary appears to contain credential material")
+	}
+	// Do not reuse cleanText here: its legacy substitution is appropriate for
+	// local display fields, but current_work must be wholly accepted or omitted.
+	summary := boundText(normalized, maxCurrentWorkRunes)
 	if strings.TrimSpace(summary) == "" {
 		return nil, fmt.Errorf("current-work summary is required")
 	}
@@ -298,15 +308,27 @@ func Sort(summaries []Summary) {
 }
 
 func cleanText(value string, maxRunes int) string {
-	value = strings.Map(func(r rune) rune {
+	value = cleanControlText(value)
+	value = secretAssignment.ReplaceAllString(value, "$1=[REDACTED]")
+	value = bearerToken.ReplaceAllString(value, "Bearer [REDACTED]")
+	value = commonToken.ReplaceAllString(value, "[REDACTED]")
+	return boundText(value, maxRunes)
+}
+
+func cleanBoundedText(value string, maxRunes int) string {
+	return boundText(cleanControlText(value), maxRunes)
+}
+
+func cleanControlText(value string) string {
+	return strings.Map(func(r rune) rune {
 		if r == '\n' || r == '\t' || r >= ' ' {
 			return r
 		}
 		return -1
 	}, value)
-	value = secretAssignment.ReplaceAllString(value, "$1=[REDACTED]")
-	value = bearerToken.ReplaceAllString(value, "Bearer [REDACTED]")
-	value = commonToken.ReplaceAllString(value, "[REDACTED]")
+}
+
+func boundText(value string, maxRunes int) string {
 	if utf8.RuneCountInString(value) <= maxRunes {
 		return value
 	}

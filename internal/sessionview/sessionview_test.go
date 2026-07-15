@@ -142,12 +142,51 @@ func TestBuildCurrentWorkRequiresSummarizerProvenance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if summary.CurrentWork == nil || summary.CurrentWork.Summary != "Ship remote surfaces api_key=[REDACTED]" {
-		t.Fatalf("current work=%#v", summary.CurrentWork)
+	if summary.CurrentWork != nil {
+		t.Fatalf("credential-like current work must be omitted, got %#v", summary.CurrentWork)
 	}
-	if summary.CurrentWork.Provenance != hooks.OverallGoalSummarizerProvenance ||
-		!summary.CurrentWork.UpdatedAt.Equal(now) {
-		t.Fatalf("current-work proof=%#v", summary.CurrentWork)
+}
+
+func TestBuildCurrentWorkAdvancesSourceFreshness(t *testing.T) {
+	now := time.Date(2026, 7, 15, 16, 0, 0, 0, time.UTC)
+	summaryUpdated := now.Add(2 * time.Minute)
+	snap := session.Snapshot{
+		ID: "s-fresh", Agent: "codex", State: session.StateWorking,
+		StartedAt: now.Add(-time.Hour), LastActivityAt: now,
+	}
+	hookState := &hooks.SessionState{UpdatedAt: summaryUpdated, TurnContract: &hooks.TurnContract{
+		OverallGoal: "Ship exact native remote identity", OverallGoalProvenance: hooks.OverallGoalSummarizerProvenance,
+		OverallGoalUpdatedAt: summaryUpdated,
+	}}
+	summary, _, err := Build(RootProfileScope, snap, hookState, summaryUpdated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.CurrentWork == nil || !summary.Freshness.SourceUpdatedAt.Equal(summaryUpdated) {
+		t.Fatalf("summary=%+v", summary)
+	}
+}
+
+func TestNormalizeCurrentWorkRejectsCredentialLikeSummary(t *testing.T) {
+	now := time.Now().UTC()
+	for _, value := range []string{
+		"postgres://user:password@host/db",
+		"https://user:pass@example.com/path",
+		"OPENAI_API_KEY=sk-proj-abcdefghijklmnop",
+		"AWS_SECRET_ACCESS_KEY=abcdefghijklmnop",
+		"GCP_CREDENTIALS=/tmp/gcp.json",
+		"xai_api_key=xai_abcdefghijklmnop",
+		"api key = sk-proj-abcdefghijklmnop",
+		"access token: abcdefghijklmnop",
+		"Authorization: Basic dXNlcjpwYXNzd29yZA==",
+		"JWT eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijk",
+		"-----BEGIN PRIVATE KEY-----",
+	} {
+		if _, err := NormalizeCurrentWork(&CurrentWorkSummary{
+			Summary: value, Provenance: hooks.OverallGoalSummarizerProvenance, UpdatedAt: now,
+		}); err == nil {
+			t.Fatalf("credential-like current work accepted: %q", value)
+		}
 	}
 }
 

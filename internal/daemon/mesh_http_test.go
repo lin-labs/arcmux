@@ -159,15 +159,32 @@ func TestMeshHTTPResolvedSurfaceBindingIncludesTargetAndFreshness(t *testing.T) 
 		Source: "human",
 	}
 	body, _ := json.Marshal(binding)
-	put := meshHTTPRequest(h, http.MethodPut, "/mesh/surface-bindings", body)
+	put := meshHTTPRequest(h, http.MethodPost, "/mesh/surface-bindings/validated", body)
 	if put.Code != http.StatusOK {
-		t.Fatalf("binding put status=%d body=%s", put.Code, put.Body.String())
+		t.Fatalf("atomic surface open status=%d body=%s", put.Code, put.Body.String())
 	}
 	resolved := meshHTTPRequest(h, http.MethodGet, "/mesh/surface-bindings?surface_id="+binding.SurfaceID+"&resolved=1", nil)
 	if resolved.Code != http.StatusOK || !bytes.Contains(resolved.Body.Bytes(), []byte(`"session_id":"s-target"`)) ||
 		!bytes.Contains(resolved.Body.Bytes(), []byte(`"peer_freshness":"fresh"`)) ||
 		!bytes.Contains(resolved.Body.Bytes(), []byte(`"effective_freshness":"fresh"`)) {
 		t.Fatalf("resolved binding status=%d body=%s", resolved.Code, resolved.Body.String())
+	}
+	response.SourceRevision = 2
+	response.Sessions = nil
+	if err := d.commitRemoteSessions("devbox", response); err != nil {
+		t.Fatal(err)
+	}
+	goneBinding := binding
+	goneBinding.BindingID = "binding-gone"
+	goneBinding.SurfaceID = "33333333-3333-4333-8333-333333333333"
+	body, _ = json.Marshal(goneBinding)
+	rejected := meshHTTPRequest(h, http.MethodPost, "/mesh/surface-bindings/validated", body)
+	if rejected.Code != http.StatusBadRequest {
+		t.Fatalf("gone target status=%d body=%s", rejected.Code, rejected.Body.String())
+	}
+	missing := meshHTTPRequest(h, http.MethodGet, "/mesh/surface-bindings?surface_id="+goneBinding.SurfaceID, nil)
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("gone target wrote binding: status=%d body=%s", missing.Code, missing.Body.String())
 	}
 }
 
@@ -186,6 +203,7 @@ func TestMeshOperatorHTTPRequiresLoopbackOrConfiguredBearer(t *testing.T) {
 		{http.MethodGet, "/mesh/artifact?kind=document&id=doc"},
 		{http.MethodPut, "/mesh/subscribe"},
 		{http.MethodGet, "/mesh/surface-bindings"},
+		{http.MethodPost, "/mesh/surface-bindings/validated"},
 	}
 	for _, item := range paths {
 		t.Run(item.path, func(t *testing.T) {

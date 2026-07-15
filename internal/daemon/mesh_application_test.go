@@ -116,12 +116,24 @@ func TestMeshApplicationSessionsArtifactsAndExplicitEvents(t *testing.T) {
 		t.Fatalf("live artifact HTTP status=%d body=%s", liveArtifact.Code, liveArtifact.Body.String())
 	}
 
-	if err := hooks.ApplyContractOnly(
+	hookState, err := hooks.ReadSessionState(server.cfg.Hooks.SessionStateDir, "s-shared")
+	if err != nil || hookState == nil {
+		t.Fatalf("hook state=%+v err=%v", hookState, err)
+	}
+	if hookState.TurnCount == 0 || hookState.LastTurnEndAt.IsZero() {
+		now := time.Now().UTC()
+		if err := hooks.ApplyEvent(server.cfg.Hooks.SessionStateDir, "s-shared", "codex", hooks.EventPromptSubmit, "", now); err != nil {
+			t.Fatal(err)
+		}
+		if err := hooks.ApplyEvent(server.cfg.Hooks.SessionStateDir, "s-shared", "codex", hooks.EventTurnEnd, "", now.Add(time.Millisecond)); err != nil {
+			t.Fatal(err)
+		}
+		hookState, _ = hooks.ReadSessionState(server.cfg.Hooks.SessionStateDir, "s-shared")
+	}
+	if err := hooks.ApplySummarizedOverallGoal(
 		server.cfg.Hooks.SessionStateDir, "s-shared", "codex",
-		hooks.TurnContractUpdate{
-			OverallGoal:           "Render remote surfaces as native Mission Control sessions",
-			OverallGoalProvenance: hooks.OverallGoalSummarizerProvenance,
-		}, time.Now(),
+		"Render remote surfaces as native Mission Control sessions",
+		hookState.TurnCount, hookState.LastTurnEndAt, time.Now(),
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -532,11 +544,15 @@ func TestMeshWireCarriesOnlyProvenSummarizedCurrentWork(t *testing.T) {
 			UpdatedAt:  now,
 		},
 	}
+	if _, err := meshAcceptSummary(summary); err == nil {
+		t.Fatal("credential-like current work was accepted at the receiver")
+	}
+	summary.CurrentWork.Summary = "Ship remote surfaces with exact native identity"
 	accepted, err := meshAcceptSummary(summary)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if accepted.CurrentWork == nil || accepted.CurrentWork.Summary != "Ship remote surfaces password=[REDACTED]" {
+	if accepted.CurrentWork == nil || accepted.CurrentWork.Summary != summary.CurrentWork.Summary {
 		t.Fatalf("current work=%#v", accepted.CurrentWork)
 	}
 	encoded, err := json.Marshal(accepted)
