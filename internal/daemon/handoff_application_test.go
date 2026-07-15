@@ -1071,6 +1071,73 @@ func TestHandoffPrepareRPCUsesConnectionPrincipalAndReturnsRedactedDTO(t *testin
 	}
 }
 
+func TestHandoffMeshRPCUsesTargetResumeTimeout(t *testing.T) {
+	t.Run("prepare", func(t *testing.T) {
+		server := newMeshApplicationTestDaemon(t, "server")
+		client := newMeshApplicationTestDaemon(t, "client")
+		targetApp, manifest := newHandoffTestApplication(t, true)
+		targetApp.resumeTimeout = 10 * time.Millisecond
+		targetApp.prepareRepository = func(ctx context.Context, _ handoff.Manifest, _ project.ResolvedProject) error {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		server.meshMu.Lock()
+		server.meshApp.handoffs = targetApp
+		server.meshMu.Unlock()
+		_, clientManager := startDaemonMeshPairWithScopes(t, server, client, []string{arcmuxmesh.ScopeHandoffsPrepare})
+
+		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+		defer cancel()
+		started := time.Now()
+		err := clientManager.Call(ctx, "server", meshMethodHandoffsPrepare, meshHandoffPrepareRequest{Manifest: manifest}, &meshHandoffStatus{})
+		elapsed := time.Since(started)
+		if err == nil {
+			t.Fatal("blocked target prepare unexpectedly succeeded")
+		}
+		if elapsed >= 100*time.Millisecond {
+			t.Fatalf("target prepare took %s, want resume timeout", elapsed)
+		}
+	})
+
+	t.Run("launch", func(t *testing.T) {
+		server := newMeshApplicationTestDaemon(t, "server")
+		client := newMeshApplicationTestDaemon(t, "client")
+		targetApp, manifest := newHandoffTestApplication(t, true)
+		prepared := prepareTargetHandoffForLaunch(t, targetApp, manifest)
+		targetApp.resumeTimeout = 10 * time.Millisecond
+		targetApp.prepareLaunchRepo = func(ctx context.Context, _ handoff.Manifest, _ project.ResolvedProject) (handoff.RepositoryPreparation, error) {
+			<-ctx.Done()
+			return handoff.RepositoryPreparation{}, ctx.Err()
+		}
+		targetApp.createSession = func(context.Context, CreateSessionRequest) (*session.Session, bool, error) {
+			return nil, false, errors.New("unexpected create")
+		}
+		targetApp.lookupSession = func(string) (*session.Session, bool) { return nil, false }
+		targetApp.sendPrompt = func(context.Context, string, string, bool, bool) error {
+			return errors.New("unexpected send")
+		}
+		targetApp.persistSessions = func() error { return nil }
+		server.meshMu.Lock()
+		server.meshApp.handoffs = targetApp
+		server.meshMu.Unlock()
+		_, clientManager := startDaemonMeshPairWithScopes(t, server, client, []string{arcmuxmesh.ScopeHandoffsLaunch})
+
+		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+		defer cancel()
+		started := time.Now()
+		err := clientManager.Call(ctx, "server", meshMethodHandoffsLaunch, meshHandoffLaunchRequest{
+			HandoffID: manifest.HandoffID, ManifestDigest: prepared.Digest,
+		}, &meshHandoffStatus{})
+		elapsed := time.Since(started)
+		if err == nil {
+			t.Fatal("blocked target launch unexpectedly succeeded")
+		}
+		if elapsed >= 100*time.Millisecond {
+			t.Fatalf("target launch took %s, want resume timeout", elapsed)
+		}
+	})
+}
+
 func TestHandoffLaunchGrantDoesNotAuthorizePrepare(t *testing.T) {
 	server := newMeshApplicationTestDaemon(t, "server")
 	client := newMeshApplicationTestDaemon(t, "client")

@@ -405,7 +405,9 @@ func (d *Daemon) registerMeshApplication(manager *arcmuxmesh.Manager) error {
 			if err != nil {
 				return nil, err
 			}
-			return app.prepare(ctx, principal, d.meshDeviceID(), request)
+			resumeCtx, cancel := app.resumeContext(ctx)
+			defer cancel()
+			return app.prepare(resumeCtx, principal, d.meshDeviceID(), request)
 		},
 		meshMethodHandoffsStatus: func(ctx context.Context, principal arcmuxmesh.Principal, raw json.RawMessage) (any, error) {
 			var request meshHandoffStatusRequest
@@ -427,7 +429,9 @@ func (d *Daemon) registerMeshApplication(manager *arcmuxmesh.Manager) error {
 			if err != nil {
 				return nil, err
 			}
-			return app.launch(ctx, principal, d.meshDeviceID(), request)
+			resumeCtx, cancel := app.resumeContext(ctx)
+			defer cancel()
+			return app.launch(resumeCtx, principal, d.meshDeviceID(), request)
 		},
 	}
 	for _, spec := range meshMethodSpecs {

@@ -22,7 +22,7 @@ import (
 
 const (
 	handoffAssetRetryDelay     = 15 * time.Second
-	targetHandoffResumeTimeout = 10 * time.Second
+	targetHandoffResumeTimeout = 45 * time.Second
 	handoffLaunchPollInterval  = 25 * time.Millisecond
 	handoffSafePreambleRunes   = 200
 )
@@ -127,6 +127,14 @@ func (a *handoffApplication) configureLaunchRuntime(d *Daemon) {
 	a.persistSessions = d.persistSessionsChecked
 }
 
+func (a *handoffApplication) resumeContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	timeout := a.resumeTimeout
+	if timeout <= 0 {
+		timeout = targetHandoffResumeTimeout
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
 func validateHandoffTargetProfile(profiles map[string]profile.Profile, name string) error {
 	target, ok := profiles[name]
 	if !ok {
@@ -210,10 +218,6 @@ func (d *Daemon) reconcileTargetHandoffs(ctx context.Context, at time.Time) {
 		d.logger.Warn("target handoff recovery scan failed")
 		return
 	}
-	resumeTimeout := app.resumeTimeout
-	if resumeTimeout <= 0 {
-		resumeTimeout = targetHandoffResumeTimeout
-	}
 	for _, candidate := range records {
 		if ctx.Err() != nil {
 			return
@@ -225,7 +229,7 @@ func (d *Daemon) reconcileTargetHandoffs(ctx context.Context, at time.Time) {
 			continue
 		}
 
-		resumeCtx, cancel := context.WithTimeout(ctx, resumeTimeout)
+		resumeCtx, cancel := app.resumeContext(ctx)
 		release, lockErr := app.lockPrepareContext(resumeCtx, candidate.Manifest.HandoffID)
 		if lockErr != nil {
 			cancel()

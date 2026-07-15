@@ -17,7 +17,10 @@ import (
 	"github.com/lin-labs/arcmux/internal/handoff"
 )
 
-const maxHandoffGoalFile = 16 << 10
+const (
+	maxHandoffGoalFile        = 16 << 10
+	handoffPostRequestTimeout = 90 * time.Second
+)
 
 type handoffPrepareInput struct {
 	ProfileScope    string                  `json:"profile_scope"`
@@ -72,6 +75,10 @@ func cmdHandoffReceive(args []string, stdout io.Writer) error {
 }
 
 func cmdHandoffLaunch(args []string, stdout io.Writer) error {
+	return cmdHandoffLaunchWithAPITimeout(args, stdout, handoffPostRequestTimeout)
+}
+
+func cmdHandoffLaunchWithAPITimeout(args []string, stdout io.Writer, apiTimeout time.Duration) error {
 	cfg, rest, err := meshConfig(args)
 	if err != nil {
 		return err
@@ -92,7 +99,7 @@ func cmdHandoffLaunch(args []string, stdout io.Writer) error {
 	if *wait < 0 {
 		return errors.New("--wait must not be negative")
 	}
-	response, err := meshAPI(cfg, http.MethodPost, "/mesh/handoffs/launch?id="+url.QueryEscape(id))
+	response, err := meshAPIBodyWithTimeout(cfg, http.MethodPost, "/mesh/handoffs/launch?id="+url.QueryEscape(id), nil, apiTimeout)
 	if err != nil {
 		return err
 	}
@@ -104,6 +111,10 @@ func cmdHandoffLaunch(args []string, stdout io.Writer) error {
 }
 
 func cmdHandoffPrepare(args []string, stdin io.Reader, stdout io.Writer) error {
+	return cmdHandoffPrepareWithAPITimeout(args, stdin, stdout, handoffPostRequestTimeout)
+}
+
+func cmdHandoffPrepareWithAPITimeout(args []string, stdin io.Reader, stdout io.Writer, apiTimeout time.Duration) error {
 	cfg, rest, err := meshConfig(args)
 	if err != nil {
 		return err
@@ -148,7 +159,7 @@ func cmdHandoffPrepare(args []string, stdin io.Reader, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	response, err := meshAPIBody(cfg, http.MethodPost, "/mesh/handoffs", body)
+	response, err := meshAPIBodyWithTimeout(cfg, http.MethodPost, "/mesh/handoffs", body, apiTimeout)
 	if err != nil {
 		return err
 	}
@@ -182,6 +193,10 @@ func cmdHandoffShow(args []string, stdout io.Writer) error {
 }
 
 func cmdHandoffRetry(args []string, stdout io.Writer) error {
+	return cmdHandoffRetryWithAPITimeout(args, stdout, handoffPostRequestTimeout)
+}
+
+func cmdHandoffRetryWithAPITimeout(args []string, stdout io.Writer, apiTimeout time.Duration) error {
 	cfg, rest, err := meshConfig(args)
 	if err != nil {
 		return err
@@ -189,7 +204,12 @@ func cmdHandoffRetry(args []string, stdout io.Writer) error {
 	if len(rest) != 1 {
 		return errors.New("usage: arcmux handoff retry <handoff-id> [--config path]")
 	}
-	return writeMeshJSON(cfg, http.MethodPost, "/mesh/handoffs/retry?id="+url.QueryEscape(rest[0]), nil, stdout)
+	response, err := meshAPIBodyWithTimeout(cfg, http.MethodPost, "/mesh/handoffs/retry?id="+url.QueryEscape(rest[0]), nil, apiTimeout)
+	if err != nil {
+		return err
+	}
+	_, err = stdout.Write(response)
+	return err
 }
 
 func handoffPrepareUsage() error {

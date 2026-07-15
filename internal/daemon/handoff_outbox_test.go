@@ -180,6 +180,58 @@ func TestSourceHandoffLaunchIsExplicitAndPersistsAcceptedLocator(t *testing.T) {
 	}
 }
 
+func TestSourceHandoffOperatorAttemptsUseConfiguredTimeout(t *testing.T) {
+	t.Run("prepare", func(t *testing.T) {
+		fixture := newSourceOutboxFixture(t)
+		fixture.outbox.attemptTimeout = 10 * time.Millisecond
+		fixture.remote = func(ctx context.Context, _ string, _ meshHandoffPrepareRequest) (meshHandoffStatus, error) {
+			<-ctx.Done()
+			return meshHandoffStatus{}, ctx.Err()
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+		defer cancel()
+		started := time.Now()
+		status, err := fixture.outbox.prepare(ctx, sourcePrepareRequest())
+		elapsed := time.Since(started)
+		if err != nil {
+			t.Fatalf("prepare after %s: %v", elapsed, err)
+		}
+		if elapsed >= 100*time.Millisecond {
+			t.Fatalf("prepare took %s, want configured attempt timeout", elapsed)
+		}
+		if status.State != handoff.SourceRetryWait || status.Failure == nil || !status.Failure.Retryable {
+			t.Fatalf("prepare status = %+v", status)
+		}
+	})
+
+	t.Run("launch", func(t *testing.T) {
+		fixture := newSourceOutboxFixture(t)
+		prepared, err := fixture.outbox.prepare(context.Background(), sourcePrepareRequest())
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixture.outbox.attemptTimeout = 10 * time.Millisecond
+		fixture.launchRemote = func(ctx context.Context, _ string, _ meshHandoffLaunchRequest) (meshHandoffStatus, error) {
+			<-ctx.Done()
+			return meshHandoffStatus{}, ctx.Err()
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+		defer cancel()
+		started := time.Now()
+		status, err := fixture.outbox.launch(ctx, prepared.HandoffID)
+		elapsed := time.Since(started)
+		if err != nil {
+			t.Fatalf("launch after %s: %v", elapsed, err)
+		}
+		if elapsed >= 100*time.Millisecond {
+			t.Fatalf("launch took %s, want configured attempt timeout", elapsed)
+		}
+		if status.State != handoff.SourceLaunchRetryWait || status.Failure == nil || !status.Failure.Retryable {
+			t.Fatalf("launch status = %+v", status)
+		}
+	})
+}
+
 func TestSourceHandoffLaunchMissingGrantRetriesSamePreparedHandoff(t *testing.T) {
 	fixture := newSourceOutboxFixture(t)
 	prepared, err := fixture.outbox.prepare(context.Background(), sourcePrepareRequest())

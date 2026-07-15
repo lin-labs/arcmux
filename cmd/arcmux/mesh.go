@@ -262,7 +262,13 @@ func meshAPI(cfg *config.Config, method, path string) ([]byte, error) {
 	return meshAPIBody(cfg, method, path, nil)
 }
 
+const meshAPIRequestTimeout = 10 * time.Second
+
 func meshAPIBody(cfg *config.Config, method, path string, body []byte) ([]byte, error) {
+	return meshAPIBodyWithTimeout(cfg, method, path, body, meshAPIRequestTimeout)
+}
+
+func meshAPIBodyWithTimeout(cfg *config.Config, method, path string, body []byte, timeout time.Duration) ([]byte, error) {
 	if cfg.Daemon.HTTPAddr == "" {
 		return nil, errors.New("daemon http_addr is disabled")
 	}
@@ -277,7 +283,7 @@ func meshAPIBody(cfg *config.Config, method, path string, body []byte) ([]byte, 
 	if cfg.Daemon.HTTPAuthToken != "" {
 		req.Header.Set("Authorization", "Bearer "+cfg.Daemon.HTTPAuthToken)
 	}
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: timeout}).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("daemon mesh API unavailable at %s: %w", cfg.Daemon.HTTPAddr, err)
 	}

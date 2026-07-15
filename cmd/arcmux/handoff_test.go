@@ -86,6 +86,79 @@ func TestHandoffPrepareRoutesGoalFileAndRejectsInlineGoal(t *testing.T) {
 	}
 }
 
+func TestHandoffHTTPTimeoutBudgetsKeepOrdinaryMeshRequestsShort(t *testing.T) {
+	if meshAPIRequestTimeout != 10*time.Second {
+		t.Fatalf("ordinary mesh API timeout = %s, want 10s", meshAPIRequestTimeout)
+	}
+	if handoffPostRequestTimeout != 90*time.Second {
+		t.Fatalf("handoff POST timeout = %s, want 90s", handoffPostRequestTimeout)
+	}
+	if handoffPostRequestTimeout <= meshAPIRequestTimeout {
+		t.Fatalf("handoff POST timeout %s must exceed ordinary timeout %s", handoffPostRequestTimeout, meshAPIRequestTimeout)
+	}
+}
+
+func TestHandoffMutatingPostsCanOutliveOrdinaryMeshTimeout(t *testing.T) {
+	const (
+		ordinaryTimeout = 10 * time.Millisecond
+		handoffTimeout  = 100 * time.Millisecond
+		responseDelay   = 30 * time.Millisecond
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(responseDelay)
+		switch r.URL.Path {
+		case "/mesh/handoffs":
+			_, _ = w.Write([]byte(`{"handoff_id":"handoff-1","state":"remote_prepared"}` + "\n"))
+		case "/mesh/handoffs/launch":
+			_, _ = w.Write([]byte(`{"handoff_id":"handoff-1","state":"accepted"}` + "\n"))
+		case "/mesh/handoffs/retry":
+			_, _ = w.Write([]byte(`{"handoff_id":"handoff-1","state":"remote_prepared"}` + "\n"))
+		default:
+			_, _ = w.Write([]byte(`{}` + "\n"))
+		}
+	}))
+	defer server.Close()
+	cfg, _ := meshDataTestConfig(t, server.URL)
+	parsed, _, err := meshConfig([]string{"--config", cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := meshAPIBodyWithTimeout(parsed, http.MethodGet, "/ordinary", nil, ordinaryTimeout); err == nil {
+		t.Fatal("ordinary mesh request outlived its short timeout")
+	}
+
+	var prepareOut bytes.Buffer
+	if err := cmdHandoffPrepareWithAPITimeout([]string{
+		"devbox", "root", "session-1", "--project", "demo", "--agent", "codex",
+		"--goal-file", "-", "--config", cfg,
+	}, strings.NewReader("Continue after secure preparation."), &prepareOut, handoffTimeout); err != nil {
+		t.Fatalf("delayed prepare: %v", err)
+	}
+	if !strings.Contains(prepareOut.String(), `"state":"remote_prepared"`) {
+		t.Fatalf("prepare output = %q", prepareOut.String())
+	}
+
+	var launchOut bytes.Buffer
+	if err := cmdHandoffLaunchWithAPITimeout([]string{
+		"handoff-1", "--config", cfg,
+	}, &launchOut, handoffTimeout); err != nil {
+		t.Fatalf("delayed launch: %v", err)
+	}
+	if !strings.Contains(launchOut.String(), `"state":"accepted"`) {
+		t.Fatalf("launch output = %q", launchOut.String())
+	}
+
+	var retryOut bytes.Buffer
+	if err := cmdHandoffRetryWithAPITimeout([]string{
+		"handoff-1", "--config", cfg,
+	}, &retryOut, handoffTimeout); err != nil {
+		t.Fatalf("delayed retry: %v", err)
+	}
+	if !strings.Contains(retryOut.String(), `"state":"remote_prepared"`) {
+		t.Fatalf("retry output = %q", retryOut.String())
+	}
+}
+
 func TestHandoffPrepareWaitPollsWithoutImplicitRetry(t *testing.T) {
 	var mu sync.Mutex
 	requests := make([]string, 0)

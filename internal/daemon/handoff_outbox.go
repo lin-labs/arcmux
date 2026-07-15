@@ -16,7 +16,7 @@ import (
 
 const (
 	sourceHandoffRetryDelay     = 15 * time.Second
-	sourceHandoffAttemptTimeout = 10 * time.Second
+	sourceHandoffAttemptTimeout = 60 * time.Second
 )
 
 // sourceHandoffPrepareRequest is deliberately an operator-intent request, not
@@ -253,7 +253,9 @@ func (o *sourceHandoffOutbox) prepare(ctx context.Context, request sourceHandoff
 	if replay {
 		return sourceHandoffDTO{}, sourceOutboxConflict("generated handoff identity already exists; retry preparation")
 	}
-	return o.attempt(ctx, record.Manifest.HandoffID, false)
+	attemptCtx, cancel := o.attemptContext(ctx)
+	defer cancel()
+	return o.attempt(attemptCtx, record.Manifest.HandoffID, false)
 }
 
 func (o *sourceHandoffOutbox) get(id string) (sourceHandoffDTO, error) {
@@ -289,9 +291,13 @@ func (o *sourceHandoffOutbox) retry(ctx context.Context, id string) (sourceHando
 	}
 	switch record.State {
 	case handoff.SourceRetryWait:
-		return o.attempt(ctx, id, true)
+		attemptCtx, cancel := o.attemptContext(ctx)
+		defer cancel()
+		return o.attempt(attemptCtx, id, true)
 	case handoff.SourceLaunchRetryWait:
-		return o.attemptLaunch(ctx, id, true)
+		attemptCtx, cancel := o.attemptContext(ctx)
+		defer cancel()
+		return o.attemptLaunch(attemptCtx, id, true)
 	default:
 		return sourceHandoffDTO{}, sourceOutboxConflict("only a retry_wait handoff can be retried")
 	}
@@ -311,7 +317,17 @@ func (o *sourceHandoffOutbox) launch(ctx context.Context, id string) (sourceHand
 	if record.State != handoff.SourceRemotePrepared && record.State != handoff.SourceLaunchingRemote && record.State != handoff.SourceLaunchRetryWait && record.State != handoff.SourceAccepted {
 		return sourceHandoffDTO{}, sourceOutboxConflict("handoff must be remotely prepared before launch")
 	}
-	return o.attemptLaunch(ctx, id, true)
+	attemptCtx, cancel := o.attemptContext(ctx)
+	defer cancel()
+	return o.attemptLaunch(attemptCtx, id, true)
+}
+
+func (o *sourceHandoffOutbox) attemptContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	timeout := o.attemptTimeout
+	if timeout <= 0 {
+		timeout = sourceHandoffAttemptTimeout
+	}
+	return context.WithTimeout(ctx, timeout)
 }
 
 // reconcile resumes prepare work and launches that already crossed the
@@ -324,10 +340,6 @@ func (o *sourceHandoffOutbox) reconcile(ctx context.Context, at time.Time) error
 	records, err := o.store.RunnableSource(at)
 	if err != nil {
 		return err
-	}
-	attemptTimeout := o.attemptTimeout
-	if attemptTimeout <= 0 {
-		attemptTimeout = sourceHandoffAttemptTimeout
 	}
 	var firstErr error
 	for _, candidate := range records {
@@ -351,7 +363,7 @@ func (o *sourceHandoffOutbox) reconcile(ctx context.Context, at time.Time) error
 
 		// attempt reloads under the shared per-store/per-ID lock. Concurrent
 		// operator retries and coalesced runtime passes therefore make one RPC.
-		attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
+		attemptCtx, cancel := o.attemptContext(ctx)
 		var attemptErr error
 		if candidate.State == handoff.SourceLaunchingRemote || candidate.State == handoff.SourceLaunchRetryWait {
 			_, attemptErr = o.attemptLaunch(attemptCtx, candidate.Manifest.HandoffID, false)
