@@ -148,6 +148,92 @@ func TestInspectSourceRepositoryResolvesSymlinksComponentSafely(t *testing.T) {
 	requireRepositoryCode(t, err, RepositoryErrorDeterministic)
 }
 
+func TestInspectSourceRepositoryAcceptsRegisteredManagedWorktree(t *testing.T) {
+	fixture := newRepositoryFixture(t)
+	worktree := addPushedSourceWorktree(t, fixture, fixture.worktrees, "registered")
+	sessionCWD := filepath.Join(worktree, "nested", "session")
+	if err := os.MkdirAll(sessionCWD, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := InspectSourceRepository(context.Background(), sessionCWD, fixture.project())
+	if err != nil {
+		t.Fatalf("InspectSourceRepository managed worktree: %v", err)
+	}
+	if got.Branch != "boyan/registered" || got.SourceHead != fixture.head || got.RepoSlug != "lin-labs/arcmux" {
+		t.Fatalf("managed worktree snapshot = %#v", got)
+	}
+}
+
+func TestInspectSourceRepositoryRejectsForeignRepositoryUnderManagedRoot(t *testing.T) {
+	fixture := newRepositoryFixture(t)
+	foreign := filepath.Join(fixture.worktrees, "foreign")
+	if err := os.Mkdir(foreign, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testGit(t, foreign, "init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(foreign, "README.md"), []byte("foreign\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	testGit(t, foreign, "add", "README.md")
+	testGit(t, foreign, "commit", "-m", "foreign")
+
+	_, err := InspectSourceRepository(context.Background(), foreign, fixture.project())
+	requireRepositoryCode(t, err, RepositoryErrorDeterministic)
+}
+
+func TestInspectSourceRepositoryManagedRootUsesRealComponentContainment(t *testing.T) {
+	fixture := newRepositoryFixture(t)
+	prefixSibling := fixture.worktrees + "-escape"
+	if err := os.Mkdir(prefixSibling, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	escaped := addPushedSourceWorktree(t, fixture, prefixSibling, "prefix-escape")
+
+	_, err := InspectSourceRepository(context.Background(), escaped, fixture.project())
+	requireRepositoryCode(t, err, RepositoryErrorDeterministic)
+
+	link := filepath.Join(fixture.worktrees, "symlink-escape")
+	if err := os.Symlink(escaped, link); err != nil {
+		t.Fatal(err)
+	}
+	_, err = InspectSourceRepository(context.Background(), link, fixture.project())
+	requireRepositoryCode(t, err, RepositoryErrorDeterministic)
+}
+
+func TestInspectSourceRepositoryMissingOrUnsafeManagedRootDoesNotBroaden(t *testing.T) {
+	fixture := newRepositoryFixture(t)
+	worktree := addPushedSourceWorktree(t, fixture, fixture.worktrees, "root-policy")
+
+	t.Run("missing root", func(t *testing.T) {
+		resolved := fixture.project()
+		resolved.WorktreesRoot = filepath.Join(fixture.root, "missing-worktrees")
+		_, err := InspectSourceRepository(context.Background(), worktree, resolved)
+		requireRepositoryCode(t, err, RepositoryErrorDeterministic)
+	})
+
+	t.Run("symlink root", func(t *testing.T) {
+		rootLink := filepath.Join(fixture.root, "worktrees-link")
+		if err := os.Symlink(fixture.worktrees, rootLink); err != nil {
+			t.Fatal(err)
+		}
+		resolved := fixture.project()
+		resolved.WorktreesRoot = rootLink
+		_, err := InspectSourceRepository(context.Background(), worktree, resolved)
+		requireRepositoryCode(t, err, RepositoryErrorDeterministic)
+	})
+}
+
+func addPushedSourceWorktree(t *testing.T, fixture *repositoryFixture, root, name string) string {
+	t.Helper()
+	worktree := filepath.Join(root, name)
+	branch := "boyan/" + name
+	testGit(t, fixture.checkout, "worktree", "add", "-b", branch, worktree, "HEAD")
+	ref := "refs/heads/" + branch
+	testGit(t, worktree, "push", "origin", ref+":"+ref)
+	return worktree
+}
+
 func TestInspectSourceRepositoryTreatsShellLikeBranchAsArgv(t *testing.T) {
 	fixture := newRepositoryFixture(t)
 	marker := filepath.Join(fixture.root, "shell-owned")

@@ -31,7 +31,7 @@ func InspectSourceRepository(ctx context.Context, sessionCWD string, resolved pr
 		return RepositorySnapshot{}, repositoryError(RepositoryErrorDeterministic, "project metadata is invalid; repair the project registry")
 	}
 
-	checkout, err := sourceCheckoutForSession(ctx, sessionCWD, resolved.RepoPaths)
+	checkout, err := sourceCheckoutForSession(ctx, sessionCWD, resolved.RepoPaths, resolved.WorktreesRoot)
 	if err != nil {
 		return RepositorySnapshot{}, err
 	}
@@ -131,7 +131,7 @@ func InspectSourceRepository(ctx context.Context, sessionCWD string, resolved pr
 	return snapshot, nil
 }
 
-func sourceCheckoutForSession(ctx context.Context, sessionCWD string, candidates []string) (string, error) {
+func sourceCheckoutForSession(ctx context.Context, sessionCWD string, candidates []string, worktreesRoot string) (string, error) {
 	if sessionCWD == "" || strings.ContainsRune(sessionCWD, '\x00') || !filepath.IsAbs(sessionCWD) {
 		return "", repositoryError(RepositoryErrorDeterministic, "session directory is invalid; start the session in a registered checkout")
 	}
@@ -188,7 +188,81 @@ func sourceCheckoutForSession(ctx context.Context, sessionCWD string, candidates
 			return candidate, nil
 		}
 	}
+	if worktree, ok := registeredSourceWorktree(ctx, realCWD, candidates, worktreesRoot); ok {
+		return worktree, nil
+	}
 	return "", repositoryError(RepositoryErrorDeterministic, "session directory is outside the configured Git worktree; choose the registered project checkout")
+}
+
+// registeredSourceWorktree accepts a session under the project's explicitly
+// declared managed-worktree root only when Git also reports that checkout in a
+// configured RepoPath's worktree registry. Realpath containment alone is not
+// sufficient: an unrelated repository nested under the managed root must not
+// inherit the project's handoff identity.
+func registeredSourceWorktree(ctx context.Context, realCWD string, candidates []string, rawRoot string) (string, bool) {
+	if rawRoot == "" || strings.ContainsRune(rawRoot, '\x00') || !filepath.IsAbs(rawRoot) {
+		return "", false
+	}
+	rootInfo, err := os.Lstat(rawRoot)
+	if err != nil || rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() {
+		return "", false
+	}
+	realRoot, err := filepath.EvalSymlinks(filepath.Clean(rawRoot))
+	if err != nil {
+		return "", false
+	}
+	realRoot, err = filepath.Abs(realRoot)
+	if err != nil || !withinResolvedRoot(realRoot, realCWD) {
+		return "", false
+	}
+
+	inside, err := gitOutput(ctx, realCWD, "rev-parse", "--is-inside-work-tree")
+	if err != nil || inside != "true" {
+		return "", false
+	}
+	top, err := gitOutput(ctx, realCWD, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return "", false
+	}
+	realTop, err := filepath.EvalSymlinks(top)
+	if err != nil {
+		return "", false
+	}
+	realTop, err = filepath.Abs(realTop)
+	if err != nil || !withinResolvedRoot(realRoot, realTop) || !withinResolvedRoot(realTop, realCWD) {
+		return "", false
+	}
+	worktreeCommon, err := gitCommonDir(ctx, realTop)
+	if err != nil {
+		return "", false
+	}
+
+	for _, candidate := range candidates {
+		if !filepath.IsAbs(candidate) || strings.ContainsRune(candidate, '\x00') {
+			continue
+		}
+		realCandidate, err := filepath.EvalSymlinks(filepath.Clean(candidate))
+		if err != nil {
+			continue
+		}
+		realCandidate, err = filepath.Abs(realCandidate)
+		if err != nil {
+			continue
+		}
+		candidateInfo, err := os.Stat(realCandidate)
+		if err != nil || !candidateInfo.IsDir() {
+			continue
+		}
+		candidateCommon, err := gitCommonDir(ctx, realCandidate)
+		if err != nil || candidateCommon != worktreeCommon {
+			continue
+		}
+		registered, err := registeredWorktree(ctx, realCandidate, realTop)
+		if err == nil && registered {
+			return filepath.Clean(realTop), true
+		}
+	}
+	return "", false
 }
 
 func advertisedBranchHead(output, branchRef string) (string, bool) {
