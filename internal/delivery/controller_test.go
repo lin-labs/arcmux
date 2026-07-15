@@ -125,6 +125,48 @@ func TestControllerDoesNotAcceptTypedPromptAsDelivered(t *testing.T) {
 	}
 }
 
+func TestControllerAcceptsRetainedPromptWithAgentOutputWithoutExtraSubmit(t *testing.T) {
+	t.Parallel()
+
+	prompt := `arcmux-handoff-v1:ef01fc475b773bc9ef38af6789a029ab--------------------------------------------------------------------------
+
+Resume this explicitly authorized handoff. Run arcmux handoff receive before acting.`
+	controller := NewController(HeuristicJudge{}, ControllerConfig{
+		IngestionTimeout:  20 * time.Millisecond,
+		RetryInterval:     time.Millisecond,
+		MaxSubmitAttempts: 1,
+		MinConfidence:     0.7,
+	})
+	runtime := &fakeRuntime{outputs: []string{`
+› arcmux-handoff-v1:ef01fc475b773bc9ef38af6789a029ab--------------------------------------------------------------------------
+
+  Resume this explicitly authorized handoff. Run arcmux handoff receive before acting.
+
+• I’m receiving the authorized handoff instructions now.
+
+• Ran arcmux handoff receive arcmux-handoff-v1:ef01fc475b773bc9ef38af6789a029ab
+  └ {"history_path":"/private/history.md"}
+
+HANDOFF_OK
+
+›
+`}}
+
+	assessment, err := controller.EnsureIngested(context.Background(), Evidence{
+		Prompt:       prompt,
+		BeforeOutput: "gpt-5.4 xhigh · ~/Projects/arcmux",
+	}, runtime)
+	if err != nil {
+		t.Fatalf("EnsureIngested: %v", err)
+	}
+	if assessment.State != StateIngested {
+		t.Fatalf("state = %s, want %s", assessment.State, StateIngested)
+	}
+	if runtime.submitCount != 0 {
+		t.Fatalf("submit count = %d, want 0", runtime.submitCount)
+	}
+}
+
 func TestIsIngested_SoftPassPath(t *testing.T) {
 	t.Parallel()
 	c := NewController(HeuristicJudge{}, ControllerConfig{MinConfidence: 0.7})
