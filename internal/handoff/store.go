@@ -349,12 +349,60 @@ func (s *Store) TransitionTarget(id string, expectedRevision uint64, next Target
 	record.Updated = at
 	if err := applyTransition(&record.NextRetry, &record.Failure, &record.TargetLocator, transition,
 		next == TargetWaitingAssets || next == TargetLaunchWaitingAssets,
-		next == TargetRejected, next == TargetLaunching || next == TargetAccepted); err != nil {
+		next == TargetRejected, next == TargetLaunching || next == TargetLaunchWaitingAssets || next == TargetAccepted); err != nil {
 		return TargetRecord{}, err
 	}
 	if next == TargetValidating {
 		record.Attempts++
 	}
+	if err := record.validate(); err != nil {
+		return TargetRecord{}, err
+	}
+	file, _ := s.recordPath("target", id)
+	if err := writeJSONFile(s.root, file, record); err != nil {
+		return TargetRecord{}, err
+	}
+	return cloneTargetRecord(record), nil
+}
+
+// RecordTargetLaunchLocator durably binds an authorized target launch to one
+// supervised session before prompt delivery. Replays may only reuse that exact
+// locator; a different session is a protocol conflict rather than a reason to
+// spawn another continuation.
+func (s *Store) RecordTargetLaunchLocator(id string, expectedRevision uint64, locator TargetLocator, at time.Time) (TargetRecord, error) {
+	if err := locator.validate(); err != nil {
+		return TargetRecord{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, err := s.getTargetLocked(id)
+	if err != nil {
+		return TargetRecord{}, err
+	}
+	if record.Revision != expectedRevision {
+		return TargetRecord{}, ErrCASConflict
+	}
+	if record.State != TargetLaunching {
+		return TargetRecord{}, fmt.Errorf("%w: locator requires target state %s", ErrIllegalTransition, TargetLaunching)
+	}
+	if locator.DeviceID != record.Manifest.Target.DeviceID {
+		return TargetRecord{}, errors.New("target locator device does not match manifest target")
+	}
+	if record.TargetLocator != nil {
+		if *record.TargetLocator != locator {
+			return TargetRecord{}, ErrManifestConflict
+		}
+		return cloneTargetRecord(record), nil
+	}
+	if at.IsZero() {
+		at = s.now().UTC()
+	}
+	if at.Location() != time.UTC || at.Before(record.Updated) {
+		return TargetRecord{}, errors.New("locator time must be UTC and not precede the record")
+	}
+	record.TargetLocator = cloneLocator(&locator)
+	record.Revision++
+	record.Updated = at
 	if err := record.validate(); err != nil {
 		return TargetRecord{}, err
 	}

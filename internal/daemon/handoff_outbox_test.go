@@ -15,6 +15,7 @@ import (
 	"github.com/lin-labs/arcmux/internal/handoff"
 	arcmuxmesh "github.com/lin-labs/arcmux/internal/mesh"
 	"github.com/lin-labs/arcmux/internal/project"
+	"github.com/lin-labs/arcmux/internal/session"
 	"github.com/lin-labs/arcmux/internal/sessionview"
 )
 
@@ -23,6 +24,7 @@ type sourceOutboxFixture struct {
 	store        *handoff.Store
 	detail       sessionview.Detail
 	remote       func(context.Context, string, meshHandoffPrepareRequest) (meshHandoffStatus, error)
+	launchRemote func(context.Context, string, meshHandoffLaunchRequest) (meshHandoffStatus, error)
 	inspectedCWD string
 	manifest     handoff.Manifest
 }
@@ -82,6 +84,9 @@ func newSourceOutboxFixture(t *testing.T) *sourceOutboxFixture {
 			fixture.manifest = request.Manifest
 			return fixture.remote(ctx, peer, request)
 		},
+		callLaunch: func(ctx context.Context, peer string, request meshHandoffLaunchRequest) (meshHandoffStatus, error) {
+			return fixture.launchRemote(ctx, peer, request)
+		},
 		newID: func(_ string) (string, error) {
 			if len(ids) == 0 {
 				return "", errors.New("no id")
@@ -104,6 +109,15 @@ func newSourceOutboxFixture(t *testing.T) *sourceOutboxFixture {
 			t.Fatal(err)
 		}
 		return meshHandoffStatus{HandoffID: request.Manifest.HandoffID, ManifestDigest: digest, State: handoff.TargetPrepared}, nil
+	}
+	fixture.launchRemote = func(_ context.Context, peer string, request meshHandoffLaunchRequest) (meshHandoffStatus, error) {
+		if peer != "devbox" {
+			t.Fatalf("launch peer=%q", peer)
+		}
+		return meshHandoffStatus{
+			HandoffID: request.HandoffID, ManifestDigest: request.ManifestDigest, State: handoff.TargetAccepted,
+			TargetLocator: &handoff.TargetLocator{DeviceID: "devbox", ProfileScope: "root", SessionID: "target-session"},
+		}, nil
 	}
 	return fixture
 }
@@ -139,6 +153,112 @@ func TestSourceHandoffPrepareDerivesImmutableManifestAndPrepares(t *testing.T) {
 	stored, err := fixture.store.GetSource(dto.HandoffID)
 	if err != nil || stored.State != handoff.SourceRemotePrepared || stored.Digest != dto.ManifestDigest {
 		t.Fatalf("stored=%#v err=%v", stored, err)
+	}
+}
+
+func TestSourceHandoffLaunchIsExplicitAndPersistsAcceptedLocator(t *testing.T) {
+	fixture := newSourceOutboxFixture(t)
+	var launchCalls atomic.Int32
+	fixture.launchRemote = func(_ context.Context, peer string, request meshHandoffLaunchRequest) (meshHandoffStatus, error) {
+		launchCalls.Add(1)
+		return meshHandoffStatus{
+			HandoffID: request.HandoffID, ManifestDigest: request.ManifestDigest, State: handoff.TargetAccepted,
+			TargetLocator: &handoff.TargetLocator{DeviceID: peer, ProfileScope: "root", SessionID: "target-session"},
+		}, nil
+	}
+	prepared, err := fixture.outbox.prepare(context.Background(), sourcePrepareRequest())
+	if err != nil || prepared.State != handoff.SourceRemotePrepared || launchCalls.Load() != 0 {
+		t.Fatalf("prepare=%+v launch_calls=%d err=%v", prepared, launchCalls.Load(), err)
+	}
+	accepted, err := fixture.outbox.launch(context.Background(), prepared.HandoffID)
+	if err != nil || accepted.State != handoff.SourceAccepted || accepted.TargetLocator == nil || launchCalls.Load() != 1 {
+		t.Fatalf("launch=%+v launch_calls=%d err=%v", accepted, launchCalls.Load(), err)
+	}
+	replay, err := fixture.outbox.launch(context.Background(), prepared.HandoffID)
+	if err != nil || replay.TargetLocator == nil || *replay.TargetLocator != *accepted.TargetLocator || launchCalls.Load() != 1 {
+		t.Fatalf("replay=%+v launch_calls=%d err=%v", replay, launchCalls.Load(), err)
+	}
+}
+
+func TestSourceHandoffLaunchMissingGrantRetriesSamePreparedHandoff(t *testing.T) {
+	fixture := newSourceOutboxFixture(t)
+	prepared, err := fixture.outbox.prepare(context.Background(), sourcePrepareRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.launchRemote = func(context.Context, string, meshHandoffLaunchRequest) (meshHandoffStatus, error) {
+		return meshHandoffStatus{}, &arcmuxmesh.RPCError{Code: arcmuxmesh.ErrorPermissionDenied, Message: "private remote text"}
+	}
+	waiting, err := fixture.outbox.launch(context.Background(), prepared.HandoffID)
+	if err != nil || waiting.State != handoff.SourceLaunchRetryWait || waiting.Failure == nil ||
+		waiting.Failure.Code != handoff.FailureUnauthorized || !waiting.Failure.Retryable {
+		t.Fatalf("missing grant=%+v err=%v", waiting, err)
+	}
+	fixture.launchRemote = func(_ context.Context, peer string, request meshHandoffLaunchRequest) (meshHandoffStatus, error) {
+		return meshHandoffStatus{
+			HandoffID: request.HandoffID, ManifestDigest: request.ManifestDigest, State: handoff.TargetAccepted,
+			TargetLocator: &handoff.TargetLocator{DeviceID: peer, ProfileScope: "root", SessionID: "target-session"},
+		}, nil
+	}
+	accepted, err := fixture.outbox.retry(context.Background(), prepared.HandoffID)
+	if err != nil || accepted.HandoffID != prepared.HandoffID || accepted.State != handoff.SourceAccepted {
+		t.Fatalf("grant retry=%+v err=%v", accepted, err)
+	}
+}
+
+func TestSourceHandoffLaunchRejectsUnsafeAcceptedLocator(t *testing.T) {
+	for _, locator := range []*handoff.TargetLocator{
+		nil,
+		{DeviceID: "devbox", ProfileScope: "profile:codex", SessionID: "target-session"},
+		{DeviceID: "devbox", ProfileScope: "root", SessionID: "../unsafe"},
+	} {
+		fixture := newSourceOutboxFixture(t)
+		prepared, err := fixture.outbox.prepare(context.Background(), sourcePrepareRequest())
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixture.launchRemote = func(_ context.Context, _ string, request meshHandoffLaunchRequest) (meshHandoffStatus, error) {
+			return meshHandoffStatus{HandoffID: request.HandoffID, ManifestDigest: request.ManifestDigest, State: handoff.TargetAccepted, TargetLocator: locator}, nil
+		}
+		failed, err := fixture.outbox.launch(context.Background(), prepared.HandoffID)
+		if err != nil || failed.State != handoff.SourceFailed || failed.Failure == nil || failed.Failure.Code != handoff.FailureConflict {
+			t.Fatalf("locator=%+v failed=%+v err=%v", locator, failed, err)
+		}
+	}
+}
+
+func TestSourceLaunchReconcileNeverMutatesSourceSession(t *testing.T) {
+	fixture := newSourceOutboxFixture(t)
+	_, manifest := newHandoffTestApplication(t, true)
+	manifest.HandoffID = "source-launch-preserves-session"
+	manifest.Target.DeviceID = "devbox"
+	seedSourceHandoffState(t, fixture.store, manifest, handoff.SourceLaunchingRemote, time.Time{})
+	fixture.outbox.callLaunch = func(_ context.Context, peer string, request meshHandoffLaunchRequest) (meshHandoffStatus, error) {
+		return meshHandoffStatus{
+			HandoffID: request.HandoffID, ManifestDigest: request.ManifestDigest, State: handoff.TargetAccepted,
+			TargetLocator: &handoff.TargetLocator{DeviceID: peer, ProfileScope: "root", SessionID: "target-session"},
+		}, nil
+	}
+	d := newMeshApplicationTestDaemon(t, "ref")
+	secretCWD := filepath.Join(t.TempDir(), "source-worktree")
+	source := session.NewSession(manifest.Source.SessionID, "source remains live", manifest.SourceAgent, secretCWD)
+	source.SetCurrentCommand("source is still processing this exact command")
+	source.SetState(session.StateWorking)
+	d.mu.Lock()
+	d.sessions[source.Snapshot().ID] = source
+	d.mu.Unlock()
+	before := source.Snapshot()
+	if err := fixture.outbox.reconcile(context.Background(), time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := fixture.store.GetSource(manifest.HandoffID)
+	if err != nil || accepted.State != handoff.SourceAccepted {
+		t.Fatalf("source record=%+v err=%v", accepted, err)
+	}
+	kept, ok := d.GetSession(source.Snapshot().ID)
+	after := kept.Snapshot()
+	if !ok || kept != source || after.State != before.State || after.CurrentCommand != before.CurrentCommand || after.CWD != before.CWD {
+		t.Fatalf("source session mutated before=%+v after=%+v same=%t ok=%t", before, after, kept == source, ok)
 	}
 }
 
@@ -303,7 +423,7 @@ func TestSourceHandoffDTORedactsManifest(t *testing.T) {
 	}
 }
 
-func TestSourceHandoffReconcileResumesPrepareWorkAndLeavesOtherPhasesInert(t *testing.T) {
+func TestSourceHandoffReconcileResumesPreparedWorkAndAuthorizedLaunches(t *testing.T) {
 	fixture := newSourceOutboxFixture(t)
 	_, base := newHandoffTestApplication(t, true)
 	scanAt := time.Now().UTC().Add(time.Minute)
@@ -332,6 +452,7 @@ func TestSourceHandoffReconcileResumesPrepareWorkAndLeavesOtherPhasesInert(t *te
 
 	var mu sync.Mutex
 	calls := make(map[string]int)
+	launchCalls := make(map[string]int)
 	fixture.outbox.callPrepare = func(_ context.Context, _ string, request meshHandoffPrepareRequest) (meshHandoffStatus, error) {
 		mu.Lock()
 		calls[request.Manifest.HandoffID]++
@@ -341,6 +462,15 @@ func TestSourceHandoffReconcileResumesPrepareWorkAndLeavesOtherPhasesInert(t *te
 			t.Fatal(err)
 		}
 		return meshHandoffStatus{HandoffID: request.Manifest.HandoffID, ManifestDigest: digest, State: handoff.TargetPrepared}, nil
+	}
+	fixture.outbox.callLaunch = func(_ context.Context, _ string, request meshHandoffLaunchRequest) (meshHandoffStatus, error) {
+		mu.Lock()
+		launchCalls[request.HandoffID]++
+		mu.Unlock()
+		return meshHandoffStatus{
+			HandoffID: request.HandoffID, ManifestDigest: request.ManifestDigest, State: handoff.TargetAccepted,
+			TargetLocator: &handoff.TargetLocator{DeviceID: "server", ProfileScope: "root", SessionID: "target-session"},
+		}, nil
 	}
 	if err := fixture.outbox.reconcile(context.Background(), scanAt); err != nil {
 		t.Fatal(err)
@@ -352,10 +482,24 @@ func TestSourceHandoffReconcileResumesPrepareWorkAndLeavesOtherPhasesInert(t *te
 			t.Fatalf("resumed %s record=%+v calls=%d err=%v", id, record, calls[id], err)
 		}
 	}
-	for _, item := range states[3:] {
+	for _, id := range []string{"reconcile-launching", "reconcile-launch-retry"} {
+		record, err := fixture.store.GetSource(id)
+		if err != nil || record.State != handoff.SourceAccepted || launchCalls[id] != 1 || record.TargetLocator == nil {
+			t.Fatalf("resumed launch %s record=%+v calls=%d err=%v", id, record, launchCalls[id], err)
+		}
+	}
+	for _, item := range []struct {
+		id    string
+		state handoff.SourceState
+	}{
+		{id: "reconcile-future", state: handoff.SourceRetryWait},
+		{id: "reconcile-prepared", state: handoff.SourceRemotePrepared},
+		{id: "reconcile-accepted", state: handoff.SourceAccepted},
+		{id: "reconcile-failed", state: handoff.SourceFailed},
+	} {
 		record, err := fixture.store.GetSource(item.id)
-		if err != nil || record.State != item.state || calls[item.id] != 0 {
-			t.Fatalf("inert %s record=%+v calls=%d err=%v", item.id, record, calls[item.id], err)
+		if err != nil || record.State != item.state || calls[item.id] != 0 || launchCalls[item.id] != 0 {
+			t.Fatalf("inert %s record=%+v prepare_calls=%d launch_calls=%d err=%v", item.id, record, calls[item.id], launchCalls[item.id], err)
 		}
 	}
 }

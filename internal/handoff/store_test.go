@@ -273,31 +273,32 @@ func TestTargetLocatorLifecycleIsStateBound(t *testing.T) {
 	}
 	validating, _ := store.TransitionTarget(target.Manifest.HandoffID, target.Revision, TargetValidating, Transition{At: start.Add(time.Second)})
 	prepared, _ := store.TransitionTarget(target.Manifest.HandoffID, validating.Revision, TargetPrepared, Transition{At: start.Add(2 * time.Second)})
-	launching, err := store.TransitionTarget(target.Manifest.HandoffID, prepared.Revision, TargetLaunching, Transition{
-		At: start.Add(3 * time.Second), TargetLocator: &locator,
-	})
+	launching, err := store.TransitionTarget(target.Manifest.HandoffID, prepared.Revision, TargetLaunching, Transition{At: start.Add(3 * time.Second)})
 	if err != nil {
 		t.Fatal(err)
 	}
+	launching, err = store.RecordTargetLaunchLocator(target.Manifest.HandoffID, launching.Revision, locator, start.Add(3500*time.Millisecond))
+	if err != nil || launching.TargetLocator == nil || *launching.TargetLocator != locator {
+		t.Fatalf("persist launch locator: record=%+v err=%v", launching, err)
+	}
+	if replay, err := store.RecordTargetLaunchLocator(target.Manifest.HandoffID, launching.Revision, locator, start.Add(3500*time.Millisecond)); err != nil || replay.Revision != launching.Revision {
+		t.Fatalf("locator replay: record=%+v err=%v", replay, err)
+	}
 	retryAt := start.Add(time.Minute)
 	retryFailure := Failure{Code: FailureUnavailable, Message: "launch interrupted", Retryable: true, At: start.Add(4 * time.Second)}
-	if _, err := store.TransitionTarget(target.Manifest.HandoffID, launching.Revision, TargetLaunchWaitingAssets, Transition{
-		At: start.Add(4 * time.Second), NextRetry: &retryAt, Failure: &retryFailure, TargetLocator: &locator,
-	}); err == nil {
-		t.Fatal("retry transition accepted a supplied target locator")
-	}
 	waiting, err := store.TransitionTarget(target.Manifest.HandoffID, launching.Revision, TargetLaunchWaitingAssets, Transition{
 		At: start.Add(4 * time.Second), NextRetry: &retryAt, Failure: &retryFailure,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if waiting.TargetLocator != nil {
-		t.Fatalf("retry retained target locator: %+v", waiting.TargetLocator)
+	if waiting.TargetLocator == nil || *waiting.TargetLocator != locator {
+		t.Fatalf("retry lost target locator: %+v", waiting.TargetLocator)
 	}
-	launching, _ = store.TransitionTarget(target.Manifest.HandoffID, waiting.Revision, TargetLaunching, Transition{
-		At: retryAt, TargetLocator: &locator,
-	})
+	launching, _ = store.TransitionTarget(target.Manifest.HandoffID, waiting.Revision, TargetLaunching, Transition{At: retryAt})
+	if launching.TargetLocator == nil || *launching.TargetLocator != locator {
+		t.Fatalf("launch retry lost target locator: %+v", launching.TargetLocator)
+	}
 	rejectedFailure := Failure{Code: FailureLaunch, Message: "launch rejected", At: retryAt.Add(time.Second)}
 	if _, err := store.TransitionTarget(target.Manifest.HandoffID, launching.Revision, TargetRejected, Transition{
 		At: retryAt.Add(time.Second), Failure: &rejectedFailure, TargetLocator: &locator,

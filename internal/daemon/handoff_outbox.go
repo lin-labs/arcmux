@@ -47,6 +47,7 @@ type sourceHandoffDTO struct {
 	TargetDevice   string                 `json:"target_device"`
 	Project        string                 `json:"project"`
 	Failure        *meshHandoffFailureDTO `json:"failure,omitempty"`
+	TargetLocator  *handoff.TargetLocator `json:"target_locator,omitempty"`
 }
 
 type sourceHandoffErrorKind string
@@ -70,6 +71,7 @@ type sourceProjectLoader func(string) (*project.ConsolidatedRegistry, error)
 type sourceRepositoryInspector func(context.Context, string, project.ResolvedProject) (handoff.RepositorySnapshot, error)
 type sourceHistoryPublisher func(string, string, string) (handoff.HistoryRef, error)
 type sourceHandoffPrepareCaller func(context.Context, string, meshHandoffPrepareRequest) (meshHandoffStatus, error)
+type sourceHandoffLaunchCaller func(context.Context, string, meshHandoffLaunchRequest) (meshHandoffStatus, error)
 type safeIDGenerator func(string) (string, error)
 
 type sourceHandoffOutbox struct {
@@ -83,6 +85,7 @@ type sourceHandoffOutbox struct {
 	inspectRepository sourceRepositoryInspector
 	publishHistory    sourceHistoryPublisher
 	callPrepare       sourceHandoffPrepareCaller
+	callLaunch        sourceHandoffLaunchCaller
 	newID             safeIDGenerator
 	attemptTimeout    time.Duration
 }
@@ -113,9 +116,22 @@ func (d *Daemon) sourceHandoffOutbox() (*sourceHandoffOutbox, error) {
 		inspectRepository: handoff.InspectSourceRepository,
 		publishHistory:    handoff.PublishSourceHistory,
 		callPrepare:       d.callRemoteHandoffPrepare,
+		callLaunch:        d.callRemoteHandoffLaunch,
 		newID:             newHandoffSafeID,
 		attemptTimeout:    sourceHandoffAttemptTimeout,
 	}, nil
+}
+
+func (d *Daemon) callRemoteHandoffLaunch(ctx context.Context, peer string, request meshHandoffLaunchRequest) (meshHandoffStatus, error) {
+	manager, err := d.currentMeshManager()
+	if err != nil {
+		return meshHandoffStatus{}, err
+	}
+	var response meshHandoffStatus
+	if err := manager.Call(ctx, peer, meshMethodHandoffsLaunch, request, &response); err != nil {
+		return meshHandoffStatus{}, err
+	}
+	return response, nil
 }
 
 func (d *Daemon) callRemoteHandoffPrepare(ctx context.Context, peer string, request meshHandoffPrepareRequest) (meshHandoffStatus, error) {
@@ -271,15 +287,36 @@ func (o *sourceHandoffOutbox) retry(ctx context.Context, id string) (sourceHando
 		}
 		return sourceHandoffDTO{}, sourceOutboxInvalid("invalid handoff id")
 	}
-	if record.State != handoff.SourceRetryWait {
-		return sourceHandoffDTO{}, sourceOutboxConflict("only a prepare retry_wait handoff can be retried")
+	switch record.State {
+	case handoff.SourceRetryWait:
+		return o.attempt(ctx, id, true)
+	case handoff.SourceLaunchRetryWait:
+		return o.attemptLaunch(ctx, id, true)
+	default:
+		return sourceHandoffDTO{}, sourceOutboxConflict("only a retry_wait handoff can be retried")
 	}
-	return o.attempt(ctx, id, true)
 }
 
-// reconcile resumes only source-side prepare work. RunnableSource also
-// exposes launch recovery states for the future launch driver, so filter them
-// here rather than treating restart or connectivity as launch authorization.
+func (o *sourceHandoffOutbox) launch(ctx context.Context, id string) (sourceHandoffDTO, error) {
+	if o == nil || o.store == nil || o.callLaunch == nil || o.now == nil {
+		return sourceHandoffDTO{}, sourceOutboxUnavailable("handoff launch is unavailable")
+	}
+	record, err := o.store.GetSource(id)
+	if err != nil {
+		if errors.Is(err, handoff.ErrNotFound) {
+			return sourceHandoffDTO{}, sourceOutboxNotFound("handoff not found")
+		}
+		return sourceHandoffDTO{}, sourceOutboxInvalid("invalid handoff id")
+	}
+	if record.State != handoff.SourceRemotePrepared && record.State != handoff.SourceLaunchingRemote && record.State != handoff.SourceLaunchRetryWait && record.State != handoff.SourceAccepted {
+		return sourceHandoffDTO{}, sourceOutboxConflict("handoff must be remotely prepared before launch")
+	}
+	return o.attemptLaunch(ctx, id, true)
+}
+
+// reconcile resumes prepare work and launches that already crossed the
+// explicit SourceLaunchingRemote authorization boundary. SourceRemotePrepared
+// remains inert across restarts and reconnects.
 func (o *sourceHandoffOutbox) reconcile(ctx context.Context, at time.Time) error {
 	if o == nil || o.store == nil || o.now == nil {
 		return errors.New("source handoff recovery is unavailable")
@@ -303,6 +340,11 @@ func (o *sourceHandoffOutbox) reconcile(ctx context.Context, at time.Time) error
 			if candidate.NextRetry == nil || candidate.NextRetry.After(at) {
 				continue
 			}
+		case handoff.SourceLaunchingRemote:
+		case handoff.SourceLaunchRetryWait:
+			if candidate.NextRetry == nil || candidate.NextRetry.After(at) {
+				continue
+			}
 		default:
 			continue
 		}
@@ -310,7 +352,12 @@ func (o *sourceHandoffOutbox) reconcile(ctx context.Context, at time.Time) error
 		// attempt reloads under the shared per-store/per-ID lock. Concurrent
 		// operator retries and coalesced runtime passes therefore make one RPC.
 		attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
-		_, attemptErr := o.attempt(attemptCtx, candidate.Manifest.HandoffID, false)
+		var attemptErr error
+		if candidate.State == handoff.SourceLaunchingRemote || candidate.State == handoff.SourceLaunchRetryWait {
+			_, attemptErr = o.attemptLaunch(attemptCtx, candidate.Manifest.HandoffID, false)
+		} else {
+			_, attemptErr = o.attempt(attemptCtx, candidate.Manifest.HandoffID, false)
+		}
 		cancel()
 		if attemptErr != nil && ctx.Err() == nil {
 			// A concurrent state transition is already durable and will be
@@ -460,11 +507,121 @@ func (o *sourceHandoffOutbox) attempt(ctx context.Context, id string, force bool
 	}
 }
 
+func (o *sourceHandoffOutbox) attemptLaunch(ctx context.Context, id string, force bool) (sourceHandoffDTO, error) {
+	release := sourceAttemptLocks.lock(o.store.Root() + "\x00" + id)
+	defer release()
+
+	record, err := o.store.GetSource(id)
+	if err != nil {
+		return sourceHandoffDTO{}, sourceOutboxNotFound("handoff not found")
+	}
+	switch record.State {
+	case handoff.SourceRemotePrepared:
+		// This call is the explicit operator authorization boundary.
+	case handoff.SourceLaunchRetryWait:
+		if !force && record.NextRetry != nil && record.NextRetry.After(o.now().UTC()) {
+			return sourceHandoffRecordDTO(record), nil
+		}
+	case handoff.SourceLaunchingRemote:
+		// Resume the exact persisted launch after interruption.
+	case handoff.SourceAccepted, handoff.SourceFailed:
+		return sourceHandoffRecordDTO(record), nil
+	default:
+		return sourceHandoffDTO{}, sourceOutboxConflict("handoff is outside the launch phase")
+	}
+
+	if record.State != handoff.SourceLaunchingRemote {
+		at := sourceTransitionTime(o.now, record.Updated)
+		record, err = o.store.TransitionSource(id, record.Revision, handoff.SourceLaunchingRemote, handoff.Transition{At: at})
+		if err != nil {
+			return sourceHandoffDTO{}, sourceOutboxConflict("handoff state changed concurrently")
+		}
+	}
+	remote, callErr := o.callLaunch(ctx, record.Manifest.Target.DeviceID, meshHandoffLaunchRequest{
+		HandoffID: record.Manifest.HandoffID, ManifestDigest: record.Digest,
+	})
+	if callErr != nil {
+		failure, retryable := sourceLaunchCallFailure(callErr, sourceTransitionTime(o.now, record.Updated))
+		if retryable {
+			return o.transitionLaunchRetry(record, failure)
+		}
+		return o.transitionFailed(record, failure)
+	}
+	if remote.HandoffID != record.Manifest.HandoffID || remote.ManifestDigest != record.Digest {
+		return o.transitionFailed(record, handoff.Failure{
+			Code: handoff.FailureConflict, Message: "target returned conflicting handoff identity", At: sourceTransitionTime(o.now, record.Updated),
+		})
+	}
+
+	switch remote.State {
+	case handoff.TargetAccepted:
+		validLocator := remote.TargetLocator != nil && remote.TargetLocator.DeviceID == record.Manifest.Target.DeviceID &&
+			remote.TargetLocator.ProfileScope == string(sessionview.RootProfileScope)
+		if validLocator {
+			_, locatorErr := sessionview.NewLocator(sessionview.RootProfileScope, remote.TargetLocator.SessionID)
+			validLocator = locatorErr == nil
+		}
+		if !validLocator {
+			return o.transitionFailed(record, handoff.Failure{
+				Code: handoff.FailureConflict, Message: "target accepted launch without the prepared continuation locator", At: sourceTransitionTime(o.now, record.Updated),
+			})
+		}
+		at := sourceTransitionTime(o.now, record.Updated)
+		accepted, err := o.store.TransitionSource(id, record.Revision, handoff.SourceAccepted, handoff.Transition{
+			At: at, TargetLocator: remote.TargetLocator,
+		})
+		if err != nil {
+			return sourceHandoffDTO{}, sourceOutboxConflict("handoff state changed concurrently")
+		}
+		return sourceHandoffRecordDTO(accepted), nil
+	case handoff.TargetLaunching:
+		return o.transitionLaunchRetry(record, handoff.Failure{
+			Code: handoff.FailureUnavailable, Message: "target launch is still in progress", Retryable: true,
+			At: sourceTransitionTime(o.now, record.Updated),
+		})
+	case handoff.TargetLaunchWaitingAssets:
+		code := handoff.FailureLaunch
+		if remote.Failure != nil && validSourceFailureCode(remote.Failure.Code) {
+			code = remote.Failure.Code
+		}
+		return o.transitionLaunchRetry(record, handoff.Failure{
+			Code: code, Message: "target launch is waiting for local readiness", Retryable: true,
+			At: sourceTransitionTime(o.now, record.Updated),
+		})
+	case handoff.TargetRejected:
+		code := handoff.FailureLaunch
+		if remote.Failure != nil && validSourceFailureCode(remote.Failure.Code) {
+			code = remote.Failure.Code
+		}
+		return o.transitionFailed(record, handoff.Failure{
+			Code: code, Message: "target rejected handoff launch", At: sourceTransitionTime(o.now, record.Updated),
+		})
+	default:
+		return o.transitionFailed(record, handoff.Failure{
+			Code: handoff.FailureConflict, Message: "target returned a state outside handoff launch", At: sourceTransitionTime(o.now, record.Updated),
+		})
+	}
+}
+
 func (o *sourceHandoffOutbox) transitionRetry(record handoff.SourceRecord, failure handoff.Failure) (sourceHandoffDTO, error) {
 	at := sourceTransitionTime(o.now, record.Updated)
 	failure.At = at
 	next := at.Add(sourceHandoffRetryDelay)
 	updated, err := o.store.TransitionSource(record.Manifest.HandoffID, record.Revision, handoff.SourceRetryWait, handoff.Transition{
+		At: at, NextRetry: &next, Failure: &failure,
+	})
+	if err != nil {
+		return sourceHandoffDTO{}, sourceOutboxConflict("handoff state changed concurrently")
+	}
+	return sourceHandoffRecordDTO(updated), nil
+}
+
+func (o *sourceHandoffOutbox) transitionLaunchRetry(record handoff.SourceRecord, failure handoff.Failure) (sourceHandoffDTO, error) {
+	at := sourceTransitionTime(o.now, record.Updated)
+	failure.At = at
+	failure.Retryable = true
+	next := at.Add(sourceHandoffRetryDelay)
+	updated, err := o.store.TransitionSource(record.Manifest.HandoffID, record.Revision, handoff.SourceLaunchRetryWait, handoff.Transition{
 		At: at, NextRetry: &next, Failure: &failure,
 	})
 	if err != nil {
@@ -515,6 +672,27 @@ func sourceCallFailure(err error, at time.Time) (handoff.Failure, bool) {
 	return failure, true
 }
 
+func sourceLaunchCallFailure(err error, at time.Time) (handoff.Failure, bool) {
+	failure := handoff.Failure{
+		Code: handoff.FailureUnavailable, Message: "target peer is temporarily unavailable", Retryable: true, At: at,
+	}
+	var rpcErr *arcmuxmesh.RPCError
+	if errors.As(err, &rpcErr) {
+		switch rpcErr.Code {
+		case arcmuxmesh.ErrorPermissionDenied:
+			return handoff.Failure{Code: handoff.FailureUnauthorized, Message: "target launch permission is not granted", Retryable: true, At: at}, true
+		case arcmuxmesh.ErrorInvalidRequest, arcmuxmesh.ErrorPayloadTooLarge, arcmuxmesh.ErrorUnsupportedMethod:
+			return handoff.Failure{Code: handoff.FailureInvalidManifest, Message: "target rejected the launch request", At: at}, false
+		case arcmuxmesh.ErrorCapabilityRequired, arcmuxmesh.ErrorBackpressure, arcmuxmesh.ErrorInternal:
+			return failure, true
+		}
+	}
+	if errors.Is(err, arcmuxmesh.ErrMethodNotRegistered) {
+		return handoff.Failure{Code: handoff.FailureInternal, Message: "local handoff launch protocol is unavailable", At: at}, false
+	}
+	return failure, true
+}
+
 func validSourceFailureCode(code handoff.FailureCode) bool {
 	switch code {
 	case handoff.FailureUnavailable, handoff.FailureUnauthorized, handoff.FailureInvalidManifest, handoff.FailureConflict,
@@ -534,6 +712,10 @@ func sourceHandoffRecordDTO(record handoff.SourceRecord) sourceHandoffDTO {
 		dto.Failure = &meshHandoffFailureDTO{
 			Code: record.Failure.Code, Message: record.Failure.Message, Retryable: record.Failure.Retryable,
 		}
+	}
+	if record.TargetLocator != nil {
+		locator := *record.TargetLocator
+		dto.TargetLocator = &locator
 	}
 	return dto
 }

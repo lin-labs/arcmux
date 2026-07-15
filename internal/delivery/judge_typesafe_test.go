@@ -12,6 +12,15 @@ type fakeEvaluator struct {
 	err  error
 }
 
+type countingEvaluator struct {
+	called bool
+}
+
+func (f *countingEvaluator) Evaluate(_ context.Context, _ any, _ []typesafe.Prompt) (*typesafe.EvaluationResponse, error) {
+	f.called = true
+	return nil, context.Canceled
+}
+
 func (f fakeEvaluator) Evaluate(_ context.Context, _ any, _ []typesafe.Prompt) (*typesafe.EvaluationResponse, error) {
 	return f.resp, f.err
 }
@@ -77,5 +86,27 @@ func TestTypesafeJudgeFallsBackOnError(t *testing.T) {
 	}
 	if assessment.State != StateIngested {
 		t.Fatalf("state = %s", assessment.State)
+	}
+}
+
+func TestTypesafeJudgeKeepsPrivateEvidenceLocal(t *testing.T) {
+	t.Parallel()
+	evaluator := &countingEvaluator{}
+	judge := &TypesafeJudge{evaluator: evaluator, fallback: HeuristicJudge{}}
+	assessment, err := judge.Assess(context.Background(), Evidence{
+		Prompt:           "safe handoff marker",
+		BeforeOutput:     "DO_NOT_EXPORT_PRIVATE_CWD",
+		AfterOutput:      "Working on DO_NOT_EXPORT_PRIVATE_CONTEXT",
+		WorkingIndicator: "Working",
+		LocalOnly:        true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evaluator.called {
+		t.Fatal("private delivery evidence was sent to the Typesafe evaluator")
+	}
+	if assessment.Source != "heuristic" || assessment.State != StateIngested {
+		t.Fatalf("local assessment = %+v", assessment)
 	}
 }

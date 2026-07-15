@@ -95,6 +95,37 @@ func (h *HTTPServer) handleMeshHandoffRetry(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, prepared)
 }
 
+func (h *HTTPServer) handleMeshHandoffLaunch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "POST required"})
+		return
+	}
+	if err := requireOnlyQuery(r, "id"); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "id is required"})
+		return
+	}
+	if err := requireEmptyBody(r); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	outbox, err := h.handoffOutbox()
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "handoff outbox is unavailable"})
+		return
+	}
+	launched, err := outbox.launch(r.Context(), id)
+	if err != nil {
+		writeSourceHandoffError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, launched)
+}
+
 func requireOnlyQuery(r *http.Request, allowed string) error {
 	for key, values := range r.URL.Query() {
 		if key != allowed {

@@ -1,10 +1,13 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -405,6 +408,34 @@ func TestQueryAudit_Filters(t *testing.T) {
 
 	// Silence unused — keep db for future expansion of this test.
 	_ = db
+}
+
+func TestPrivateSessionCreateRedactsCWDFromLogsAndAudit(t *testing.T) {
+	d, cleanup := newCreateSessionTestDaemon(t)
+	defer cleanup()
+	var logs bytes.Buffer
+	d.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	secretCWD := filepath.Join(t.TempDir(), "DO_NOT_LEAK_PRIVATE_WORKTREE")
+	if err := os.Mkdir(secretCWD, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sess, _, err := d.createSessionWithIdempotency(context.Background(), CreateSessionRequest{
+		Agent: "claude_exec", CWD: secretCWD, Name: "private-handoff", OwnerID: "arcmux-handoff:test", private: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := NewGRPCServer(d).QueryAudit(context.Background(), &arcmuxv1.QueryAuditRequest{SessionId: sess.Snapshot().ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	audit, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(logs.String(), secretCWD) || strings.Contains(string(audit), secretCWD) {
+		t.Fatalf("private cwd leaked logs=%s audit=%s", logs.String(), audit)
+	}
 }
 
 // TestQueryAudit_BadSince guards the InvalidArgument edge.

@@ -26,6 +26,10 @@ type Evidence struct {
 	AfterOutput      string
 	WorkingIndicator string
 	Attempt          int
+	// LocalOnly prohibits judges from exporting this evidence. It is set from
+	// trusted daemon provenance for private supervised sessions; screen output
+	// may contain exact local paths or other continuation context.
+	LocalOnly bool
 
 	// SessionID is the arcmux session whose hook state file the hooks judge
 	// reads. Empty for callers that only use screen-based judges.

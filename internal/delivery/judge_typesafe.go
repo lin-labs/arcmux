@@ -38,6 +38,9 @@ func newTypesafeJudge() Judge {
 }
 
 func (j *TypesafeJudge) Assess(ctx context.Context, evidence Evidence) (Assessment, error) {
+	if evidence.LocalOnly {
+		return (HeuristicJudge{}).Assess(ctx, evidence)
+	}
 	if j == nil || j.evaluator == nil {
 		return j.fallback.Assess(ctx, evidence)
 	}

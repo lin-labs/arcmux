@@ -126,7 +126,7 @@ func (r TargetRecord) validate() error {
 	}
 	return validateRecordFields(r.Manifest.Target, string(r.State), r.NextRetry, r.Failure, r.TargetLocator, r.Revision, r.Updated,
 		r.State == TargetWaitingAssets || r.State == TargetLaunchWaitingAssets, r.State == TargetRejected,
-		r.State == TargetLaunching || r.State == TargetAccepted, r.State == TargetAccepted)
+		r.State == TargetLaunching || r.State == TargetLaunchWaitingAssets || r.State == TargetAccepted, r.State == TargetAccepted)
 }
 
 func validateStoredManifest(manifest Manifest, digest string) error {

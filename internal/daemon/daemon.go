@@ -41,6 +41,7 @@ type Daemon struct {
 	logger   *slog.Logger
 
 	mu        sync.RWMutex
+	persistMu sync.Mutex
 	sessions  map[string]*session.Session
 	monitors  map[string]context.CancelFunc
 	processes map[string]*os.Process
@@ -634,19 +635,26 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 	// CreateSession to produce a fresh session even when the name happened
 	// to collide. Match scoping by owner_id keeps that contract intact.
 	if name != "" && req.OwnerID != "" {
-		if existing := d.findNonTerminalByNameOwner(name, req.OwnerID); existing != nil {
-			d.auditSessionEvent("session.create.idempotent_hit", existing, map[string]any{
+		if existing := d.findNonTerminalByNameOwner(name, req.OwnerID, req.private); existing != nil {
+			detail := map[string]any{
 				"agent": req.Agent,
-				"cwd":   req.CWD,
 				"name":  name,
-			})
+			}
+			if !req.private {
+				detail["cwd"] = req.CWD
+			}
+			d.auditSessionEvent("session.create.idempotent_hit", existing, detail)
 			snap := existing.Snapshot()
-			d.logger.Info("session.create.idempotent_hit",
+			attributes := []any{
 				"session_id", snap.ID,
 				"name", snap.Name,
 				"owner_id", snap.OwnerID,
 				"state", string(snap.State),
-			)
+			}
+			if !req.private {
+				attributes = append(attributes, "cwd", req.CWD)
+			}
+			d.logger.Info("session.create.idempotent_hit", attributes...)
 			return existing, false, nil
 		}
 	}
@@ -656,24 +664,33 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 	sess.SetEnv(req.Env)
 	sess.SetAutoClose(req.AutoClose)
 	sess.SetOwnerID(req.OwnerID)
+	if req.private {
+		sess.MarkPrivate()
+	}
 
 	// Audit the create. Best-effort — the store may not be open yet (test
 	// paths that don't call Start), in which case auditState returns nil
 	// and we skip the row.
-	d.auditSessionEvent("session.create", sess, map[string]any{
+	detail := map[string]any{
 		"agent": req.Agent,
-		"cwd":   req.CWD,
 		"name":  name,
-	})
+	}
+	if !req.private {
+		detail["cwd"] = req.CWD
+	}
+	d.auditSessionEvent("session.create", sess, detail)
 
-	d.logger.Info("session.create",
+	attributes := []any{
 		"session_id", id,
 		"name", name,
 		"agent", req.Agent,
-		"cwd", req.CWD,
 		"owner_id", req.OwnerID,
 		"transport", string(prof.Transport),
-	)
+	}
+	if !req.private {
+		attributes = append(attributes, "cwd", req.CWD)
+	}
+	d.logger.Info("session.create", attributes...)
 
 	if prof.Transport == profile.TransportExec {
 		sess.SetState(session.StateIdle)
@@ -710,7 +727,11 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 	if d.cfg.Hooks.AutoInstall {
 		hookPath, err := d.hooks.Install(id, prof.HookType, prof.HookDir)
 		if err != nil {
-			d.logger.Warn("hook install failed (non-fatal)", "error", err)
+			if req.private {
+				d.logger.Warn("private session hook install failed (non-fatal)", "session_id", id)
+			} else {
+				d.logger.Warn("hook install failed (non-fatal)", "error", err)
+			}
 		} else {
 			d.watcher.Watch(id, hookPath)
 		}
@@ -720,7 +741,11 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 		// so give it the session id and the state dir.
 		if prof.HookBacked() {
 			if err := hooks.InitSessionState(d.cfg.Hooks.SessionStateDir, id, req.Agent, req.Prompt, time.Now()); err != nil {
-				d.logger.Warn("init session state failed (non-fatal)", "error", err)
+				if req.private {
+					d.logger.Warn("private session state initialization failed (non-fatal)", "session_id", id)
+				} else {
+					d.logger.Warn("init session state failed (non-fatal)", "error", err)
+				}
 			}
 			sessionEnv := map[string]string{
 				"ARCMUX_SESSION_ID":        id,
@@ -737,7 +762,11 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 				sessionEnv["ARCMUX_BIN"] = exe
 			}
 			if _, err := hooks.WriteSessionEnvFile(hooks.SessionEnvDir, id, sessionEnv); err != nil {
-				d.logger.Warn("write session hook env failed (non-fatal)", "error", err)
+				if req.private {
+					d.logger.Warn("private session hook environment write failed (non-fatal)", "session_id", id)
+				} else {
+					d.logger.Warn("write session hook env failed (non-fatal)", "error", err)
+				}
 			}
 		}
 	}
@@ -755,6 +784,9 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 	target, err := d.setupTmuxPane(ctx, tmuxSession, window, req.CWD, req.Env, startCommand)
 	if err != nil {
 		sess.SetState(session.StateFailed)
+		if req.private {
+			return nil, false, errors.New("setup private tmux pane failed")
+		}
 		return nil, false, fmt.Errorf("setup tmux pane: %w", err)
 	}
 	sess.TmuxSessionName = tmuxSession
@@ -763,7 +795,11 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 	// Set up output streaming via pipe-pane
 	outputFile := d.outputFilePath(id)
 	if err := d.tmux.PipePaneStart(ctx, target, outputFile); err != nil {
-		d.logger.Warn("pipe-pane setup failed", "error", err)
+		if req.private {
+			d.logger.Warn("private session output capture setup failed", "session_id", id)
+		} else {
+			d.logger.Warn("pipe-pane setup failed", "error", err)
+		}
 	}
 
 	// Store session before starting async work
@@ -782,12 +818,12 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 // given (name, ownerID) tuple and is NOT in a terminal state. Terminal
 // states are StateExited and StateFailed — those sessions are dead handles
 // and a fresh CreateSession SHOULD spawn a new session to replace them.
-func (d *Daemon) findNonTerminalByNameOwner(name, ownerID string) *session.Session {
+func (d *Daemon) findNonTerminalByNameOwner(name, ownerID string, private bool) *session.Session {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	for _, s := range d.sessions {
 		snap := s.Snapshot()
-		if snap.Name != name || snap.OwnerID != ownerID {
+		if snap.Name != name || snap.OwnerID != ownerID || snap.Private != private {
 			continue
 		}
 		switch snap.State {
@@ -1384,18 +1420,20 @@ func safeTmuxSessionName(raw, sessionID string) string {
 // --- Persistence ---
 
 type persistedSession struct {
-	ID               string        `json:"id"`
-	Name             string        `json:"name"`
-	Agent            string        `json:"agent"`
-	CWD              string        `json:"cwd"`
-	Transport        string        `json:"transport"`
-	TmuxSessionName  string        `json:"tmux_session_name,omitempty"`
-	TmuxTarget       string        `json:"tmux_target"`
-	CurrentCommand   string        `json:"current_command"`
-	BackendSessionID string        `json:"backend_session_id"`
-	State            session.State `json:"state"`
-	StartedAt        time.Time     `json:"started_at"`
-	OwnerID          string        `json:"owner_id,omitempty"`
+	ID                  string        `json:"id"`
+	Name                string        `json:"name"`
+	Agent               string        `json:"agent"`
+	CWD                 string        `json:"cwd"`
+	Transport           string        `json:"transport"`
+	TmuxSessionName     string        `json:"tmux_session_name,omitempty"`
+	TmuxTarget          string        `json:"tmux_target"`
+	CurrentCommand      string        `json:"current_command"`
+	BackendSessionID    string        `json:"backend_session_id"`
+	State               session.State `json:"state"`
+	StartedAt           time.Time     `json:"started_at"`
+	OwnerID             string        `json:"owner_id,omitempty"`
+	Private             bool          `json:"private,omitempty"`
+	HandoffInstructions string        `json:"handoff_instructions,omitempty"`
 }
 
 func (d *Daemon) persistPath() string {
@@ -1417,6 +1455,18 @@ func (d *Daemon) legacyPersistPath() string {
 }
 
 func (d *Daemon) persistSessions() {
+	if err := d.persistSessionsChecked(); err != nil {
+		d.logger.Error("persist sessions", "error", err)
+	}
+}
+
+// persistSessionsChecked synchronously writes the current inventory and lets
+// callers that establish a durable protocol boundary fail closed when the
+// write did not complete. Ordinary background persistence uses
+// persistSessions, which preserves the historical best-effort behavior.
+func (d *Daemon) persistSessionsChecked() error {
+	d.persistMu.Lock()
+	defer d.persistMu.Unlock()
 	d.mu.RLock()
 	records := make([]persistedSession, 0, len(d.sessions))
 	for _, s := range d.sessions {
@@ -1425,7 +1475,7 @@ func (d *Daemon) persistSessions() {
 		if snap.State == session.StateExited || snap.State == session.StateFailed {
 			continue
 		}
-		records = append(records, persistedSession{
+		record := persistedSession{
 			ID:               snap.ID,
 			Name:             snap.Name,
 			Agent:            snap.Agent,
@@ -1438,24 +1488,71 @@ func (d *Daemon) persistSessions() {
 			State:            snap.State,
 			StartedAt:        snap.StartedAt,
 			OwnerID:          snap.OwnerID,
-		})
+			Private:          snap.Private,
+		}
+		if snap.Private {
+			record.HandoffInstructions = snap.Env["ARCMUX_HANDOFF_INSTRUCTIONS"]
+		}
+		records = append(records, record)
 	}
 	d.mu.RUnlock()
 
 	data, err := json.MarshalIndent(records, "", "  ")
 	if err != nil {
-		d.logger.Error("persist sessions marshal", "error", err)
-		return
+		return errors.New("marshal session inventory")
 	}
 
 	path := d.persistPath()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		d.logger.Error("persist sessions mkdir", "error", err)
-		return
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return errors.New("create session inventory directory")
 	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		d.logger.Error("persist sessions write", "error", err)
+	if existing, statErr := os.Lstat(path); statErr == nil {
+		if existing.Mode()&os.ModeSymlink != 0 || !existing.Mode().IsRegular() {
+			return errors.New("session inventory path is unsafe")
+		}
+	} else if !os.IsNotExist(statErr) {
+		return errors.New("inspect session inventory")
 	}
+	tmp, err := os.CreateTemp(dir, ".sessions-*.tmp")
+	if err != nil {
+		return errors.New("create session inventory temp")
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return errors.New("secure session inventory temp")
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return errors.New("write session inventory")
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return errors.New("sync session inventory")
+	}
+	if err := tmp.Close(); err != nil {
+		return errors.New("close session inventory")
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return errors.New("publish session inventory")
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return errors.New("secure session inventory")
+	}
+	directory, err := os.Open(dir)
+	if err != nil {
+		return errors.New("open session inventory directory")
+	}
+	if err := directory.Sync(); err != nil {
+		directory.Close()
+		return errors.New("sync session inventory directory")
+	}
+	if err := directory.Close(); err != nil {
+		return errors.New("close session inventory directory")
+	}
+	return nil
 }
 
 func (d *Daemon) restoreSessions() {
@@ -1504,6 +1601,12 @@ func (d *Daemon) restoreSessions() {
 			sess := session.NewSession(rec.ID, rec.Name, rec.Agent, rec.CWD)
 			sess.SetTransport(rec.Transport)
 			sess.SetOwnerID(rec.OwnerID)
+			if rec.Private {
+				sess.MarkPrivate()
+			}
+			if rec.Private && rec.HandoffInstructions != "" {
+				sess.SetEnv(map[string]string{"ARCMUX_HANDOFF_INSTRUCTIONS": rec.HandoffInstructions})
+			}
 			sess.SetCurrentCommand(rec.CurrentCommand)
 			sess.SetBackendSessionID(rec.BackendSessionID)
 			sess.StartedAt = rec.StartedAt
@@ -1530,6 +1633,12 @@ func (d *Daemon) restoreSessions() {
 		sess := session.NewSession(rec.ID, rec.Name, rec.Agent, rec.CWD)
 		sess.SetTransport(rec.Transport)
 		sess.SetOwnerID(rec.OwnerID)
+		if rec.Private {
+			sess.MarkPrivate()
+		}
+		if rec.Private && rec.HandoffInstructions != "" {
+			sess.SetEnv(map[string]string{"ARCMUX_HANDOFF_INSTRUCTIONS": rec.HandoffInstructions})
+		}
 		sess.TmuxSessionName = rec.TmuxSessionName
 		sess.TmuxTarget = rec.TmuxTarget
 		sess.SetCurrentCommand(rec.CurrentCommand)
@@ -1598,6 +1707,9 @@ type CreateSessionRequest struct {
 	// recorded on the Session and on every audit row the daemon writes for
 	// that session. Empty default for legacy callers.
 	OwnerID string
+	// private is trusted internal provenance. Network request surfaces cannot
+	// set it; only the handoff launcher in this package may opt in.
+	private bool
 }
 
 func generateSessionID() string {

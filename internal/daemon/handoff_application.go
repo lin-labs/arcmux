@@ -2,9 +2,13 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,11 +16,15 @@ import (
 	arcmuxmesh "github.com/lin-labs/arcmux/internal/mesh"
 	"github.com/lin-labs/arcmux/internal/profile"
 	"github.com/lin-labs/arcmux/internal/project"
+	"github.com/lin-labs/arcmux/internal/session"
+	"github.com/lin-labs/arcmux/internal/sessionview"
 )
 
 const (
 	handoffAssetRetryDelay     = 15 * time.Second
 	targetHandoffResumeTimeout = 10 * time.Second
+	handoffLaunchPollInterval  = 25 * time.Millisecond
+	handoffSafePreambleRunes   = 200
 )
 
 type meshHandoffPrepareRequest struct {
@@ -25,6 +33,11 @@ type meshHandoffPrepareRequest struct {
 
 type meshHandoffStatusRequest struct {
 	HandoffID string `json:"handoff_id"`
+}
+
+type meshHandoffLaunchRequest struct {
+	HandoffID      string `json:"handoff_id"`
+	ManifestDigest string `json:"manifest_digest"`
 }
 
 // meshHandoffStatus is the complete handoff response allowlist. In particular,
@@ -36,6 +49,7 @@ type meshHandoffStatus struct {
 	State          handoff.TargetState    `json:"state"`
 	Attempts       uint32                 `json:"attempts"`
 	Failure        *meshHandoffFailureDTO `json:"failure,omitempty"`
+	TargetLocator  *handoff.TargetLocator `json:"target_locator,omitempty"`
 }
 
 type meshHandoffFailureDTO struct {
@@ -45,7 +59,12 @@ type meshHandoffFailureDTO struct {
 }
 
 type repositoryPreparer func(context.Context, handoff.Manifest, project.ResolvedProject) error
+type launchRepositoryPreparer func(context.Context, handoff.Manifest, project.ResolvedProject) (handoff.RepositoryPreparation, error)
 type targetProfileValidator func(string) error
+type targetSessionCreator func(context.Context, CreateSessionRequest) (*session.Session, bool, error)
+type targetSessionLookup func(string) (*session.Session, bool)
+type targetPromptSender func(context.Context, string, string, bool, bool) error
+type targetLocatorRecorder func(string, uint64, handoff.TargetLocator, time.Time) (handoff.TargetRecord, error)
 
 type handoffPrepareLock struct {
 	token chan struct{}
@@ -60,14 +79,22 @@ type handoffApplication struct {
 	snapshotHistory   func(string, string, string, handoff.HistoryRef) (string, error)
 	loadProjects      func(string) (*project.ConsolidatedRegistry, error)
 	prepareRepository repositoryPreparer
+	prepareLaunchRepo launchRepositoryPreparer
+	publishLaunchFile func(string, string, string, handoff.Manifest, handoff.RepositoryPreparation) (string, error)
 	validateProfile   targetProfileValidator
+	createSession     targetSessionCreator
+	lookupSession     targetSessionLookup
+	sendPrompt        targetPromptSender
+	persistSessions   func() error
+	recordLocator     targetLocatorRecorder
 	resumeTimeout     time.Duration
+	launchPoll        time.Duration
 	prepareMu         sync.Mutex
 	prepareLocks      map[string]*handoffPrepareLock
 }
 
 func newHandoffApplication(store *handoff.Store, profiles map[string]profile.Profile) *handoffApplication {
-	return &handoffApplication{
+	app := &handoffApplication{
 		store:             store,
 		historyRoot:       defaultHandoffHistoryRoot(),
 		projectsPath:      project.DefaultConsolidatedPath(),
@@ -75,12 +102,27 @@ func newHandoffApplication(store *handoff.Store, profiles map[string]profile.Pro
 		snapshotHistory:   handoff.SnapshotHistory,
 		loadProjects:      project.LoadConsolidated,
 		prepareRepository: prepareHandoffRepository,
+		prepareLaunchRepo: handoff.PrepareRepository,
+		publishLaunchFile: publishHandoffLaunchInstructions,
 		resumeTimeout:     targetHandoffResumeTimeout,
+		launchPoll:        handoffLaunchPollInterval,
 		validateProfile: func(name string) error {
 			return validateHandoffTargetProfile(profiles, name)
 		},
 		prepareLocks: make(map[string]*handoffPrepareLock),
 	}
+	app.recordLocator = store.RecordTargetLaunchLocator
+	return app
+}
+
+func (a *handoffApplication) configureLaunchRuntime(d *Daemon) {
+	if a == nil || d == nil {
+		return
+	}
+	a.createSession = d.createSessionWithIdempotency
+	a.lookupSession = d.GetSession
+	a.sendPrompt = d.SendPrompt
+	a.persistSessions = d.persistSessionsChecked
 }
 
 func validateHandoffTargetProfile(profiles map[string]profile.Profile, name string) error {
@@ -153,9 +195,9 @@ func (d *Daemon) scheduleSourceHandoffReconcile() {
 	}
 }
 
-// reconcileTargetHandoffs resumes only prepare-phase target work. Launching
-// and launch-retry states are deliberately reserved for the future launch
-// driver even though the store exposes them in its broader recovery query.
+// reconcileTargetHandoffs resumes both preparation and already-authorized
+// launches. TargetPrepared is absent from RecoverableTarget, so a restart can
+// never infer launch authority from preparation alone.
 func (d *Daemon) reconcileTargetHandoffs(ctx context.Context, at time.Time) {
 	app, err := d.handoffApplication()
 	if err != nil {
@@ -175,7 +217,8 @@ func (d *Daemon) reconcileTargetHandoffs(ctx context.Context, at time.Time) {
 			return
 		}
 		switch candidate.State {
-		case handoff.TargetReceived, handoff.TargetValidating, handoff.TargetWaitingAssets:
+		case handoff.TargetReceived, handoff.TargetValidating, handoff.TargetWaitingAssets,
+			handoff.TargetLaunching, handoff.TargetLaunchWaitingAssets:
 		default:
 			continue
 		}
@@ -199,16 +242,24 @@ func (d *Daemon) reconcileTargetHandoffs(ctx context.Context, at time.Time) {
 			d.logger.Warn("target handoff recovery reload failed", "handoff_id", candidate.Manifest.HandoffID)
 			continue
 		}
-		if current.State == handoff.TargetWaitingAssets && (current.NextRetry == nil || current.NextRetry.After(at)) {
+		if (current.State == handoff.TargetWaitingAssets || current.State == handoff.TargetLaunchWaitingAssets) &&
+			(current.NextRetry == nil || current.NextRetry.After(at)) {
 			release()
 			cancel()
 			continue
 		}
 		switch current.State {
-		case handoff.TargetReceived, handoff.TargetValidating, handoff.TargetWaitingAssets:
+		case handoff.TargetReceived, handoff.TargetValidating, handoff.TargetWaitingAssets,
+			handoff.TargetLaunching, handoff.TargetLaunchWaitingAssets:
+			isLaunch := current.State == handoff.TargetLaunching || current.State == handoff.TargetLaunchWaitingAssets
 			result := make(chan error, 1)
 			go func() {
-				_, resumeErr := app.resumeTarget(resumeCtx, current, d.meshDeviceID())
+				var resumeErr error
+				if isLaunch {
+					_, resumeErr = app.resumeLaunch(resumeCtx, current, d.meshDeviceID())
+				} else {
+					_, resumeErr = app.resumeTarget(resumeCtx, current, d.meshDeviceID())
+				}
 				release()
 				result <- resumeErr
 			}()
@@ -354,6 +405,386 @@ func (a *handoffApplication) resumeTarget(ctx context.Context, record handoff.Ta
 	return handoffStatusDTO(prepared), nil
 }
 
+// launch is the independently authorized target-side control operation. A
+// successful prepare grant can create TargetPrepared, but only this method's
+// separate handoffs.launch grant may durably enter TargetLaunching.
+func (a *handoffApplication) launch(ctx context.Context, principal arcmuxmesh.Principal, localDeviceID string, request meshHandoffLaunchRequest) (meshHandoffStatus, error) {
+	if request.HandoffID == "" || request.ManifestDigest == "" {
+		return meshHandoffStatus{}, meshInvalidRequest(errors.New("handoff_id and manifest_digest are required"))
+	}
+	release, err := a.lockPrepareContext(ctx, request.HandoffID)
+	if err != nil {
+		return meshHandoffStatus{}, err
+	}
+	defer release()
+	if err := ctx.Err(); err != nil {
+		return meshHandoffStatus{}, err
+	}
+	record, err := a.store.GetTarget(request.HandoffID)
+	if err != nil {
+		return meshHandoffStatus{}, meshInvalidRequest(errors.New("handoff not found"))
+	}
+	if principal.PeerID == "" || record.Manifest.Source.DeviceID != principal.PeerID {
+		return meshHandoffStatus{}, &arcmuxmesh.RPCError{Code: arcmuxmesh.ErrorPermissionDenied, Message: "handoff belongs to a different authenticated peer"}
+	}
+	if localDeviceID == "" || record.Manifest.Target.DeviceID != localDeviceID {
+		return meshHandoffStatus{}, meshInvalidRequest(errors.New("handoff target does not match this device"))
+	}
+	if request.ManifestDigest != record.Digest {
+		return meshHandoffStatus{}, meshInvalidRequest(errors.New("handoff manifest digest does not match prepared state"))
+	}
+
+	switch record.State {
+	case handoff.TargetPrepared, handoff.TargetLaunchWaitingAssets:
+		at := targetTransitionTime(a.now, record.Updated)
+		record, err = a.store.TransitionTarget(record.Manifest.HandoffID, record.Revision, handoff.TargetLaunching, handoff.Transition{At: at})
+		if err != nil {
+			return meshHandoffStatus{}, &arcmuxmesh.RPCError{Code: arcmuxmesh.ErrorInternal, Message: "unable to authorize target launch"}
+		}
+	case handoff.TargetLaunching:
+		// Resume the exact durable authorization after an interrupted call.
+	case handoff.TargetAccepted, handoff.TargetRejected:
+		return handoffStatusDTO(record), nil
+	default:
+		return meshHandoffStatus{}, meshInvalidRequest(errors.New("handoff is not prepared for launch"))
+	}
+	return a.resumeLaunch(ctx, record, localDeviceID)
+}
+
+// resumeLaunch revalidates every prepared input before selecting or creating
+// the deterministic supervised continuation. The caller must hold the per-ID
+// lock. TargetLaunching itself is the durable authorization used by restart
+// reconciliation; TargetPrepared is intentionally never resumed here.
+func (a *handoffApplication) resumeLaunch(ctx context.Context, record handoff.TargetRecord, localDeviceID string) (meshHandoffStatus, error) {
+	if record.State == handoff.TargetLaunchWaitingAssets {
+		at := targetTransitionTime(a.now, record.Updated)
+		var err error
+		record, err = a.store.TransitionTarget(record.Manifest.HandoffID, record.Revision, handoff.TargetLaunching, handoff.Transition{At: at})
+		if err != nil {
+			return meshHandoffStatus{}, &arcmuxmesh.RPCError{Code: arcmuxmesh.ErrorInternal, Message: "unable to resume target launch"}
+		}
+	}
+	if record.State != handoff.TargetLaunching {
+		return handoffStatusDTO(record), nil
+	}
+	if err := ctx.Err(); err != nil {
+		return meshHandoffStatus{}, err
+	}
+	if localDeviceID == "" || record.Manifest.Target.DeviceID != localDeviceID {
+		return a.reject(record, handoff.FailureVerification, "target device binding no longer matches this runtime")
+	}
+	if len(record.Manifest.Artifacts) != 0 {
+		return a.reject(record, handoff.FailureInvalidManifest, "handoff artifacts are not supported")
+	}
+	if err := a.validateProfile(record.Manifest.Target.Profile); err != nil {
+		return a.reject(record, handoff.FailureVerification, "target agent profile is not available for supervised launch")
+	}
+	if a.prepareLaunchRepo == nil || a.createSession == nil || a.lookupSession == nil || a.sendPrompt == nil || a.persistSessions == nil || a.recordLocator == nil {
+		return a.reject(record, handoff.FailureInternal, "target launch runtime is unavailable")
+	}
+
+	registry, err := a.loadProjects(a.projectsPath)
+	if err != nil {
+		return a.reject(record, handoff.FailureVerification, "target project registry is invalid")
+	}
+	resolvedProject, ok := registry.ResolveProject(record.Manifest.Repository.ProjectSlug)
+	if !ok {
+		return a.reject(record, handoff.FailureVerification, "target project is not registered")
+	}
+	historyPath, err := a.snapshotHistory(a.historyRoot, a.store.Root(), record.Manifest.HandoffID, record.Manifest.History)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return meshHandoffStatus{}, ctxErr
+	}
+	if err != nil {
+		if code, ok := handoff.HistoryErrorCodeOf(err); ok && code == handoff.HistoryErrorRetryable {
+			return a.waitForLaunch(record, handoff.FailureMissingAsset, "launch is waiting for synchronized history")
+		}
+		return a.reject(record, handoff.FailureVerification, "launch history did not match prepared state")
+	}
+	prepared, err := a.prepareLaunchRepo(ctx, record.Manifest, resolvedProject)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return meshHandoffStatus{}, ctxErr
+	}
+	if err != nil {
+		if code, ok := handoff.RepositoryErrorCodeOf(err); ok && code == handoff.RepositoryErrorRetryable {
+			return a.waitForLaunch(record, handoff.FailureMissingAsset, "launch is waiting for the prepared repository")
+		}
+		return a.reject(record, handoff.FailureVerification, "launch repository did not match prepared state")
+	}
+
+	if a.publishLaunchFile == nil {
+		return a.reject(record, handoff.FailureInternal, "target launch runtime is unavailable")
+	}
+	instructionsPath, err := a.publishLaunchFile(a.store.Root(), record.Manifest.HandoffID, historyPath, record.Manifest, prepared)
+	if err != nil {
+		return a.waitForLaunch(record, handoff.FailureInternal, "private target instructions are not ready")
+	}
+	sess, current, alreadyDelivered, err := a.targetLaunchSession(ctx, record, prepared, instructionsPath)
+	if err != nil {
+		if errors.Is(err, errHandoffLaunchConflict) {
+			return a.reject(current, handoff.FailureLaunch, "target continuation conflicts with durable launch state")
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return meshHandoffStatus{}, ctxErr
+		}
+		return a.waitForLaunch(current, handoff.FailureLaunch, "target continuation is not ready")
+	}
+	if !alreadyDelivered {
+		prompt := handoffLaunchPrompt(current)
+		if err := a.sendPrompt(ctx, sess.Snapshot().ID, prompt, true, false); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return meshHandoffStatus{}, ctxErr
+			}
+			return a.waitForLaunch(current, handoff.FailureLaunch, "confirmed target prompt delivery is not ready")
+		}
+	}
+	if sess.Snapshot().CurrentCommand != handoffLaunchCurrentCommand(current) {
+		return a.reject(current, handoff.FailureLaunch, "target continuation did not persist launch delivery evidence")
+	}
+	if err := a.persistSessions(); err != nil {
+		return a.waitForLaunch(current, handoff.FailureInternal, "target session persistence is not ready")
+	}
+	locator := current.TargetLocator
+	if locator == nil {
+		return a.reject(current, handoff.FailureInternal, "target continuation locator is unavailable")
+	}
+	at := targetTransitionTime(a.now, current.Updated)
+	accepted, err := a.store.TransitionTarget(current.Manifest.HandoffID, current.Revision, handoff.TargetAccepted, handoff.Transition{
+		At: at, TargetLocator: locator,
+	})
+	if err != nil {
+		return meshHandoffStatus{}, &arcmuxmesh.RPCError{Code: arcmuxmesh.ErrorInternal, Message: "unable to accept target launch"}
+	}
+	return handoffStatusDTO(accepted), nil
+}
+
+var errHandoffLaunchConflict = errors.New("handoff launch conflict")
+
+func (a *handoffApplication) targetLaunchSession(ctx context.Context, record handoff.TargetRecord, prepared handoff.RepositoryPreparation, instructionsPath string) (*session.Session, handoff.TargetRecord, bool, error) {
+	name, owner := handoffLaunchSessionIdentity(record)
+	env := map[string]string{"ARCMUX_HANDOFF_INSTRUCTIONS": instructionsPath}
+	var sess *session.Session
+	if record.TargetLocator != nil {
+		if record.TargetLocator.DeviceID != record.Manifest.Target.DeviceID || record.TargetLocator.ProfileScope != string(sessionview.RootProfileScope) {
+			return nil, record, false, errHandoffLaunchConflict
+		}
+		var ok bool
+		sess, ok = a.lookupSession(record.TargetLocator.SessionID)
+		if !ok {
+			return nil, record, false, errHandoffLaunchConflict
+		}
+	} else {
+		var err error
+		sess, _, err = a.createSession(ctx, CreateSessionRequest{
+			Agent: record.Manifest.Target.Profile, CWD: prepared.WorktreePath, Prompt: "",
+			Name: name, OwnerID: owner, Env: env, private: true,
+		})
+		if err != nil {
+			return nil, record, false, err
+		}
+		snap := sess.Snapshot()
+		if !snap.Private || snap.Name != name || snap.OwnerID != owner || snap.Agent != record.Manifest.Target.Profile || snap.CWD != prepared.WorktreePath ||
+			snap.Env["ARCMUX_HANDOFF_INSTRUCTIONS"] != instructionsPath {
+			return nil, record, false, errHandoffLaunchConflict
+		}
+		// CreateSession's ordinary persistence is best-effort. Establish a
+		// checked, fsync-durable inventory entry before the target record can
+		// point at this session across a daemon restart.
+		if err := a.persistSessions(); err != nil {
+			return nil, record, false, err
+		}
+		locator := handoff.TargetLocator{
+			DeviceID: record.Manifest.Target.DeviceID, ProfileScope: string(sessionview.RootProfileScope), SessionID: snap.ID,
+		}
+		at := targetTransitionTime(a.now, record.Updated)
+		record, err = a.recordLocator(record.Manifest.HandoffID, record.Revision, locator, at)
+		if err != nil {
+			if errors.Is(err, handoff.ErrCASConflict) || errors.Is(err, handoff.ErrManifestConflict) || errors.Is(err, handoff.ErrIllegalTransition) {
+				return nil, record, false, errHandoffLaunchConflict
+			}
+			return nil, record, false, err
+		}
+	}
+
+	interval := a.launchPoll
+	if interval <= 0 {
+		interval = handoffLaunchPollInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		snap := sess.Snapshot()
+		if !snap.Private || snap.Name != name || snap.OwnerID != owner || snap.Agent != record.Manifest.Target.Profile || snap.CWD != prepared.WorktreePath ||
+			record.TargetLocator == nil || snap.ID != record.TargetLocator.SessionID || snap.Env["ARCMUX_HANDOFF_INSTRUCTIONS"] != instructionsPath {
+			return nil, record, false, errHandoffLaunchConflict
+		}
+		if snap.CurrentCommand == handoffLaunchCurrentCommand(record) {
+			return sess, record, true, nil
+		}
+		if snap.CurrentCommand != "" {
+			return nil, record, false, errHandoffLaunchConflict
+		}
+		switch snap.State {
+		case session.StateIdle:
+			return sess, record, false, nil
+		case session.StateExited, session.StateFailed, session.StateWorking:
+			return nil, record, false, errHandoffLaunchConflict
+		}
+		select {
+		case <-ctx.Done():
+			return nil, record, false, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func handoffLaunchSessionIdentity(record handoff.TargetRecord) (string, string) {
+	digest := sha256.Sum256([]byte("arcmux-handoff-session-v1\x00" + record.Manifest.HandoffID + "\x00" + record.Digest))
+	suffix := hex.EncodeToString(digest[:12])
+	return "handoff-" + suffix, "arcmux-handoff:" + record.Manifest.HandoffID
+}
+
+func handoffLaunchMarker(record handoff.TargetRecord) string {
+	digest := sha256.Sum256([]byte("arcmux-handoff-prompt-v1\x00" + record.Manifest.HandoffID + "\x00" + record.Digest))
+	return "arcmux-handoff-v1:" + hex.EncodeToString(digest[:])
+}
+
+func handoffLaunchSafePreamble(record handoff.TargetRecord) string {
+	marker := handoffLaunchMarker(record)
+	return marker + strings.Repeat("-", handoffSafePreambleRunes-len(marker))
+}
+
+func handoffLaunchCurrentCommand(record handoff.TargetRecord) string {
+	return handoffLaunchSafePreamble(record) + "…"
+}
+
+func handoffLaunchPrompt(record handoff.TargetRecord) string {
+	return handoffLaunchSafePreamble(record) + "\n\n" +
+		"Resume this explicitly authorized handoff. Read the private instructions named by " +
+		"ARCMUX_HANDOFF_INSTRUCTIONS before acting; the exact continuation checkout is already active."
+}
+
+type handoffLaunchLineage struct {
+	HandoffID       string                `json:"handoff_id"`
+	TraceID         string                `json:"trace_id"`
+	ParentHandoffID string                `json:"parent_handoff_id,omitempty"`
+	Source          handoff.SourceSession `json:"source"`
+	ConversationID  string                `json:"conversation_id,omitempty"`
+	TargetProfile   string                `json:"target_profile"`
+}
+
+func publishHandoffLaunchInstructions(privateRoot, handoffID, historyPath string, manifest handoff.Manifest, prepared handoff.RepositoryPreparation) (string, error) {
+	if handoffID == "" || filepath.Base(handoffID) != handoffID || strings.ContainsAny(handoffID, "/\\\x00") {
+		return "", errors.New("invalid handoff identity")
+	}
+	root, err := filepath.Abs(privateRoot)
+	if err != nil {
+		return "", errors.New("resolve private handoff state")
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", errors.New("resolve private handoff state")
+	}
+	dir := filepath.Join(root, "handoff-"+handoffID)
+	expectedHistory := filepath.Join(dir, "history.md")
+	historyAbsolute, err := filepath.Abs(historyPath)
+	if err != nil {
+		return "", errors.New("resolve private history snapshot")
+	}
+	canonicalHistory, err := filepath.EvalSymlinks(historyAbsolute)
+	if err != nil || filepath.Clean(canonicalHistory) != expectedHistory {
+		return "", errors.New("history snapshot is outside private handoff state")
+	}
+	if !filepath.IsAbs(prepared.WorktreePath) || prepared.Head != manifest.Repository.SourceHead ||
+		prepared.SourceBranch != manifest.Repository.Branch || prepared.LocalBranch == "" {
+		return "", errors.New("repository preparation does not match immutable handoff state")
+	}
+	info, err := os.Lstat(dir)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
+		return "", errors.New("private handoff directory is unavailable")
+	}
+	data, err := json.Marshal(struct {
+		Lineage      handoffLaunchLineage `json:"lineage"`
+		Goal         string               `json:"goal"`
+		History      string               `json:"history"`
+		Worktree     string               `json:"worktree"`
+		SourceBranch string               `json:"source_branch"`
+		LocalBranch  string               `json:"local_branch"`
+		ExpectedHead string               `json:"expected_head"`
+	}{
+		Lineage: handoffLaunchLineage{
+			HandoffID: manifest.HandoffID, TraceID: manifest.TraceID, ParentHandoffID: manifest.ParentHandoffID,
+			Source: manifest.Source, ConversationID: manifest.History.ConversationID, TargetProfile: manifest.Target.Profile,
+		},
+		Goal: manifest.Goal.Text, History: canonicalHistory, Worktree: prepared.WorktreePath,
+		SourceBranch: prepared.SourceBranch, LocalBranch: prepared.LocalBranch, ExpectedHead: prepared.Head,
+	})
+	if err != nil {
+		return "", errors.New("encode private handoff instructions")
+	}
+	data = append(data, '\n')
+	path := filepath.Join(dir, "launch-instructions.json")
+	if existing, statErr := os.Lstat(path); statErr == nil {
+		if existing.Mode()&os.ModeSymlink != 0 || !existing.Mode().IsRegular() {
+			return "", errors.New("private handoff instructions are unsafe")
+		}
+	} else if !os.IsNotExist(statErr) {
+		return "", errors.New("inspect private handoff instructions")
+	}
+	tmp, err := os.CreateTemp(dir, ".launch-instructions-*.tmp")
+	if err != nil {
+		return "", errors.New("create private handoff instructions")
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return "", errors.New("secure private handoff instructions")
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return "", errors.New("write private handoff instructions")
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return "", errors.New("sync private handoff instructions")
+	}
+	if err := tmp.Close(); err != nil {
+		return "", errors.New("close private handoff instructions")
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return "", errors.New("publish private handoff instructions")
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return "", errors.New("secure published handoff instructions")
+	}
+	directory, err := os.Open(dir)
+	if err != nil {
+		return "", errors.New("open private handoff directory")
+	}
+	if err := directory.Sync(); err != nil {
+		directory.Close()
+		return "", errors.New("sync private handoff directory")
+	}
+	if err := directory.Close(); err != nil {
+		return "", errors.New("close private handoff directory")
+	}
+	return path, nil
+}
+
+func (a *handoffApplication) waitForLaunch(record handoff.TargetRecord, code handoff.FailureCode, message string) (meshHandoffStatus, error) {
+	now := targetTransitionTime(a.now, record.Updated)
+	next := now.Add(handoffAssetRetryDelay)
+	failure := &handoff.Failure{Code: code, Message: message, Retryable: true, At: now}
+	waiting, err := a.store.TransitionTarget(record.Manifest.HandoffID, record.Revision, handoff.TargetLaunchWaitingAssets, handoff.Transition{
+		At: now, NextRetry: &next, Failure: failure,
+	})
+	if err != nil {
+		return meshHandoffStatus{}, &arcmuxmesh.RPCError{Code: arcmuxmesh.ErrorInternal, Message: "unable to record waiting target launch"}
+	}
+	return handoffStatusDTO(waiting), nil
+}
+
 func (a *handoffApplication) lockPrepare(id string) func() {
 	release, _ := a.lockPrepareContext(context.Background(), id)
 	return release
@@ -447,6 +878,10 @@ func handoffStatusDTO(record handoff.TargetRecord) meshHandoffStatus {
 		status.Failure = &meshHandoffFailureDTO{
 			Code: record.Failure.Code, Message: record.Failure.Message, Retryable: record.Failure.Retryable,
 		}
+	}
+	if record.State == handoff.TargetAccepted && record.TargetLocator != nil {
+		locator := *record.TargetLocator
+		status.TargetLocator = &locator
 	}
 	return status
 }

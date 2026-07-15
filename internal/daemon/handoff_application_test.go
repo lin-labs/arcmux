@@ -524,6 +524,109 @@ func TestTargetHandoffReconcilerTimesOutBlockedRecordAndDrainsNext(t *testing.T)
 	}
 }
 
+func TestTargetLaunchReconcilerTimesOutBlockedRecordAndDrainsNext(t *testing.T) {
+	app, base := newHandoffTestApplication(t, true)
+	blocked := base
+	blocked.HandoffID = "launch-timeout-a"
+	next := base
+	next.HandoffID = "launch-timeout-b"
+	for _, manifest := range []handoff.Manifest{blocked, next} {
+		prepared := prepareTargetHandoffForLaunch(t, app, manifest)
+		if _, err := app.store.TransitionTarget(manifest.HandoffID, prepared.Revision, handoff.TargetLaunching, handoff.Transition{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	app.resumeTimeout = 25 * time.Millisecond
+	app.launchPoll = time.Millisecond
+
+	releaseBlocked := make(chan struct{})
+	blockedStarted := make(chan struct{})
+	var startOnce sync.Once
+	worktrees := t.TempDir()
+	app.prepareLaunchRepo = func(_ context.Context, manifest handoff.Manifest, _ project.ResolvedProject) (handoff.RepositoryPreparation, error) {
+		if manifest.HandoffID == blocked.HandoffID {
+			startOnce.Do(func() { close(blockedStarted) })
+			<-releaseBlocked
+		}
+		path := filepath.Join(worktrees, manifest.HandoffID)
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			return handoff.RepositoryPreparation{}, err
+		}
+		return handoff.RepositoryPreparation{WorktreePath: path, Head: manifest.Repository.SourceHead, LocalBranch: manifest.Repository.Branch, SourceBranch: manifest.Repository.Branch}, nil
+	}
+	sessions := make(map[string]*session.Session)
+	var sessionsMu sync.Mutex
+	app.createSession = func(_ context.Context, request CreateSessionRequest) (*session.Session, bool, error) {
+		sess := session.NewSession("target-"+request.Name, request.Name, request.Agent, request.CWD)
+		sess.SetOwnerID(request.OwnerID)
+		sess.SetEnv(request.Env)
+		if request.private {
+			sess.MarkPrivate()
+		}
+		sess.SetState(session.StateIdle)
+		sessionsMu.Lock()
+		sessions[sess.Snapshot().ID] = sess
+		sessionsMu.Unlock()
+		return sess, true, nil
+	}
+	app.lookupSession = func(id string) (*session.Session, bool) {
+		sessionsMu.Lock()
+		defer sessionsMu.Unlock()
+		sess, ok := sessions[id]
+		return sess, ok
+	}
+	app.sendPrompt = func(_ context.Context, id, _ string, _, _ bool) error {
+		sessionsMu.Lock()
+		sess := sessions[id]
+		sessionsMu.Unlock()
+		for _, handoffID := range []string{blocked.HandoffID, next.HandoffID} {
+			record, err := app.store.GetTarget(handoffID)
+			if err == nil && record.TargetLocator != nil && record.TargetLocator.SessionID == id {
+				sess.SetCurrentCommand(handoffLaunchCurrentCommand(record))
+				sess.SetState(session.StateWorking)
+				return nil
+			}
+		}
+		return errors.New("session locator unavailable")
+	}
+	app.persistSessions = func() error { return nil }
+
+	d := newMeshApplicationTestDaemon(t, "server")
+	d.meshMu.Lock()
+	d.meshApp.handoffs = app
+	d.meshMu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		d.reconcileTargetHandoffs(context.Background(), time.Now().UTC())
+		close(done)
+	}()
+	select {
+	case <-blockedStarted:
+	case <-time.After(time.Second):
+		close(releaseBlocked)
+		<-done
+		t.Fatal("blocked launch recovery did not start")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		close(releaseBlocked)
+		<-done
+		t.Fatal("blocked launch recovery starved the next target")
+	}
+	close(releaseBlocked)
+	release := app.lockPrepare(blocked.HandoffID)
+	release()
+	blockedRecord, err := app.store.GetTarget(blocked.HandoffID)
+	if err != nil || blockedRecord.State != handoff.TargetLaunching || blockedRecord.TargetLocator != nil {
+		t.Fatalf("blocked launch record=%+v err=%v", blockedRecord, err)
+	}
+	nextRecord, err := app.store.GetTarget(next.HandoffID)
+	if err != nil || nextRecord.State != handoff.TargetAccepted || nextRecord.TargetLocator == nil {
+		t.Fatalf("next launch record=%+v err=%v", nextRecord, err)
+	}
+}
+
 func TestTargetTransitionsClampBackwardWallClock(t *testing.T) {
 	t.Run("received validating and waiting assets resume", func(t *testing.T) {
 		for _, state := range []handoff.TargetState{
@@ -878,6 +981,10 @@ func TestHandoffRPCParamsAreStrictAndReadOnlyGrantIsDenied(t *testing.T) {
 	if err := decodeMeshParams(json.RawMessage(`{"manifest":{"schema_version":1,"unknown":true}}`), &prepareRequest); err == nil {
 		t.Fatal("prepare accepted nested unknown field")
 	}
+	var launchRequest meshHandoffLaunchRequest
+	if err := decodeMeshParams(json.RawMessage(`{"handoff_id":"handoff-1","manifest_digest":"abc","extra":true}`), &launchRequest); err == nil {
+		t.Fatal("launch accepted unknown field")
+	}
 
 	server := newMeshApplicationTestDaemon(t, "server")
 	client := newMeshApplicationTestDaemon(t, "client")
@@ -890,6 +997,7 @@ func TestHandoffRPCParamsAreStrictAndReadOnlyGrantIsDenied(t *testing.T) {
 	}{
 		{meshMethodHandoffsPrepare, meshHandoffPrepareRequest{}},
 		{meshMethodHandoffsStatus, meshHandoffStatusRequest{HandoffID: "handoff-1"}},
+		{meshMethodHandoffsLaunch, meshHandoffLaunchRequest{HandoffID: "handoff-1", ManifestDigest: strings.Repeat("a", 64)}},
 	} {
 		if err := clientManager.Call(context.Background(), "server", call.method, call.params, &meshHandoffStatus{}); !isMeshPermissionDenied(err) {
 			t.Fatalf("%s with read-only grants = %v, want permission_denied", call.method, err)
@@ -920,6 +1028,11 @@ func TestHandoffPrepareRPCUsesConnectionPrincipalAndReturnsRedactedDTO(t *testin
 	if strings.Contains(string(encoded), manifest.Goal.Text) || strings.Contains(string(encoded), manifest.History.Basename) ||
 		strings.Contains(string(encoded), manifest.Repository.Branch) {
 		t.Fatalf("prepare response leaked manifest fields: %s", encoded)
+	}
+	if err := clientManager.Call(context.Background(), "server", meshMethodHandoffsLaunch, meshHandoffLaunchRequest{
+		HandoffID: manifest.HandoffID, ManifestDigest: status.ManifestDigest,
+	}, &meshHandoffStatus{}); !isMeshPermissionDenied(err) {
+		t.Fatalf("prepare-only grant launched handoff: %v", err)
 	}
 
 	wrongSource := manifest
@@ -952,6 +1065,472 @@ func TestHandoffPrepareRPCUsesConnectionPrincipalAndReturnsRedactedDTO(t *testin
 	}, &meshHandoffStatus{}); !isMeshInvalidRequest(err) {
 		t.Fatalf("unknown status field error = %v, want invalid_request", err)
 	}
+}
+
+func TestHandoffLaunchGrantDoesNotAuthorizePrepare(t *testing.T) {
+	server := newMeshApplicationTestDaemon(t, "server")
+	client := newMeshApplicationTestDaemon(t, "client")
+	_, clientManager := startDaemonMeshPairWithScopes(t, server, client, []string{arcmuxmesh.ScopeHandoffsLaunch})
+	if err := clientManager.Call(context.Background(), "server", meshMethodHandoffsPrepare, meshHandoffPrepareRequest{}, &meshHandoffStatus{}); !isMeshPermissionDenied(err) {
+		t.Fatalf("launch-only grant prepared handoff: %v", err)
+	}
+	if err := clientManager.Call(context.Background(), "server", meshMethodHandoffsLaunch, meshHandoffLaunchRequest{}, &meshHandoffStatus{}); !isMeshInvalidRequest(err) {
+		t.Fatalf("launch grant did not reach launch handler: %v", err)
+	}
+	if err := clientManager.Call(context.Background(), "server", meshMethodHandoffsLaunch, map[string]any{
+		"handoff_id": "handoff-1", "manifest_digest": "abc", "unexpected": true,
+	}, &meshHandoffStatus{}); !isMeshInvalidRequest(err) {
+		t.Fatalf("launch RPC accepted unknown field: %v", err)
+	}
+}
+
+func TestHandoffLaunchWaitsForHandshakeAndKeepsSensitiveContextOutOfPrompt(t *testing.T) {
+	app, manifest := newHandoffTestApplication(t, true)
+	manifest.ParentHandoffID = "handoff-parent"
+	prepared := prepareTargetHandoffForLaunch(t, app, manifest)
+	worktree := filepath.Join(t.TempDir(), "private-worktree")
+	if err := os.Mkdir(worktree, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	app.prepareLaunchRepo = func(context.Context, handoff.Manifest, project.ResolvedProject) (handoff.RepositoryPreparation, error) {
+		return handoff.RepositoryPreparation{
+			WorktreePath: worktree, Head: manifest.Repository.SourceHead,
+			LocalBranch: manifest.Repository.Branch, SourceBranch: manifest.Repository.Branch,
+		}, nil
+	}
+	var created *session.Session
+	var createRequest CreateSessionRequest
+	app.createSession = func(_ context.Context, request CreateSessionRequest) (*session.Session, bool, error) {
+		createRequest = request
+		created = session.NewSession("target-session", request.Name, request.Agent, request.CWD)
+		created.SetOwnerID(request.OwnerID)
+		created.SetEnv(request.Env)
+		if request.private {
+			created.MarkPrivate()
+		}
+		go func() {
+			time.Sleep(40 * time.Millisecond)
+			created.SetState(session.StateIdle)
+		}()
+		return created, true, nil
+	}
+	app.lookupSession = func(id string) (*session.Session, bool) {
+		return created, created != nil && created.Snapshot().ID == id
+	}
+	var sentPrompt string
+	var sendState session.State
+	app.sendPrompt = func(_ context.Context, id, prompt string, confirm, waitIdle bool) error {
+		if id != "target-session" || !confirm || waitIdle {
+			t.Fatalf("send id=%q confirm=%t waitIdle=%t", id, confirm, waitIdle)
+		}
+		sendState = created.Snapshot().State
+		sentPrompt = prompt
+		current, err := app.store.GetTarget(manifest.HandoffID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		created.SetCurrentCommand(handoffLaunchCurrentCommand(current))
+		created.SetState(session.StateWorking)
+		return nil
+	}
+	var persisted atomic.Int32
+	app.persistSessions = func() error { persisted.Add(1); return nil }
+	app.launchPoll = time.Millisecond
+
+	status, err := app.launch(context.Background(), arcmuxmesh.Principal{PeerID: "client"}, "server", meshHandoffLaunchRequest{
+		HandoffID: manifest.HandoffID, ManifestDigest: prepared.Digest,
+	})
+	if err != nil || status.State != handoff.TargetAccepted || status.TargetLocator == nil || persisted.Load() != 2 {
+		t.Fatalf("launch status=%+v persisted=%d err=%v", status, persisted.Load(), err)
+	}
+	if sendState != session.StateIdle {
+		t.Fatalf("prompt sent before delayed handshake reached idle: %s", sendState)
+	}
+	if createRequest.Prompt != "" || !createRequest.private || createRequest.Env["ARCMUX_HANDOFF_INSTRUCTIONS"] == "" {
+		t.Fatalf("create request = %+v", createRequest)
+	}
+	for _, forbidden := range []string{
+		manifest.HandoffID, manifest.TraceID, manifest.ParentHandoffID,
+		manifest.Source.DeviceID, manifest.Source.ProfileScope, manifest.Source.SessionID,
+		manifest.History.ConversationID, manifest.Target.Profile,
+		manifest.Goal.Text, manifest.History.Basename, manifest.Repository.Branch,
+		manifest.Repository.SourceHead, worktree, createRequest.Env["ARCMUX_HANDOFF_INSTRUCTIONS"],
+	} {
+		if strings.Contains(sentPrompt, forbidden) {
+			t.Fatalf("confirmed prompt leaked %q: %q", forbidden, sentPrompt)
+		}
+	}
+	if !strings.Contains(sentPrompt, "ARCMUX_HANDOFF_INSTRUCTIONS") || len([]rune(handoffLaunchSafePreamble(prepared))) != handoffSafePreambleRunes {
+		t.Fatalf("safe prompt contract missing: %q", sentPrompt)
+	}
+	instructions := createRequest.Env["ARCMUX_HANDOFF_INSTRUCTIONS"]
+	info, err := os.Lstat(instructions)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		t.Fatalf("instruction mode=%v err=%v", info, err)
+	}
+	content, err := os.ReadFile(instructions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var private struct {
+		Lineage handoffLaunchLineage `json:"lineage"`
+	}
+	if err := json.Unmarshal(content, &private); err != nil {
+		t.Fatalf("decode private instructions: %v", err)
+	}
+	wantLineage := handoffLaunchLineage{
+		HandoffID: manifest.HandoffID, TraceID: manifest.TraceID, ParentHandoffID: manifest.ParentHandoffID,
+		Source: manifest.Source, ConversationID: manifest.History.ConversationID, TargetProfile: manifest.Target.Profile,
+	}
+	if private.Lineage != wantLineage {
+		t.Fatalf("private lineage = %+v, want %+v", private.Lineage, wantLineage)
+	}
+	for _, required := range []string{manifest.Goal.Text, manifest.Repository.Branch, manifest.Repository.SourceHead, worktree, "history.md"} {
+		if !strings.Contains(string(content), required) {
+			t.Fatalf("private instructions missing %q: %s", required, content)
+		}
+	}
+}
+
+func TestPublishHandoffLaunchInstructionsCanonicalizesSymlinkedParent(t *testing.T) {
+	_, manifest := newHandoffTestApplication(t, true)
+	realParent := t.TempDir()
+	realRoot := filepath.Join(realParent, "mesh")
+	handoffDir := filepath.Join(realRoot, "handoff-"+manifest.HandoffID)
+	if err := os.MkdirAll(handoffDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	historyContent := []byte("private history\n")
+	if err := os.WriteFile(filepath.Join(handoffDir, "history.md"), historyContent, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkParent := filepath.Join(t.TempDir(), "linked-parent")
+	if err := os.Symlink(realParent, linkParent); err != nil {
+		t.Fatal(err)
+	}
+	canonicalHandoffDir, err := filepath.EvalSymlinks(handoffDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktree := t.TempDir()
+	instructions, err := publishHandoffLaunchInstructions(
+		filepath.Join(linkParent, "mesh"),
+		manifest.HandoffID,
+		filepath.Join(linkParent, "mesh", "handoff-"+manifest.HandoffID, "history.md"),
+		manifest,
+		handoff.RepositoryPreparation{
+			WorktreePath: worktree,
+			Head:         manifest.Repository.SourceHead,
+			SourceBranch: manifest.Repository.Branch,
+			LocalBranch:  manifest.Repository.Branch,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if instructions != filepath.Join(canonicalHandoffDir, "launch-instructions.json") {
+		t.Fatalf("instructions path = %q, want canonical root %q", instructions, canonicalHandoffDir)
+	}
+	content, err := os.ReadFile(instructions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var private struct {
+		History string `json:"history"`
+	}
+	if err := json.Unmarshal(content, &private); err != nil {
+		t.Fatal(err)
+	}
+	if private.History != filepath.Join(canonicalHandoffDir, "history.md") || strings.Contains(private.History, linkParent) {
+		t.Fatalf("private history path was not canonicalized: %q", private.History)
+	}
+}
+
+func TestHandoffLaunchRejectsWrongOwnerTargetOrDigestBeforeSideEffects(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		peer        string
+		localDevice string
+		digest      string
+		permission  bool
+	}{
+		{name: "wrong authenticated owner", peer: "impostor", localDevice: "server", permission: true},
+		{name: "wrong local target", peer: "client", localDevice: "other-server"},
+		{name: "wrong immutable digest", peer: "client", localDevice: "server", digest: strings.Repeat("f", 64)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			app, manifest := newHandoffTestApplication(t, true)
+			prepared := prepareTargetHandoffForLaunch(t, app, manifest)
+			digest := test.digest
+			if digest == "" {
+				digest = prepared.Digest
+			}
+			var sideEffects atomic.Int32
+			app.createSession = func(context.Context, CreateSessionRequest) (*session.Session, bool, error) {
+				sideEffects.Add(1)
+				return nil, false, nil
+			}
+			app.sendPrompt = func(context.Context, string, string, bool, bool) error { sideEffects.Add(1); return nil }
+			app.persistSessions = func() error { sideEffects.Add(1); return nil }
+			_, err := app.launch(context.Background(), arcmuxmesh.Principal{PeerID: test.peer}, test.localDevice, meshHandoffLaunchRequest{
+				HandoffID: manifest.HandoffID, ManifestDigest: digest,
+			})
+			if test.permission {
+				if !isMeshPermissionDenied(err) {
+					t.Fatalf("error=%v, want permission_denied", err)
+				}
+			} else if !isMeshInvalidRequest(err) {
+				t.Fatalf("error=%v, want invalid_request", err)
+			}
+			stored, getErr := app.store.GetTarget(manifest.HandoffID)
+			if getErr != nil || stored.State != handoff.TargetPrepared || sideEffects.Load() != 0 {
+				t.Fatalf("stored=%+v side_effects=%d err=%v", stored, sideEffects.Load(), getErr)
+			}
+		})
+	}
+}
+
+func TestHandoffLaunchRevalidatesPreparedAssetsBeforeSessionSideEffects(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		historyErr error
+		repoErr    error
+		wantState  handoff.TargetState
+		wantCode   handoff.FailureCode
+	}{
+		{
+			name: "invalid history", historyErr: &handoff.HistoryError{Code: handoff.HistoryErrorInvalid, Err: errors.New("private path")},
+			wantState: handoff.TargetRejected, wantCode: handoff.FailureVerification,
+		},
+		{
+			name: "missing history", historyErr: &handoff.HistoryError{Code: handoff.HistoryErrorRetryable, Err: errors.New("private path")},
+			wantState: handoff.TargetLaunchWaitingAssets, wantCode: handoff.FailureMissingAsset,
+		},
+		{
+			name: "repository mismatch", repoErr: &handoff.RepositoryError{Code: handoff.RepositoryErrorDeterministic, Err: errors.New("private path")},
+			wantState: handoff.TargetRejected, wantCode: handoff.FailureVerification,
+		},
+		{
+			name: "repository unavailable", repoErr: &handoff.RepositoryError{Code: handoff.RepositoryErrorRetryable, Err: errors.New("private path")},
+			wantState: handoff.TargetLaunchWaitingAssets, wantCode: handoff.FailureMissingAsset,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			app, manifest := newHandoffTestApplication(t, true)
+			prepared := prepareTargetHandoffForLaunch(t, app, manifest)
+			if test.historyErr != nil {
+				app.snapshotHistory = func(string, string, string, handoff.HistoryRef) (string, error) { return "", test.historyErr }
+			}
+			app.prepareLaunchRepo = func(context.Context, handoff.Manifest, project.ResolvedProject) (handoff.RepositoryPreparation, error) {
+				if test.repoErr != nil {
+					return handoff.RepositoryPreparation{}, test.repoErr
+				}
+				return handoff.RepositoryPreparation{}, errors.New("repository revalidation unexpectedly reached")
+			}
+			var sideEffects atomic.Int32
+			app.createSession = func(context.Context, CreateSessionRequest) (*session.Session, bool, error) {
+				sideEffects.Add(1)
+				return nil, false, errors.New("unexpected create")
+			}
+			app.lookupSession = func(string) (*session.Session, bool) { sideEffects.Add(1); return nil, false }
+			app.sendPrompt = func(context.Context, string, string, bool, bool) error { sideEffects.Add(1); return nil }
+			app.persistSessions = func() error { sideEffects.Add(1); return nil }
+			status, err := app.launch(context.Background(), arcmuxmesh.Principal{PeerID: "client"}, "server", meshHandoffLaunchRequest{
+				HandoffID: manifest.HandoffID, ManifestDigest: prepared.Digest,
+			})
+			if err != nil || status.State != test.wantState || status.Failure == nil || status.Failure.Code != test.wantCode || status.TargetLocator != nil || sideEffects.Load() != 0 {
+				t.Fatalf("status=%+v side_effects=%d err=%v", status, sideEffects.Load(), err)
+			}
+		})
+	}
+}
+
+func TestHandoffLaunchRecoversSpawnBeforePromptAndPromptBeforeAccept(t *testing.T) {
+	for _, test := range []struct {
+		name                string
+		markerBeforeResume  bool
+		locatorBeforeResume bool
+		wantSends           int32
+	}{
+		{name: "spawn before prompt", wantSends: 1},
+		{name: "prompt before accept", markerBeforeResume: true, locatorBeforeResume: true, wantSends: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			app, manifest := newHandoffTestApplication(t, true)
+			prepared := prepareTargetHandoffForLaunch(t, app, manifest)
+			launching, err := app.store.TransitionTarget(manifest.HandoffID, prepared.Revision, handoff.TargetLaunching, handoff.Transition{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			worktree := filepath.Join(t.TempDir(), "private-worktree")
+			if err := os.Mkdir(worktree, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			app.prepareLaunchRepo = func(context.Context, handoff.Manifest, project.ResolvedProject) (handoff.RepositoryPreparation, error) {
+				return handoff.RepositoryPreparation{WorktreePath: worktree, Head: manifest.Repository.SourceHead, LocalBranch: manifest.Repository.Branch, SourceBranch: manifest.Repository.Branch}, nil
+			}
+			historyPath, err := app.snapshotHistory(app.historyRoot, app.store.Root(), manifest.HandoffID, manifest.History)
+			if err != nil {
+				t.Fatal(err)
+			}
+			instructions, err := publishHandoffLaunchInstructions(app.store.Root(), manifest.HandoffID, historyPath, manifest, handoff.RepositoryPreparation{
+				WorktreePath: worktree, Head: manifest.Repository.SourceHead, LocalBranch: manifest.Repository.Branch, SourceBranch: manifest.Repository.Branch,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			name, owner := handoffLaunchSessionIdentity(launching)
+			sess := session.NewSession("target-session", name, manifest.Target.Profile, worktree)
+			sess.SetOwnerID(owner)
+			sess.MarkPrivate()
+			sess.SetEnv(map[string]string{"ARCMUX_HANDOFF_INSTRUCTIONS": instructions})
+			sess.SetState(session.StateIdle)
+			if test.locatorBeforeResume {
+				launching, err = app.store.RecordTargetLaunchLocator(manifest.HandoffID, launching.Revision, handoff.TargetLocator{
+					DeviceID: "server", ProfileScope: "root", SessionID: "target-session",
+				}, time.Now().UTC())
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if test.markerBeforeResume {
+				sess.SetCurrentCommand(handoffLaunchCurrentCommand(launching))
+				sess.SetState(session.StateWorking)
+			}
+			app.createSession = func(context.Context, CreateSessionRequest) (*session.Session, bool, error) { return sess, false, nil }
+			app.lookupSession = func(id string) (*session.Session, bool) { return sess, id == sess.Snapshot().ID }
+			var sends atomic.Int32
+			app.sendPrompt = func(context.Context, string, string, bool, bool) error {
+				sends.Add(1)
+				current, _ := app.store.GetTarget(manifest.HandoffID)
+				sess.SetCurrentCommand(handoffLaunchCurrentCommand(current))
+				sess.SetState(session.StateWorking)
+				return nil
+			}
+			app.persistSessions = func() error { return nil }
+			status, err := app.resumeLaunch(context.Background(), launching, "server")
+			if err != nil || status.State != handoff.TargetAccepted || status.TargetLocator == nil || status.TargetLocator.SessionID != "target-session" || sends.Load() != test.wantSends {
+				t.Fatalf("status=%+v sends=%d err=%v", status, sends.Load(), err)
+			}
+			replay, err := app.launch(context.Background(), arcmuxmesh.Principal{PeerID: "client"}, "server", meshHandoffLaunchRequest{
+				HandoffID: manifest.HandoffID, ManifestDigest: prepared.Digest,
+			})
+			if err != nil || replay.TargetLocator == nil || *replay.TargetLocator != *status.TargetLocator || sends.Load() != test.wantSends {
+				t.Fatalf("replay=%+v sends=%d err=%v", replay, sends.Load(), err)
+			}
+		})
+	}
+}
+
+func TestHandoffStatusExposesLocatorOnlyAfterAccepted(t *testing.T) {
+	app, manifest := newHandoffTestApplication(t, true)
+	prepared := prepareTargetHandoffForLaunch(t, app, manifest)
+	launching, err := app.store.TransitionTarget(manifest.HandoffID, prepared.Revision, handoff.TargetLaunching, handoff.Transition{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	locator := handoff.TargetLocator{DeviceID: "server", ProfileScope: "root", SessionID: "target-session"}
+	launching, err = app.store.RecordTargetLaunchLocator(manifest.HandoffID, launching.Revision, locator, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status := handoffStatusDTO(launching); status.TargetLocator != nil {
+		t.Fatalf("launching status leaked locator: %+v", status)
+	}
+	accepted, err := app.store.TransitionTarget(manifest.HandoffID, launching.Revision, handoff.TargetAccepted, handoff.Transition{TargetLocator: &locator})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status := handoffStatusDTO(accepted); status.TargetLocator == nil || *status.TargetLocator != locator {
+		t.Fatalf("accepted status omitted locator: %+v", status)
+	}
+}
+
+func TestHandoffLaunchPersistsSessionBeforeLocatorAndRetriesLocatorIO(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		persistError bool
+		locatorError bool
+		wantPersist  int32
+		wantRecord   int32
+	}{
+		{name: "session inventory failure", persistError: true, wantPersist: 1},
+		{name: "locator persistence failure", locatorError: true, wantPersist: 1, wantRecord: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			app, manifest := newHandoffTestApplication(t, true)
+			prepared := prepareTargetHandoffForLaunch(t, app, manifest)
+			launching, err := app.store.TransitionTarget(manifest.HandoffID, prepared.Revision, handoff.TargetLaunching, handoff.Transition{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			worktree := filepath.Join(t.TempDir(), "private-worktree")
+			if err := os.Mkdir(worktree, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			preparation := handoff.RepositoryPreparation{WorktreePath: worktree, Head: manifest.Repository.SourceHead, LocalBranch: manifest.Repository.Branch, SourceBranch: manifest.Repository.Branch}
+			historyPath, err := app.snapshotHistory(app.historyRoot, app.store.Root(), manifest.HandoffID, manifest.History)
+			if err != nil {
+				t.Fatal(err)
+			}
+			instructions, err := publishHandoffLaunchInstructions(app.store.Root(), manifest.HandoffID, historyPath, manifest, preparation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			name, owner := handoffLaunchSessionIdentity(launching)
+			sess := session.NewSession("target-session", name, manifest.Target.Profile, worktree)
+			sess.SetOwnerID(owner)
+			sess.MarkPrivate()
+			sess.SetEnv(map[string]string{"ARCMUX_HANDOFF_INSTRUCTIONS": instructions})
+			sess.SetState(session.StateIdle)
+			app.createSession = func(context.Context, CreateSessionRequest) (*session.Session, bool, error) { return sess, false, nil }
+			app.lookupSession = func(id string) (*session.Session, bool) { return sess, id == "target-session" }
+			var persistCalls, recordCalls atomic.Int32
+			app.persistSessions = func() error {
+				persistCalls.Add(1)
+				if test.persistError {
+					return errors.New("private disk path")
+				}
+				return nil
+			}
+			originalRecorder := app.recordLocator
+			app.recordLocator = func(id string, revision uint64, locator handoff.TargetLocator, at time.Time) (handoff.TargetRecord, error) {
+				recordCalls.Add(1)
+				if test.locatorError {
+					return handoff.TargetRecord{}, errors.New("private record path")
+				}
+				return originalRecorder(id, revision, locator, at)
+			}
+			_, _, _, err = app.targetLaunchSession(context.Background(), launching, preparation, instructions)
+			if err == nil || errors.Is(err, errHandoffLaunchConflict) || persistCalls.Load() != test.wantPersist || recordCalls.Load() != test.wantRecord {
+				t.Fatalf("err=%v persist=%d record=%d", err, persistCalls.Load(), recordCalls.Load())
+			}
+			stored, getErr := app.store.GetTarget(manifest.HandoffID)
+			if getErr != nil || stored.TargetLocator != nil || stored.State != handoff.TargetLaunching {
+				t.Fatalf("failure published locator: record=%+v err=%v", stored, getErr)
+			}
+
+			app.persistSessions = func() error { return nil }
+			app.recordLocator = originalRecorder
+			_, recovered, delivered, err := app.targetLaunchSession(context.Background(), stored, preparation, instructions)
+			if err != nil || delivered || recovered.TargetLocator == nil || recovered.TargetLocator.SessionID != "target-session" {
+				t.Fatalf("retry recovery record=%+v delivered=%t err=%v", recovered, delivered, err)
+			}
+		})
+	}
+}
+
+func prepareTargetHandoffForLaunch(t *testing.T, app *handoffApplication, manifest handoff.Manifest) handoff.TargetRecord {
+	t.Helper()
+	status, err := app.prepare(context.Background(), arcmuxmesh.Principal{PeerID: manifest.Source.DeviceID}, manifest.Target.DeviceID, meshHandoffPrepareRequest{Manifest: manifest})
+	if err != nil || status.State != handoff.TargetPrepared {
+		t.Fatalf("prepare target status=%+v err=%v", status, err)
+	}
+	record, err := app.store.GetTarget(manifest.HandoffID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return record
 }
 
 func newHandoffTestApplication(t *testing.T, writeHistory bool) (*handoffApplication, handoff.Manifest) {

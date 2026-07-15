@@ -64,3 +64,32 @@ func TestHandoffHTTPListShowRetryAndStrictQueries(t *testing.T) {
 		t.Fatalf("retry body status=%d", retryWithBody.Code)
 	}
 }
+
+func TestHandoffHTTPLaunchIsOperatorOnlyAndStrict(t *testing.T) {
+	fixture := newSourceOutboxFixture(t)
+	d := newMeshApplicationTestDaemon(t, "ref")
+	h := NewHTTPServer(d, "127.0.0.1:0")
+	h.handoffOutbox = func() (*sourceHandoffOutbox, error) { return fixture.outbox, nil }
+	request := []byte(`{"profile_scope":"root","session_id":"session-1","target_peer":"devbox","target_agent":"codex","project":"demo","goal":"Continue safely","conversation_id":"conversation-1"}`)
+	prepared := meshHTTPRequest(h, http.MethodPost, "/mesh/handoffs", request)
+	if prepared.Code != http.StatusAccepted || !strings.Contains(prepared.Body.String(), `"state":"remote_prepared"`) {
+		t.Fatalf("prepare status=%d body=%s", prepared.Code, prepared.Body.String())
+	}
+	launched := meshHTTPRequest(h, http.MethodPost, "/mesh/handoffs/launch?id=handoff-test-1", nil)
+	if launched.Code != http.StatusOK || !strings.Contains(launched.Body.String(), `"state":"accepted"`) || !strings.Contains(launched.Body.String(), `"session_id":"target-session"`) {
+		t.Fatalf("launch status=%d body=%s", launched.Code, launched.Body.String())
+	}
+	if got := meshHTTPRequest(h, http.MethodGet, "/mesh/handoffs/launch?id=handoff-test-1", nil); got.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET launch status=%d", got.Code)
+	}
+	if got := meshHTTPRequest(h, http.MethodPost, "/mesh/handoffs/launch?id=handoff-test-1", []byte(`{}`)); got.Code != http.StatusBadRequest {
+		t.Fatalf("launch body status=%d", got.Code)
+	}
+	nonLoopback := httptest.NewRequest(http.MethodPost, "/mesh/handoffs/launch?id=handoff-test-1", nil)
+	nonLoopback.RemoteAddr = "100.64.0.9:1234"
+	recorder := httptest.NewRecorder()
+	h.srv.Handler.ServeHTTP(recorder, nonLoopback)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("remote launch status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}

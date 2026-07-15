@@ -168,15 +168,15 @@ func TestMeshGrantAcceptsPrepareWithoutChangingReadDefault(t *testing.T) {
 		t.Fatalf("prepare grant = %v", got)
 	}
 
-	if err := cmdMesh([]string{"grant", "client", mesh.ScopeHandoffsLaunch, "--config", cfgPath}, strings.NewReader(""), &bytes.Buffer{}); err == nil {
-		t.Fatal("dormant launch scope accepted before launch RPC exists")
+	if err := cmdMesh([]string{"grant", "client", mesh.ScopeHandoffsLaunch, "--config", cfgPath}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("launch grant: %v", err)
 	}
 	updated, err = mesh.LoadRegistry(registryPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := updated.Grants["client"]; len(got) != 1 || got[0] != mesh.ScopeHandoffsPrepare {
-		t.Fatalf("rejected launch grant mutated grants to %v", got)
+	if got := updated.Grants["client"]; len(got) != 1 || got[0] != mesh.ScopeHandoffsLaunch {
+		t.Fatalf("launch grant = %v", got)
 	}
 
 	if err := cmdMesh([]string{"grant", "client", "--config", cfgPath}, strings.NewReader(""), &bytes.Buffer{}); err != nil {

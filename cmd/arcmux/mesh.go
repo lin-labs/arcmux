@@ -75,18 +75,19 @@ func cmdMeshGrant(args []string, stdout io.Writer) error {
 		return err
 	}
 	if len(rest) < 1 {
-		return fmt.Errorf("usage: arcmux mesh grant <peer> [sessions.read artifacts.read events.read handoffs.prepare]")
+		return fmt.Errorf("usage: arcmux mesh grant <peer> [sessions.read artifacts.read events.read handoffs.prepare handoffs.launch]")
 	}
 	peerID := rest[0]
 	scopes := append([]string(nil), rest[1:]...)
 	if len(scopes) == 0 {
 		scopes = append(scopes, meshReadScopes...)
 	}
-	allowed := make(map[string]bool, len(meshReadScopes)+1)
+	allowed := make(map[string]bool, len(meshReadScopes)+2)
 	for _, scope := range meshReadScopes {
 		allowed[scope] = true
 	}
 	allowed[mesh.ScopeHandoffsPrepare] = true
+	allowed[mesh.ScopeHandoffsLaunch] = true
 	seen := make(map[string]bool, len(scopes))
 	for _, scope := range scopes {
 		if !allowed[scope] {

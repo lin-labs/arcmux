@@ -143,9 +143,44 @@ func TestHandoffWaitDoesNotAdvanceOfflineRetryWait(t *testing.T) {
 	}
 }
 
+func TestHandoffLaunchWaitPollsWithoutImplicitRetry(t *testing.T) {
+	var requests []string
+	var mu sync.Mutex
+	gets := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests = append(requests, r.Method+" "+r.URL.RequestURI())
+		mu.Unlock()
+		if r.Method == http.MethodPost {
+			_, _ = w.Write([]byte(`{"handoff_id":"handoff-1","state":"launch_retry_wait"}` + "\n"))
+			return
+		}
+		gets++
+		state := "launch_retry_wait"
+		if gets >= 2 {
+			state = "accepted"
+		}
+		_, _ = w.Write([]byte(`{"handoff_id":"handoff-1","state":"` + state + `"}` + "\n"))
+	}))
+	defer server.Close()
+	cfg, _ := meshDataTestConfig(t, server.URL)
+	var out bytes.Buffer
+	if err := cmdHandoff([]string{"launch", "handoff-1", "--wait", "2s", "--config", cfg}, strings.NewReader(""), &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"state":"accepted"`) {
+		t.Fatalf("launch output=%s", out.String())
+	}
+	for _, request := range requests {
+		if strings.Contains(request, "/retry") {
+			t.Fatalf("launch wait implicitly retried: %v", requests)
+		}
+	}
+}
+
 func TestHandoffListShowRetryAndMainRouting(t *testing.T) {
 	var mu sync.Mutex
-	requests := make([]string, 0, 4)
+	requests := make([]string, 0, 5)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		requests = append(requests, r.Method+" "+r.URL.RequestURI())
@@ -163,6 +198,9 @@ func TestHandoffListShowRetryAndMainRouting(t *testing.T) {
 	if err := cmdHandoff([]string{"retry", "handoff-1", "--config", cfg}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
+	if err := cmdHandoff([]string{"launch", "handoff-1", "--config", cfg}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
 	// run cannot inject stdout, but reaching the HTTP server proves the main
 	// dispatcher recognizes the handoff command.
 	if err := run([]string{"handoff", "list", "--config", cfg}); err != nil {
@@ -171,7 +209,8 @@ func TestHandoffListShowRetryAndMainRouting(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	want := []string{
-		"GET /mesh/handoffs", "GET /mesh/handoffs?id=handoff-1", "POST /mesh/handoffs/retry?id=handoff-1", "GET /mesh/handoffs",
+		"GET /mesh/handoffs", "GET /mesh/handoffs?id=handoff-1", "POST /mesh/handoffs/retry?id=handoff-1",
+		"POST /mesh/handoffs/launch?id=handoff-1", "GET /mesh/handoffs",
 	}
 	if len(requests) != len(want) {
 		t.Fatalf("requests=%v", requests)
@@ -204,5 +243,12 @@ func TestHandoffPrepareWaitRejectsNegativeDuration(t *testing.T) {
 	}, strings.NewReader("goal"), &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "must not be negative") {
 		t.Fatalf("negative wait err=%v", err)
+	}
+}
+
+func TestHandoffLaunchRejectsNegativeDuration(t *testing.T) {
+	err := cmdHandoff([]string{"launch", "handoff-1", "--wait", (-time.Second).String()}, strings.NewReader(""), &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "must not be negative") {
+		t.Fatalf("negative launch wait err=%v", err)
 	}
 }

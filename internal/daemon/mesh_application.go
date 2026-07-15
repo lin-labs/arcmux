@@ -43,6 +43,7 @@ const (
 	meshMethodEventsUnsubscribe = "events.unsubscribe"
 	meshMethodHandoffsPrepare   = "handoffs.prepare"
 	meshMethodHandoffsStatus    = "handoffs.status"
+	meshMethodHandoffsLaunch    = "handoffs.launch"
 )
 
 var meshMethodSpecs = []arcmuxmesh.MethodSpec{
@@ -54,6 +55,7 @@ var meshMethodSpecs = []arcmuxmesh.MethodSpec{
 	{Name: meshMethodEventsUnsubscribe, Capability: arcmuxmesh.CapabilityEventsV1, RequiredScope: arcmuxmesh.ScopeEventsRead},
 	{Name: meshMethodHandoffsPrepare, Capability: arcmuxmesh.CapabilityHandoffsV1, RequiredScope: arcmuxmesh.ScopeHandoffsPrepare},
 	{Name: meshMethodHandoffsStatus, Capability: arcmuxmesh.CapabilityHandoffsV1, RequiredScope: arcmuxmesh.ScopeHandoffsPrepare},
+	{Name: meshMethodHandoffsLaunch, Capability: arcmuxmesh.CapabilityHandoffsV1, RequiredScope: arcmuxmesh.ScopeHandoffsLaunch},
 }
 
 type meshPeerSubscription struct {
@@ -263,10 +265,12 @@ func (d *Daemon) initMeshApplication() error {
 		}
 		outbound[peer.DeviceID] = meshPeerSubscription{topics: set}
 	}
+	handoffs := newHandoffApplication(handoffStore, d.profiles)
+	handoffs.configureLaunchRuntime(d)
 	d.meshMu.Lock()
 	if d.meshApp == nil {
 		d.meshApp = &meshApplication{
-			store: store, handoffs: newHandoffApplication(handoffStore, d.profiles), epoch: fmt.Sprintf("boot-%d", time.Now().UTC().UnixNano()),
+			store: store, handoffs: handoffs, epoch: fmt.Sprintf("boot-%d", time.Now().UTC().UnixNano()),
 			subs: make(map[string]meshPeerSubscription), outbound: outbound,
 			sessionPages: make(map[string]cachedSessionInventory), artifactPages: make(map[string]cachedArtifactInventory),
 			syncing: make(map[string]*meshSyncState), reconcileInterval: 15 * time.Second,
@@ -433,6 +437,17 @@ func (d *Daemon) registerMeshApplication(manager *arcmuxmesh.Manager) error {
 				return nil, err
 			}
 			return app.status(ctx, principal, request)
+		},
+		meshMethodHandoffsLaunch: func(ctx context.Context, principal arcmuxmesh.Principal, raw json.RawMessage) (any, error) {
+			var request meshHandoffLaunchRequest
+			if err := decodeMeshParams(raw, &request); err != nil {
+				return nil, meshInvalidRequest(errors.New("invalid handoff launch request"))
+			}
+			app, err := d.handoffApplication()
+			if err != nil {
+				return nil, err
+			}
+			return app.launch(ctx, principal, d.meshDeviceID(), request)
 		},
 	}
 	for _, spec := range meshMethodSpecs {
@@ -810,7 +825,13 @@ func (d *Daemon) localMeshProfileScopes() []sessionview.ProfileScope {
 }
 
 func (d *Daemon) meshSafeSummary(summary sessionview.Summary) (sessionview.Summary, error) {
-	summary.LaunchCWD = meshPathHint(summary.LaunchCWD)
+	if summary.Private {
+		// A handoff continuation's exact target-local checkout is private
+		// protocol state, not a mesh inventory hint.
+		summary.LaunchCWD = ""
+	} else {
+		summary.LaunchCWD = meshPathHint(summary.LaunchCWD)
+	}
 	// Hook Goal/OverallGoal currently lack field-level provenance proving they
 	// were machine-summarized rather than copied or seeded from a raw prompt.
 	// Regex redaction cannot make arbitrary prompt text safe, so phase two

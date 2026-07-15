@@ -39,7 +39,7 @@ type handoffSourceStatus struct {
 
 func cmdHandoff(args []string, stdin io.Reader, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: arcmux handoff prepare|list|show|retry")
+		return errors.New("usage: arcmux handoff prepare|launch|list|show|retry")
 	}
 	switch args[0] {
 	case "prepare":
@@ -50,9 +50,43 @@ func cmdHandoff(args []string, stdin io.Reader, stdout io.Writer) error {
 		return cmdHandoffShow(args[1:], stdout)
 	case "retry":
 		return cmdHandoffRetry(args[1:], stdout)
+	case "launch":
+		return cmdHandoffLaunch(args[1:], stdout)
 	default:
 		return fmt.Errorf("unknown handoff subcommand %q", args[0])
 	}
+}
+
+func cmdHandoffLaunch(args []string, stdout io.Writer) error {
+	cfg, rest, err := meshConfig(args)
+	if err != nil {
+		return err
+	}
+	if len(rest) < 1 {
+		return errors.New("usage: arcmux handoff launch <handoff-id> [--wait duration] [--config path]")
+	}
+	id := rest[0]
+	fs := flag.NewFlagSet("handoff launch", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	wait := fs.Duration("wait", 0, "wait for target acceptance")
+	if err := fs.Parse(rest[1:]); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 || id == "" {
+		return errors.New("usage: arcmux handoff launch <handoff-id> [--wait duration] [--config path]")
+	}
+	if *wait < 0 {
+		return errors.New("--wait must not be negative")
+	}
+	response, err := meshAPI(cfg, http.MethodPost, "/mesh/handoffs/launch?id="+url.QueryEscape(id))
+	if err != nil {
+		return err
+	}
+	if *wait == 0 {
+		_, err = stdout.Write(response)
+		return err
+	}
+	return waitForHandoffLaunch(cfg, response, *wait, stdout)
 }
 
 func cmdHandoffPrepare(args []string, stdin io.Reader, stdout io.Writer) error {
@@ -253,4 +287,55 @@ func writeHandoffTerminal(status handoffSourceStatus, response []byte, stdout io
 
 func handoffPrepareTerminal(state handoff.SourceState) bool {
 	return state == handoff.SourceRemotePrepared || state == handoff.SourceFailed
+}
+
+func waitForHandoffLaunch(cfg *config.Config, initial []byte, wait time.Duration, stdout io.Writer) error {
+	var status handoffSourceStatus
+	if err := json.Unmarshal(initial, &status); err != nil {
+		return fmt.Errorf("decode handoff status: %w", err)
+	}
+	if status.HandoffID == "" {
+		return errors.New("daemon returned an empty handoff id")
+	}
+	if handoffLaunchTerminal(status.State) {
+		return writeHandoffLaunchTerminal(status, initial, stdout)
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			_, _ = stdout.Write(initial)
+			return fmt.Errorf("timed out waiting for handoff %s to launch", status.HandoffID)
+		}
+		delay := 200 * time.Millisecond
+		if remaining < delay {
+			delay = remaining
+		}
+		time.Sleep(delay)
+		response, err := meshAPI(cfg, http.MethodGet, "/mesh/handoffs?id="+url.QueryEscape(status.HandoffID))
+		if err != nil {
+			return err
+		}
+		initial = response
+		if err := json.Unmarshal(response, &status); err != nil {
+			return fmt.Errorf("decode handoff status: %w", err)
+		}
+		if handoffLaunchTerminal(status.State) {
+			return writeHandoffLaunchTerminal(status, response, stdout)
+		}
+	}
+}
+
+func handoffLaunchTerminal(state handoff.SourceState) bool {
+	return state == handoff.SourceAccepted || state == handoff.SourceFailed
+}
+
+func writeHandoffLaunchTerminal(status handoffSourceStatus, response []byte, stdout io.Writer) error {
+	if _, err := stdout.Write(response); err != nil {
+		return err
+	}
+	if status.State == handoff.SourceFailed {
+		return fmt.Errorf("handoff %s launch failed", status.HandoffID)
+	}
+	return nil
 }

@@ -7,8 +7,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/lin-labs/arcmux/internal/hooks"
 	"github.com/lin-labs/arcmux/internal/project"
 	"github.com/lin-labs/arcmux/internal/session"
 )
@@ -168,6 +171,56 @@ func TestHandleSessionsListUnknownProjectEmpty(t *testing.T) {
 	}
 	if len(resp.Sessions) != 0 {
 		t.Errorf("unknown project should yield empty list, got %d", len(resp.Sessions))
+	}
+}
+
+func TestHandleSessionsListRedactsTrustedPrivateContext(t *testing.T) {
+	d, cleanup := newCreateSessionTestDaemon(t)
+	defer cleanup()
+	d.cfg.Hooks.SessionStateDir = t.TempDir()
+	secretCWD := filepath.Join(t.TempDir(), "DO_NOT_LEAK_PRIVATE_CWD")
+	sess := session.NewSession("private-session", "private handoff", "claude", secretCWD)
+	sess.TmuxTarget = "%private"
+	sess.SetCurrentCommand("DO_NOT_LEAK_PRIVATE_PROMPT")
+	sess.SetOwnerID("arcmux-handoff:handoff-1")
+	sess.MarkPrivate()
+	d.mu.Lock()
+	d.sessions[sess.Snapshot().ID] = sess
+	d.mu.Unlock()
+	if err := hooks.ApplyEventWithContract(
+		d.cfg.Hooks.SessionStateDir,
+		sess.Snapshot().ID,
+		"claude",
+		hooks.EventPromptSubmit,
+		"",
+		hooks.TurnContractUpdate{Goal: "DO_NOT_LEAK_PRIVATE_GOAL", LastUserMessage: "DO_NOT_LEAK_PRIVATE_MESSAGE"},
+		time.Now(),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	h := &HTTPServer{daemon: d}
+	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
+	rec := httptest.NewRecorder()
+	h.handleSessionsList(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var response sessionsListResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Sessions) != 1 {
+		t.Fatalf("sessions = %+v", response.Sessions)
+	}
+	got := response.Sessions[0]
+	if got.CWD != "" || got.CurrentCommand != "" || got.TurnContract != nil {
+		t.Fatalf("private context was not redacted: %+v", got)
+	}
+	for _, forbidden := range []string{secretCWD, "DO_NOT_LEAK_PRIVATE_PROMPT", "DO_NOT_LEAK_PRIVATE_GOAL", "DO_NOT_LEAK_PRIVATE_MESSAGE"} {
+		if strings.Contains(rec.Body.String(), forbidden) {
+			t.Fatalf("sessions response leaked %q: %s", forbidden, rec.Body.String())
+		}
 	}
 }
 
