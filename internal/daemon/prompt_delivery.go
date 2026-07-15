@@ -26,6 +26,7 @@ func (d *Daemon) ensurePromptIngested(ctx context.Context, sess *session.Session
 		WorkingIndicator:  prof.WorkingIndicator,
 		SessionID:         snap.ID,
 		DeliveryStartedAt: deliveryStartedAt,
+		LocalOnly:         snap.Private,
 	}, &promptDeliveryRuntime{
 		daemon:    d,
 		sessionID: snap.ID,

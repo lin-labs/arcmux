@@ -1,14 +1,17 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	arcmuxv1 "github.com/lin-labs/arcmux/gen/arcmux/v1"
 	"github.com/lin-labs/arcmux/internal/config"
 	"github.com/lin-labs/arcmux/internal/hooks"
 	"github.com/lin-labs/arcmux/internal/profile"
@@ -132,6 +135,7 @@ func TestProfileSessionPersistenceIsolatedAndPreservesOwner(t *testing.T) {
 	beta := newPersistenceTestDaemon(t, "beta", socketDir, filepath.Join(tmp, "profiles", "beta"))
 	addOwnedExecSession(alpha, "s-alpha", "owner-alpha")
 	addOwnedExecSession(beta, "s-beta", "owner-beta")
+	alpha.sessions["s-alpha"].SetEnv(map[string]string{"API_TOKEN": "DO_NOT_PERSIST_SECRET", "ARCMUX_HANDOFF_INSTRUCTIONS": "/not-a-handoff.json"})
 
 	alpha.persistSessions()
 	beta.persistSessions()
@@ -139,6 +143,10 @@ func TestProfileSessionPersistenceIsolatedAndPreservesOwner(t *testing.T) {
 		t.Fatalf("profile persistence paths collide: %q", alpha.persistPath())
 	}
 	for path, wantID := range map[string]string{alpha.persistPath(): "s-alpha", beta.persistPath(): "s-beta"} {
+		info, err := os.Lstat(path)
+		if err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("session inventory mode at %s = %v err=%v", path, info, err)
+		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
@@ -149,6 +157,9 @@ func TestProfileSessionPersistenceIsolatedAndPreservesOwner(t *testing.T) {
 		}
 		if len(records) != 1 || records[0].ID != wantID {
 			t.Fatalf("records at %s = %#v, want %s", path, records, wantID)
+		}
+		if strings.Contains(string(data), "DO_NOT_PERSIST_SECRET") || strings.Contains(string(data), "/not-a-handoff.json") {
+			t.Fatalf("ordinary session env leaked into %s: %s", path, data)
 		}
 	}
 
@@ -161,8 +172,145 @@ func TestProfileSessionPersistenceIsolatedAndPreservesOwner(t *testing.T) {
 	if got := restored.Snapshot().OwnerID; got != "owner-alpha" {
 		t.Fatalf("restored owner_id = %q, want owner-alpha", got)
 	}
+	if len(restored.Snapshot().Env) != 0 {
+		t.Fatalf("ordinary env restored unexpectedly: %+v", restored.Snapshot().Env)
+	}
 	if _, ok := restarted.GetSession("s-beta"); ok {
 		t.Fatal("beta session leaked into alpha inventory")
+	}
+}
+
+func TestSessionPersistenceIsAtomicSerializedAndRejectsUnsafeDestination(t *testing.T) {
+	tmp := t.TempDir()
+	d := newPersistenceTestDaemon(t, "alpha", filepath.Join(tmp, "sockets"), filepath.Join(tmp, "data"))
+	addOwnedExecSession(d, "s-alpha", "owner-alpha")
+	const writers = 24
+	errs := make(chan error, writers)
+	var wg sync.WaitGroup
+	for range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- d.persistSessionsChecked()
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent persist: %v", err)
+		}
+	}
+	data, err := os.ReadFile(d.persistPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var records []persistedSession
+	if err := json.Unmarshal(data, &records); err != nil || len(records) != 1 || records[0].ID != "s-alpha" {
+		t.Fatalf("atomic inventory records=%+v err=%v data=%q", records, err, data)
+	}
+	entries, err := os.ReadDir(filepath.Dir(d.persistPath()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".sessions-") {
+			t.Fatalf("persistence left crash temp %q", entry.Name())
+		}
+	}
+	if err := os.Remove(d.persistPath()); err != nil {
+		t.Fatal(err)
+	}
+	secretTarget := filepath.Join(tmp, "DO_NOT_LEAK_TARGET")
+	if err := os.WriteFile(secretTarget, []byte("unchanged"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secretTarget, d.persistPath()); err != nil {
+		t.Fatal(err)
+	}
+	err = d.persistSessionsChecked()
+	if err == nil || strings.Contains(err.Error(), tmp) || strings.Contains(err.Error(), secretTarget) {
+		t.Fatalf("unsafe destination error=%v", err)
+	}
+	unchanged, err := os.ReadFile(secretTarget)
+	if err != nil || string(unchanged) != "unchanged" {
+		t.Fatalf("unsafe destination mutated target=%q err=%v", unchanged, err)
+	}
+}
+
+func TestRestoredHandoffSessionCWDIsRedactedFromMeshInventory(t *testing.T) {
+	tmp := t.TempDir()
+	dataDir := filepath.Join(tmp, "data")
+	d := newPersistenceTestDaemon(t, "", filepath.Join(tmp, "sockets"), dataDir)
+	secretCWD := filepath.Join(tmp, "DO_NOT_LEAK_TARGET_WORKTREE")
+	managed := session.NewSession("target-session", "handoff-deadbeef", "claude_exec", secretCWD)
+	managed.SetTransport(profile.TransportExec)
+	managed.SetOwnerID("arcmux-handoff:handoff-1")
+	managed.MarkPrivate()
+	managed.SetEnv(map[string]string{
+		"ARCMUX_HANDOFF_INSTRUCTIONS": "/private/handoff-instructions.json",
+		"API_TOKEN":                   "DO_NOT_PERSIST_HANDOFF_SECRET",
+	})
+	managed.SetCurrentCommand("arcmux-handoff-v1:safe-marker")
+	managed.SetState(session.StateIdle)
+	d.mu.Lock()
+	d.sessions[managed.Snapshot().ID] = managed
+	d.mu.Unlock()
+	if err := d.persistSessionsChecked(); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := os.ReadFile(d.persistPath())
+	if err != nil || strings.Contains(string(persisted), "DO_NOT_PERSIST_HANDOFF_SECRET") || !strings.Contains(string(persisted), "/private/handoff-instructions.json") {
+		t.Fatalf("handoff persistence allowlist data=%s err=%v", persisted, err)
+	}
+	restarted := newPersistenceTestDaemon(t, "", filepath.Join(tmp, "sockets"), dataDir)
+	restarted.restoreSessions()
+	restored, ok := restarted.GetSession("target-session")
+	if !ok || !restored.Snapshot().Private || restored.Snapshot().Env["ARCMUX_HANDOFF_INSTRUCTIONS"] != "/private/handoff-instructions.json" || restored.Snapshot().Env["API_TOKEN"] != "" {
+		t.Fatalf("restored handoff env = %+v ok=%t", restored, ok)
+	}
+	response := restarted.localMeshSessions()
+	if len(response.Sessions) != 1 {
+		t.Fatalf("mesh sessions = %+v", response.Sessions)
+	}
+	if response.Sessions[0].LaunchCWD != "" {
+		t.Fatalf("restored handoff cwd leaked in mesh inventory: %+v", response.Sessions[0])
+	}
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), secretCWD) {
+		t.Fatalf("mesh inventory leaked private cwd: %s", encoded)
+	}
+}
+
+func TestExternalOwnerPrefixCannotSpoofPrivateSessionPersistence(t *testing.T) {
+	tmp := t.TempDir()
+	d := newPersistenceTestDaemon(t, "", filepath.Join(tmp, "sockets"), filepath.Join(tmp, "data"))
+	response, err := NewGRPCServer(d).CreateSession(context.Background(), &arcmuxv1.CreateSessionRequest{
+		Agent:       "claude_exec",
+		Cwd:         t.TempDir(),
+		SessionName: "caller-spoof",
+		OwnerId:     "arcmux-handoff:caller-controlled",
+		Env: map[string]string{
+			"ARCMUX_HANDOFF_INSTRUCTIONS": "/private/CALLER_CONTROLLED.json",
+			"API_TOKEN":                   "DO_NOT_PERSIST_CALLER_SECRET",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, ok := d.GetSession(response.SessionId)
+	if !ok || sess.Snapshot().Private {
+		t.Fatalf("external caller acquired private provenance: session=%v ok=%t", sess, ok)
+	}
+	data, err := os.ReadFile(d.persistPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "CALLER_CONTROLLED") || strings.Contains(string(data), "DO_NOT_PERSIST_CALLER_SECRET") || strings.Contains(string(data), `"private": true`) {
+		t.Fatalf("caller-controlled private metadata persisted: %s", data)
 	}
 }
 

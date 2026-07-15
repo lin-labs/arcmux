@@ -50,6 +50,8 @@ func run(args []string) error {
 		return cmdArtifact(args[1:], os.Stdout)
 	case "surface":
 		return cmdSurface(args[1:], os.Stdout)
+	case "handoff":
+		return cmdHandoff(args[1:], os.Stdin, os.Stdout)
 	case "hook-env":
 		return cmdHookEnv(args[1:], os.Stdout)
 	case "hook":
@@ -128,7 +130,7 @@ Usage:
   arcmux mesh ping <peer>                                 Check a connected peer
   arcmux mesh serve <peer> --url <url> [--output file]    Create a one-time pairing invite
   arcmux mesh join <invite-file|->                        Join from a 0600 file or stdin
-  arcmux mesh grant <peer> [scopes...]                    Allow explicit read-only application access
+  arcmux mesh grant <peer> [scopes...]                    Grant explicit application scopes (default: safe reads)
   arcmux mesh revoke <peer>                               Return a peer to transport-only access
   arcmux mesh sessions <peer> [--profile scope]           Synchronize and list safe remote sessions
   arcmux mesh session <peer> <scope> <session-id>         Show one safe remote session projection
@@ -139,6 +141,10 @@ Usage:
   arcmux artifact list [--kind kind]                      List local and synchronized artifact references
   arcmux surface bind <device> <scope> <session-id>       Bind this cmux surface to an exact remote session
   arcmux surface show|list|unbind                         Inspect or remove durable cmux bindings
+  arcmux handoff prepare <peer> <scope> <session> ...     Queue and materialize a remote handoff; never launch it
+  arcmux handoff launch <handoff-id> [--wait duration]    Explicitly launch one prepared remote continuation
+  arcmux handoff receive <marker>                         Read owner-local target instructions for a launch marker
+  arcmux handoff list|show|retry                          Inspect or retry the durable handoff outbox
   arcmux pulse --project <slug> [--interval 10s] [--once] Debug-only: pulse one project (the daemon does this for all projects)
   arcmux version                                          Print version
   arcmux help                                             Show this help

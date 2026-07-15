@@ -66,6 +66,10 @@ type Session struct {
 	Env          map[string]string
 	AutoClose    bool   // for exec transport: transition to StateExited on subprocess exit
 	OwnerID      string // C1: free-form caller attribution tag (e.g. "elonco:my-project"); empty for legacy callers
+	// private is trusted daemon provenance for sessions whose local context
+	// must not cross ordinary inventory, audit, or model-evidence boundaries.
+	// It is deliberately not inferred from caller-controlled OwnerID or Env.
+	private bool
 }
 
 // NewSession creates a session in starting state.
@@ -174,6 +178,15 @@ func (s *Session) SetOwnerID(id string) {
 	s.OwnerID = id
 }
 
+// MarkPrivate records trusted daemon provenance. It is intentionally
+// one-directional: a private session cannot be made public later by mutating
+// caller-controlled metadata.
+func (s *Session) MarkPrivate() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.private = true
+}
+
 // SetEnv replaces the session environment snapshot.
 func (s *Session) SetEnv(env map[string]string) {
 	s.mu.Lock()
@@ -211,6 +224,7 @@ type Snapshot struct {
 	NudgeCount       int
 	AutoClose        bool
 	OwnerID          string
+	Private          bool
 }
 
 func (s *Session) Snapshot() Snapshot {
@@ -237,6 +251,7 @@ func (s *Session) Snapshot() Snapshot {
 		NudgeCount:       s.NudgeCount,
 		AutoClose:        s.AutoClose,
 		OwnerID:          s.OwnerID,
+		Private:          s.private,
 	}
 }
 

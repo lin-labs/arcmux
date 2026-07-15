@@ -26,6 +26,10 @@ type Evidence struct {
 	AfterOutput      string
 	WorkingIndicator string
 	Attempt          int
+	// LocalOnly prohibits judges from exporting this evidence. It is set from
+	// trusted daemon provenance for private supervised sessions; screen output
+	// may contain exact local paths or other continuation context.
+	LocalOnly bool
 
 	// SessionID is the arcmux session whose hook state file the hooks judge
 	// reads. Empty for callers that only use screen-based judges.
@@ -121,12 +125,23 @@ type HeuristicJudge struct{}
 
 func (j HeuristicJudge) Assess(_ context.Context, evidence Evidence) (Assessment, error) {
 	output := normalizeScreen(evidence.AfterOutput)
-	promptVisible := containsPromptFragment(output, evidence.Prompt)
-	blocked := containsFold(output, "do you trust") ||
-		containsFold(output, "press enter to continue") ||
-		containsFold(output, "resume")
+	beforePromptCount := promptOccurrenceCount(evidence.BeforeOutput, evidence.Prompt)
+	afterPromptCount := promptOccurrenceCount(evidence.AfterOutput, evidence.Prompt)
+	promptVisible := afterPromptCount > 0
+	promptRetained := !containsStandaloneComposerMarker(evidence.Prompt) &&
+		afterPromptCount > beforePromptCount &&
+		containsFreshComposerAfterLatestPrompt(evidence.AfterOutput, evidence.Prompt, afterPromptCount)
+	blocked := containsBlockerOutsidePrompt(output, evidence.Prompt, afterPromptCount)
 
 	switch {
+	case promptRetained:
+		return Assessment{
+			State:                   StateIngested,
+			Confidence:              0.95,
+			WorkStartedProbability:  0.97,
+			EnterHelpfulProbability: 0.02,
+			Source:                  "heuristic",
+		}, nil
 	case blocked:
 		return Assessment{
 			State:                   StateBlocked,
@@ -178,9 +193,60 @@ func containsFold(s, substr string) bool {
 }
 
 func containsPromptFragment(output, prompt string) bool {
+	return promptOccurrenceCount(output, prompt) > 0
+}
+
+func promptOccurrenceCount(output, prompt string) int {
 	normalizedOutput := normalizeScreen(output)
+	count := 0
 	for _, fragment := range promptFragments(prompt) {
-		if strings.Contains(normalizedOutput, normalizeScreen(fragment)) {
+		fragmentCount := strings.Count(normalizedOutput, normalizeScreen(fragment))
+		if fragmentCount > count {
+			count = fragmentCount
+		}
+	}
+	return count
+}
+
+// containsFreshComposerAfterLatestPrompt distinguishes a newly retained prompt
+// from the same text still waiting in the active composer. Codex renders both
+// with a leading ›, but only an ingested, completed turn can leave the latest
+// prompt occurrence above a new empty composer.
+func containsFreshComposerAfterLatestPrompt(output, prompt string, totalPromptCount int) bool {
+	lineStart := 0
+	for lineStart <= len(output) {
+		lineEnd := strings.IndexByte(output[lineStart:], '\n')
+		if lineEnd < 0 {
+			lineEnd = len(output)
+		} else {
+			lineEnd += lineStart
+		}
+		if strings.TrimSpace(output[lineStart:lineEnd]) == "›" &&
+			promptOccurrenceCount(output[:lineStart], prompt) == totalPromptCount {
+			return true
+		}
+		if lineEnd == len(output) {
+			break
+		}
+		lineStart = lineEnd + 1
+	}
+	return false
+}
+
+func containsStandaloneComposerMarker(text string) bool {
+	for _, line := range strings.Split(text, "\n") {
+		if strings.TrimSpace(line) == "›" {
+			return true
+		}
+	}
+	return false
+}
+
+func containsBlockerOutsidePrompt(output, prompt string, promptOccurrences int) bool {
+	normalizedPrompt := normalizeScreen(prompt)
+	for _, blocker := range []string{"do you trust", "press enter to continue", "resume"} {
+		promptBlockers := strings.Count(normalizedPrompt, blocker) * promptOccurrences
+		if strings.Count(output, blocker) > promptBlockers {
 			return true
 		}
 	}

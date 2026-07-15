@@ -150,6 +150,9 @@ type Summary struct {
 	Work           *WorkSummary      `json:"work,omitempty"`
 	History        *HistoryReference `json:"history,omitempty"`
 	Freshness      Freshness         `json:"freshness"`
+	// Private is trusted local provenance used to redact this projection
+	// before transport. It is never serialized onto the mesh.
+	Private bool `json:"-"`
 }
 
 // TurnActivity is a bounded, safe subset of hook lifecycle data. Event counts
@@ -201,6 +204,7 @@ func Build(scope ProfileScope, snap session.Snapshot, hookState *hooks.SessionSt
 			ObservedAt:      observedAt,
 			SourceUpdatedAt: snap.LastActivityAt,
 		},
+		Private: snap.Private,
 	}
 	detail := Detail{Summary: summary, NudgeCount: snap.NudgeCount}
 

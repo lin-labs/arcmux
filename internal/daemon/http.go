@@ -23,13 +23,14 @@ import (
 
 // HTTPServer exposes a small HTTP API for managing sessions.
 type HTTPServer struct {
-	daemon    *Daemon
-	srv       *http.Server
-	authToken string
+	daemon        *Daemon
+	srv           *http.Server
+	authToken     string
+	handoffOutbox func() (*sourceHandoffOutbox, error)
 }
 
 func NewHTTPServer(d *Daemon, addr string) *HTTPServer {
-	h := &HTTPServer{daemon: d, authToken: d.cfg.Daemon.HTTPAuthToken}
+	h := &HTTPServer{daemon: d, authToken: d.cfg.Daemon.HTTPAuthToken, handoffOutbox: d.sourceHandoffOutbox}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/session/new", h.handleSessionNew)
 	mux.HandleFunc("/session/close", h.handleSessionClose)
@@ -55,6 +56,9 @@ func NewHTTPServer(d *Daemon, addr string) *HTTPServer {
 	mux.HandleFunc("/mesh/artifact", h.meshOperatorOnly(h.handleMeshArtifact))
 	mux.HandleFunc("/mesh/subscribe", h.meshOperatorOnly(h.handleMeshSubscribe))
 	mux.HandleFunc("/mesh/surface-bindings", h.meshOperatorOnly(h.handleMeshSurfaceBindings))
+	mux.HandleFunc("/mesh/handoffs", h.meshOperatorOnly(h.handleMeshHandoffs))
+	mux.HandleFunc("/mesh/handoffs/retry", h.meshOperatorOnly(h.handleMeshHandoffRetry))
+	mux.HandleFunc("/mesh/handoffs/launch", h.meshOperatorOnly(h.handleMeshHandoffLaunch))
 	h.srv = &http.Server{Addr: addr, Handler: otelhttp.NewHandler(h.withAuth(mux), "arcmux-http")}
 	return h
 }
@@ -491,20 +495,25 @@ func (h *HTTPServer) handleSessionsList(w http.ResponseWriter, r *http.Request) 
 			continue
 		}
 		summary := sessionSummary{
-			SessionID:      snap.ID,
-			Name:           snap.Name,
-			Agent:          snap.Agent,
-			State:          string(snap.State),
-			TmuxTarget:     snap.TmuxTarget,
-			CWD:            snap.CWD,
-			StartedAt:      snap.StartedAt.Format("2006-01-02T15:04:05Z07:00"),
-			CurrentCommand: snap.CurrentCommand,
-			RemoteServer:   isCodexRemoteServerSnapshot(snap),
+			SessionID:    snap.ID,
+			Name:         snap.Name,
+			Agent:        snap.Agent,
+			State:        string(snap.State),
+			TmuxTarget:   snap.TmuxTarget,
+			StartedAt:    snap.StartedAt.Format("2006-01-02T15:04:05Z07:00"),
+			RemoteServer: isCodexRemoteServerSnapshot(snap),
+		}
+		if !snap.Private {
+			summary.CWD = snap.CWD
+			summary.CurrentCommand = snap.CurrentCommand
 		}
 		// Merge the recording snapshot (best-effort: a missing/unreadable state
-		// doc just leaves turn_contract nil, never fails the listing).
-		if st, err := hooks.ReadSessionState(h.daemon.cfg.Hooks.SessionStateDir, snap.ID); err == nil && st != nil {
-			summary.TurnContract = st.TurnContract
+		// doc just leaves turn_contract nil, never fails the listing). Private
+		// sessions keep prompt-derived hook state local to the supervised pane.
+		if !snap.Private {
+			if st, err := hooks.ReadSessionState(h.daemon.cfg.Hooks.SessionStateDir, snap.ID); err == nil && st != nil {
+				summary.TurnContract = st.TurnContract
+			}
 		}
 		out.Sessions = append(out.Sessions, summary)
 	}

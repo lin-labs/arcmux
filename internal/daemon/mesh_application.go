@@ -18,6 +18,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/lin-labs/arcmux/internal/handoff"
 	arcmuxmesh "github.com/lin-labs/arcmux/internal/mesh"
 	"github.com/lin-labs/arcmux/internal/meshstate"
 	"github.com/lin-labs/arcmux/internal/session"
@@ -40,6 +41,9 @@ const (
 	meshMethodArtifactsGet      = "artifacts.get"
 	meshMethodEventsSubscribe   = "events.subscribe"
 	meshMethodEventsUnsubscribe = "events.unsubscribe"
+	meshMethodHandoffsPrepare   = "handoffs.prepare"
+	meshMethodHandoffsStatus    = "handoffs.status"
+	meshMethodHandoffsLaunch    = "handoffs.launch"
 )
 
 var meshMethodSpecs = []arcmuxmesh.MethodSpec{
@@ -49,6 +53,9 @@ var meshMethodSpecs = []arcmuxmesh.MethodSpec{
 	{Name: meshMethodArtifactsGet, Capability: arcmuxmesh.CapabilityArtifactsReadV1, RequiredScope: arcmuxmesh.ScopeArtifactsRead},
 	{Name: meshMethodEventsSubscribe, Capability: arcmuxmesh.CapabilityEventsV1, RequiredScope: arcmuxmesh.ScopeEventsRead},
 	{Name: meshMethodEventsUnsubscribe, Capability: arcmuxmesh.CapabilityEventsV1, RequiredScope: arcmuxmesh.ScopeEventsRead},
+	{Name: meshMethodHandoffsPrepare, Capability: arcmuxmesh.CapabilityHandoffsV1, RequiredScope: arcmuxmesh.ScopeHandoffsPrepare},
+	{Name: meshMethodHandoffsStatus, Capability: arcmuxmesh.CapabilityHandoffsV1, RequiredScope: arcmuxmesh.ScopeHandoffsPrepare},
+	{Name: meshMethodHandoffsLaunch, Capability: arcmuxmesh.CapabilityHandoffsV1, RequiredScope: arcmuxmesh.ScopeHandoffsLaunch},
 }
 
 type meshPeerSubscription struct {
@@ -84,6 +91,7 @@ type cachedArtifactInventory struct {
 
 type meshApplication struct {
 	store    *meshstate.Store
+	handoffs *handoffApplication
 	epoch    string
 	deviceID string
 	revision atomic.Uint64
@@ -96,10 +104,12 @@ type meshApplication struct {
 	sessionPages  map[string]cachedSessionInventory
 	artifactPages map[string]cachedArtifactInventory
 
-	runtimeMu  sync.Mutex
-	cancel     context.CancelFunc
-	runtimeCtx context.Context
-	wg         sync.WaitGroup
+	runtimeMu         sync.Mutex
+	cancel            context.CancelFunc
+	runtimeCtx        context.Context
+	handoffWake       chan struct{}
+	sourceHandoffWake chan struct{}
+	wg                sync.WaitGroup
 
 	syncMu            sync.Mutex
 	syncing           map[string]*meshSyncState
@@ -232,6 +242,10 @@ func (d *Daemon) initMeshApplication() error {
 	if err != nil {
 		return err
 	}
+	handoffStore, err := handoff.Open(root)
+	if err != nil {
+		return fmt.Errorf("open handoff state: %w", err)
+	}
 	outbound := make(map[string]meshPeerSubscription)
 	peers, err := store.ListPeers()
 	if err != nil {
@@ -251,10 +265,12 @@ func (d *Daemon) initMeshApplication() error {
 		}
 		outbound[peer.DeviceID] = meshPeerSubscription{topics: set}
 	}
+	handoffs := newHandoffApplication(handoffStore, d.profiles)
+	handoffs.configureLaunchRuntime(d)
 	d.meshMu.Lock()
 	if d.meshApp == nil {
 		d.meshApp = &meshApplication{
-			store: store, epoch: fmt.Sprintf("boot-%d", time.Now().UTC().UnixNano()),
+			store: store, handoffs: handoffs, epoch: fmt.Sprintf("boot-%d", time.Now().UTC().UnixNano()),
 			subs: make(map[string]meshPeerSubscription), outbound: outbound,
 			sessionPages: make(map[string]cachedSessionInventory), artifactPages: make(map[string]cachedArtifactInventory),
 			syncing: make(map[string]*meshSyncState), reconcileInterval: 15 * time.Second,
@@ -265,27 +281,7 @@ func (d *Daemon) initMeshApplication() error {
 }
 
 func (d *Daemon) meshProtocolRoot() (string, error) {
-	if stateDir := strings.TrimSpace(d.cfg.Hooks.SessionStateDir); stateDir != "" {
-		clean := filepath.Clean(stateDir)
-		if filepath.Base(clean) == "sessions" {
-			return filepath.Dir(clean), nil
-		}
-		return filepath.Join(filepath.Dir(clean), "mesh"), nil
-	}
-	if d.cfg.Daemon.StatePath != "" {
-		return filepath.Join(filepath.Dir(d.cfg.Daemon.StatePath), "mesh"), nil
-	}
-	if d.cfg.Daemon.Socket != "" {
-		return filepath.Join(filepath.Dir(d.cfg.Daemon.Socket), "mesh-state"), nil
-	}
-	if d.cfg.Mesh.RegistryPath != "" {
-		return filepath.Join(filepath.Dir(d.cfg.Mesh.RegistryPath), ".mesh-state"), nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve home for mesh state: %w", err)
-	}
-	return filepath.Join(home, "data", "mux"), nil
+	return d.cfg.ProtocolStateRoot()
 }
 
 func (d *Daemon) meshStateStore() (*meshstate.Store, error) {
@@ -399,6 +395,43 @@ func (d *Daemon) registerMeshApplication(manager *arcmuxmesh.Manager) error {
 			}
 			d.clearPeerSubscription(principal.PeerID)
 			return meshSubscriptionResponse{Topics: []string{}}, nil
+		},
+		meshMethodHandoffsPrepare: func(ctx context.Context, principal arcmuxmesh.Principal, raw json.RawMessage) (any, error) {
+			var request meshHandoffPrepareRequest
+			if err := decodeMeshParams(raw, &request); err != nil {
+				return nil, meshInvalidRequest(errors.New("invalid handoff prepare request"))
+			}
+			app, err := d.handoffApplication()
+			if err != nil {
+				return nil, err
+			}
+			resumeCtx, cancel := app.resumeContext(ctx)
+			defer cancel()
+			return app.prepare(resumeCtx, principal, d.meshDeviceID(), request)
+		},
+		meshMethodHandoffsStatus: func(ctx context.Context, principal arcmuxmesh.Principal, raw json.RawMessage) (any, error) {
+			var request meshHandoffStatusRequest
+			if err := decodeMeshParams(raw, &request); err != nil {
+				return nil, meshInvalidRequest(errors.New("invalid handoff status request"))
+			}
+			app, err := d.handoffApplication()
+			if err != nil {
+				return nil, err
+			}
+			return app.status(ctx, principal, request)
+		},
+		meshMethodHandoffsLaunch: func(ctx context.Context, principal arcmuxmesh.Principal, raw json.RawMessage) (any, error) {
+			var request meshHandoffLaunchRequest
+			if err := decodeMeshParams(raw, &request); err != nil {
+				return nil, meshInvalidRequest(errors.New("invalid handoff launch request"))
+			}
+			app, err := d.handoffApplication()
+			if err != nil {
+				return nil, err
+			}
+			resumeCtx, cancel := app.resumeContext(ctx)
+			defer cancel()
+			return app.launch(resumeCtx, principal, d.meshDeviceID(), request)
 		},
 	}
 	for _, spec := range meshMethodSpecs {
@@ -776,7 +809,13 @@ func (d *Daemon) localMeshProfileScopes() []sessionview.ProfileScope {
 }
 
 func (d *Daemon) meshSafeSummary(summary sessionview.Summary) (sessionview.Summary, error) {
-	summary.LaunchCWD = meshPathHint(summary.LaunchCWD)
+	if summary.Private {
+		// A handoff continuation's exact target-local checkout is private
+		// protocol state, not a mesh inventory hint.
+		summary.LaunchCWD = ""
+	} else {
+		summary.LaunchCWD = meshPathHint(summary.LaunchCWD)
+	}
 	// Hook Goal/OverallGoal currently lack field-level provenance proving they
 	// were machine-summarized rather than copied or seeded from a raw prompt.
 	// Regex redaction cannot make arbitrary prompt text safe, so phase two
@@ -1087,6 +1126,8 @@ func (app *meshApplication) stopRuntime() {
 	cancel := app.cancel
 	app.cancel = nil
 	app.runtimeCtx = nil
+	app.handoffWake = nil
+	app.sourceHandoffWake = nil
 	app.runtimeMu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -1119,7 +1160,11 @@ func (d *Daemon) startMeshApplicationRuntime(manager *arcmuxmesh.Manager) {
 	app.runtimeMu.Lock()
 	app.cancel = cancel
 	app.runtimeCtx = ctx
-	app.wg.Add(1)
+	app.handoffWake = make(chan struct{}, 1)
+	handoffWake := app.handoffWake
+	app.sourceHandoffWake = make(chan struct{}, 1)
+	sourceHandoffWake := app.sourceHandoffWake
+	app.wg.Add(3)
 	app.runtimeMu.Unlock()
 	go func() {
 		defer app.wg.Done()
@@ -1162,12 +1207,38 @@ func (d *Daemon) startMeshApplicationRuntime(manager *arcmuxmesh.Manager) {
 				d.reconcileMeshStatuses(manager, knownConnections)
 				d.retryMeshGaps(manager)
 			case <-reconcileTicker.C:
+				d.scheduleTargetHandoffReconcile()
+				d.scheduleSourceHandoffReconcile()
 				for _, peer := range d.connectedDesiredMeshPeers(manager) {
 					d.scheduleMeshSync(peer, d.meshSubscriptionNeedsRestore(manager, peer))
 				}
 			}
 		}
 	}()
+	go func() {
+		defer app.wg.Done()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-handoffWake:
+				d.reconcileTargetHandoffs(ctx, time.Now().UTC())
+			}
+		}
+	}()
+	go func() {
+		defer app.wg.Done()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-sourceHandoffWake:
+				d.reconcileSourceHandoffs(ctx, time.Now().UTC())
+			}
+		}
+	}()
+	d.scheduleTargetHandoffReconcile()
+	d.scheduleSourceHandoffReconcile()
 }
 
 func (d *Daemon) reconcileMeshStatuses(manager *arcmuxmesh.Manager, known map[string]time.Time) {
@@ -1187,6 +1258,8 @@ func (d *Daemon) reconcileMeshStatuses(manager *arcmuxmesh.Manager, known map[st
 				known[status.PeerID] = *status.ConnectedAt
 				d.clearSubscriptionUnlessConnection(status.PeerID, *status.ConnectedAt)
 				d.scheduleMeshSync(status.PeerID, true)
+				d.scheduleTargetHandoffReconcile()
+				d.scheduleSourceHandoffReconcile()
 			}
 			continue
 		}

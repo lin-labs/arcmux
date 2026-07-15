@@ -70,6 +70,83 @@ reconnect_min = "500ms"
 reconnect_max = "30s"
 ```
 
+### Explicit cross-device agent handoff
+
+Handoff is a durable two-step control protocol layered onto the mesh. Preparing
+a handoff verifies an immutable history snapshot and exact target worktree but
+does not launch an agent. Launching requires a second operator action and a
+separate peer grant. The source session is never paused, closed, prompted, or
+otherwise mutated by either step.
+
+Both devices must register the project in `~/agents/projects.yaml`. The target
+entry must name an existing managed worktree root:
+
+```yaml
+projects:
+  - repo: arcmux
+    project: arcmux
+    path: ~/Projects/arcmux
+    vault: ~/agents/obsProjects/arcmux
+    worktrees: ~/data/Projects/arcmux/worktrees
+```
+
+On the target, grant preparation while keeping launch disabled. `mesh grant`
+replaces the peer's complete grant list, so always repeat every scope that
+should remain enabled:
+
+```bash
+arcmux mesh grant ref \
+  sessions.read artifacts.read events.read handoffs.prepare
+```
+
+On the source, prepare from an arcmux-supervised session. The branch must be
+clean, pushed, and fetchable at its exact commit; the named history must already
+be in the shared history store on both devices. Put the human goal in an
+owner-readable file so it does not enter the process list:
+
+```bash
+arcmux handoff prepare devbox root <source-session-id> \
+  --project arcmux \
+  --agent codex \
+  --history <session-history-basename> \
+  --goal-file ~/.config/arcmux/handoff-goal.txt \
+  --wait 30s
+
+arcmux handoff list
+arcmux handoff show <handoff-id>
+```
+
+After inspecting the prepared record, enable launch on the target and launch
+from the source:
+
+```bash
+# target: this deliberately replaces the previous grant list
+arcmux mesh grant ref \
+  sessions.read artifacts.read events.read \
+  handoffs.prepare handoffs.launch
+
+# source
+arcmux handoff launch <handoff-id> --wait 60s
+```
+
+Acceptance returns a stable target session locator. Replaying `launch` returns
+the same locator and never creates a second continuation. Offline calls and a
+missing launch grant remain retryable; `arcmux handoff retry <handoff-id>` or a
+later `launch` resumes the durable record after connectivity or grants recover.
+
+The target agent receives its goal, lineage, history path, checkout, branch,
+and exact head only through a target-local `0600` instruction file. Its
+confirmed prompt contains an opaque marker and an `arcmux handoff receive
+<marker>` command. That owner-local command resolves the marker against durable
+target state and reads the private instructions without depending on pane
+environment variables reaching a shared agent backend. Private delivery
+evidence never leaves the device, and HTTP `/sessions` plus mesh session
+listings redact the continuation's checkout and prompt-derived context. The
+owner-local Unix-socket gRPC API remains a trusted inspection surface. The
+first release supports clean pushed branches; stored-patch/bundle
+materialization for dirty work remains a follow-up, so dirty or
+artifact-bearing requests fail closed instead of copying state implicitly.
+
 ---
 
 ## TL;DR — the minimum to drive Elon

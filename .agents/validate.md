@@ -47,6 +47,21 @@ make start && sleep 1 && make status
   mesh-only hot reload, `arcmux mesh ping <host>` succeeds, and
   `tailscale serve status` retains unrelated mappings. Never put the invite
   bearer on a command line or in a validation report.
+- Cross-device handoff rung: register an owner-only target `worktrees:` root,
+  grant the source `handoffs.prepare` but not `handoffs.launch`, and prepare a
+  clean pushed branch from a disposable supervised source session. Confirm the
+  source session ID/state/CWD/current command remain unchanged. Verify a launch
+  attempt without the second grant enters retryable `launch_retry_wait`; then
+  replace the target grant list with the read scopes plus both handoff scopes,
+  launch to acceptance, and replay launch. The replay must return the same root
+  target session locator. Confirm the target agent follows the opaque prompt's
+  `arcmux handoff receive <marker>` rendezvous and completes the private goal
+  even when its tool subprocess does not inherit pane-local environment. Target
+  and source worktrees must stay clean at the exact head, and HTTP `/sessions`
+  plus mesh session listings must not expose the private target CWD, goal,
+  history, instruction path, or prompt-derived context. The owner-local
+  Unix-socket gRPC API remains an intentional inspection surface. Kill only the
+  disposable sessions after capturing the evidence.
 - `make deploy` to labs followed by an SSH-side `make status` and a curl from
   the lab box, confirming the released binary boots in its real environment.
 

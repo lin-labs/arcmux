@@ -65,3 +65,26 @@ func TestDeliveryUnknownJudgeFailsLoud(t *testing.T) {
 		t.Fatal("expected error for unknown delivery.judge")
 	}
 }
+
+func TestProtocolStateRootFollowsSessionStateDirectory(t *testing.T) {
+	cases := []struct {
+		name     string
+		stateDir string
+		want     string
+	}{
+		{name: "protocol sessions", stateDir: "/var/lib/mux/sessions", want: "/var/lib/mux"},
+		{name: "custom state", stateDir: "/var/lib/custom/state", want: "/var/lib/custom/mesh"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{Hooks: HooksConfig{SessionStateDir: tc.stateDir}}
+			got, err := cfg.ProtocolStateRoot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("ProtocolStateRoot() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

@@ -520,6 +520,33 @@ func (c *Config) ScreenLogDir() string {
 	return filepath.Join(root, "arcmux", "sessions")
 }
 
+// ProtocolStateRoot returns the machine-local root shared by session, mesh,
+// artifact, and handoff protocol state. Callers outside the daemon use this
+// to resolve the same owner-only state without duplicating fallback rules.
+func (c *Config) ProtocolStateRoot() (string, error) {
+	if stateDir := strings.TrimSpace(c.Hooks.SessionStateDir); stateDir != "" {
+		clean := filepath.Clean(stateDir)
+		if filepath.Base(clean) == "sessions" {
+			return filepath.Dir(clean), nil
+		}
+		return filepath.Join(filepath.Dir(clean), "mesh"), nil
+	}
+	if c.Daemon.StatePath != "" {
+		return filepath.Join(filepath.Dir(c.Daemon.StatePath), "mesh"), nil
+	}
+	if c.Daemon.Socket != "" {
+		return filepath.Join(filepath.Dir(c.Daemon.Socket), "mesh-state"), nil
+	}
+	if c.Mesh.RegistryPath != "" {
+		return filepath.Join(filepath.Dir(c.Mesh.RegistryPath), ".mesh-state"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home for protocol state: %w", err)
+	}
+	return filepath.Join(home, "data", "mux"), nil
+}
+
 func defaultLogDir() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".config", "arcmux", "logs")

@@ -66,8 +66,8 @@ var meshReadScopes = []string{
 	mesh.ScopeSessionsRead,
 }
 
-// cmdMeshGrant enables explicitly read-only application access for one paired
-// peer. Pairing alone remains transport-only; omitting scopes grants the full
+// cmdMeshGrant enables explicit application access for one paired peer.
+// Pairing alone remains transport-only; omitting scopes grants only the full
 // safe read set so the common two-device setup stays a one-command operation.
 func cmdMeshGrant(args []string, stdout io.Writer) error {
 	cfg, rest, err := meshConfig(args)
@@ -75,17 +75,19 @@ func cmdMeshGrant(args []string, stdout io.Writer) error {
 		return err
 	}
 	if len(rest) < 1 {
-		return fmt.Errorf("usage: arcmux mesh grant <peer> [sessions.read artifacts.read events.read]")
+		return fmt.Errorf("usage: arcmux mesh grant <peer> [sessions.read artifacts.read events.read handoffs.prepare handoffs.launch]")
 	}
 	peerID := rest[0]
 	scopes := append([]string(nil), rest[1:]...)
 	if len(scopes) == 0 {
 		scopes = append(scopes, meshReadScopes...)
 	}
-	allowed := make(map[string]bool, len(meshReadScopes))
+	allowed := make(map[string]bool, len(meshReadScopes)+2)
 	for _, scope := range meshReadScopes {
 		allowed[scope] = true
 	}
+	allowed[mesh.ScopeHandoffsPrepare] = true
+	allowed[mesh.ScopeHandoffsLaunch] = true
 	seen := make(map[string]bool, len(scopes))
 	for _, scope := range scopes {
 		if !allowed[scope] {
@@ -260,7 +262,13 @@ func meshAPI(cfg *config.Config, method, path string) ([]byte, error) {
 	return meshAPIBody(cfg, method, path, nil)
 }
 
+const meshAPIRequestTimeout = 10 * time.Second
+
 func meshAPIBody(cfg *config.Config, method, path string, body []byte) ([]byte, error) {
+	return meshAPIBodyWithTimeout(cfg, method, path, body, meshAPIRequestTimeout)
+}
+
+func meshAPIBodyWithTimeout(cfg *config.Config, method, path string, body []byte, timeout time.Duration) ([]byte, error) {
 	if cfg.Daemon.HTTPAddr == "" {
 		return nil, errors.New("daemon http_addr is disabled")
 	}
@@ -275,7 +283,7 @@ func meshAPIBody(cfg *config.Config, method, path string, body []byte) ([]byte, 
 	if cfg.Daemon.HTTPAuthToken != "" {
 		req.Header.Set("Authorization", "Bearer "+cfg.Daemon.HTTPAuthToken)
 	}
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: timeout}).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("daemon mesh API unavailable at %s: %w", cfg.Daemon.HTTPAddr, err)
 	}

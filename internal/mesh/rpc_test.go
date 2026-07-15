@@ -71,6 +71,19 @@ func startRPCPair(t *testing.T, serverGrants []string, serverCaps, clientCaps []
 }
 
 func TestCapabilityIntersectionAndOldPeerCompatibility(t *testing.T) {
+	t.Run("handoff capability is additive", func(t *testing.T) {
+		serverCaps := []string{CapabilityRPCV1, CapabilitySessionsReadV1, CapabilityHandoffsV1}
+		clientCaps := []string{CapabilityRPCV1, CapabilityHandoffsV1}
+		server, client := startRPCPair(t, nil, serverCaps, clientCaps)
+		want := []string{CapabilityHandoffsV1, CapabilityRPCV1}
+		if got := client.NegotiatedCapabilities("server"); !reflect.DeepEqual(got, want) {
+			t.Fatalf("client capabilities=%v want %v", got, want)
+		}
+		if got := server.NegotiatedCapabilities("client"); !reflect.DeepEqual(got, want) {
+			t.Fatalf("server capabilities=%v want %v", got, want)
+		}
+	})
+
 	t.Run("exact intersection", func(t *testing.T) {
 		serverCaps := []string{CapabilityRPCV1, CapabilitySessionsReadV1}
 		clientCaps := []string{CapabilityArtifactsReadV1, CapabilityRPCV1, CapabilitySessionsReadV1}
