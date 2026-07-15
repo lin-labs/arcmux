@@ -202,7 +202,8 @@ func (s *Store) DueSource(at time.Time) ([]SourceRecord, error) {
 	}
 	out := make([]SourceRecord, 0)
 	for _, record := range records {
-		if record.State == SourceRetryWait && record.NextRetry != nil && !record.NextRetry.After(at) {
+		if (record.State == SourceRetryWait || record.State == SourceLaunchRetryWait) &&
+			record.NextRetry != nil && !record.NextRetry.After(at) {
 			out = append(out, record)
 		}
 	}
@@ -219,7 +220,8 @@ func (s *Store) DueTarget(at time.Time) ([]TargetRecord, error) {
 	}
 	out := make([]TargetRecord, 0)
 	for _, record := range records {
-		if record.State == TargetWaitingAssets && record.NextRetry != nil && !record.NextRetry.After(at) {
+		if (record.State == TargetWaitingAssets || record.State == TargetLaunchWaitingAssets) &&
+			record.NextRetry != nil && !record.NextRetry.After(at) {
 			out = append(out, record)
 		}
 	}
@@ -242,7 +244,7 @@ func (s *Store) RunnableSource(at time.Time) ([]SourceRecord, error) {
 		switch record.State {
 		case SourceQueued, SourcePreparingRemote, SourceLaunchingRemote:
 			out = append(out, record)
-		case SourceRetryWait:
+		case SourceRetryWait, SourceLaunchRetryWait:
 			if record.NextRetry != nil && !record.NextRetry.After(at) {
 				out = append(out, record)
 			}
@@ -266,7 +268,7 @@ func (s *Store) RecoverableTarget(at time.Time) ([]TargetRecord, error) {
 		switch record.State {
 		case TargetReceived, TargetValidating, TargetLaunching:
 			out = append(out, record)
-		case TargetWaitingAssets:
+		case TargetWaitingAssets, TargetLaunchWaitingAssets:
 			if record.NextRetry != nil && !record.NextRetry.After(at) {
 				out = append(out, record)
 			}
@@ -302,7 +304,8 @@ func (s *Store) TransitionSource(id string, expectedRevision uint64, next Source
 	record.Revision++
 	record.Updated = at
 	if err := applyTransition(&record.NextRetry, &record.Failure, &record.TargetLocator, transition,
-		next == SourceRetryWait, next == SourceFailed, next == SourceAccepted); err != nil {
+		next == SourceRetryWait || next == SourceLaunchRetryWait,
+		next == SourceFailed, next == SourceAccepted); err != nil {
 		return SourceRecord{}, err
 	}
 	if next == SourcePreparingRemote {
@@ -345,7 +348,8 @@ func (s *Store) TransitionTarget(id string, expectedRevision uint64, next Target
 	record.Revision++
 	record.Updated = at
 	if err := applyTransition(&record.NextRetry, &record.Failure, &record.TargetLocator, transition,
-		next == TargetWaitingAssets, next == TargetRejected, next == TargetLaunching || next == TargetAccepted); err != nil {
+		next == TargetWaitingAssets || next == TargetLaunchWaitingAssets,
+		next == TargetRejected, next == TargetLaunching || next == TargetAccepted); err != nil {
 		return TargetRecord{}, err
 	}
 	if next == TargetValidating {
@@ -463,6 +467,16 @@ func (s *Store) recordFiles(side string) ([]string, error) {
 	}
 	files := make([]string, 0, len(entries))
 	for _, entry := range entries {
+		if isGeneratedHandoffTemp(entry.Name()) {
+			info, err := entry.Info()
+			if err != nil {
+				return nil, err
+			}
+			if entry.Type()&fs.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+				return nil, fmt.Errorf("unsafe handoff crash temp %s", filepath.Join(base, entry.Name()))
+			}
+			continue
+		}
 		if entry.Type()&fs.ModeSymlink != 0 || entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			return nil, fmt.Errorf("unexpected handoff state entry %s", filepath.Join(base, entry.Name()))
 		}
@@ -470,6 +484,24 @@ func (s *Store) recordFiles(side string) ([]string, error) {
 	}
 	sort.Strings(files)
 	return files, nil
+}
+
+func isGeneratedHandoffTemp(name string) bool {
+	const prefix = ".handoff-"
+	const suffix = ".tmp"
+	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, suffix) {
+		return false
+	}
+	random := strings.TrimSuffix(strings.TrimPrefix(name, prefix), suffix)
+	if random == "" {
+		return false
+	}
+	for _, r := range random {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) path(segments ...string) (string, error) {

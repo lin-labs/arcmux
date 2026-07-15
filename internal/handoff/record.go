@@ -18,19 +18,21 @@ const (
 	SourceLaunchingRemote SourceState = "launching_remote"
 	SourceAccepted        SourceState = "accepted"
 	SourceRetryWait       SourceState = "retry_wait"
+	SourceLaunchRetryWait SourceState = "launch_retry_wait"
 	SourceFailed          SourceState = "failed"
 )
 
 type TargetState string
 
 const (
-	TargetReceived      TargetState = "received"
-	TargetValidating    TargetState = "validating"
-	TargetPrepared      TargetState = "prepared"
-	TargetWaitingAssets TargetState = "waiting_assets"
-	TargetLaunching     TargetState = "launching"
-	TargetAccepted      TargetState = "accepted"
-	TargetRejected      TargetState = "rejected"
+	TargetReceived            TargetState = "received"
+	TargetValidating          TargetState = "validating"
+	TargetPrepared            TargetState = "prepared"
+	TargetWaitingAssets       TargetState = "waiting_assets"
+	TargetLaunching           TargetState = "launching"
+	TargetLaunchWaitingAssets TargetState = "launch_waiting_assets"
+	TargetAccepted            TargetState = "accepted"
+	TargetRejected            TargetState = "rejected"
 )
 
 type FailureCode string
@@ -108,7 +110,8 @@ func (r SourceRecord) validate() error {
 		return fmt.Errorf("invalid source state %q", r.State)
 	}
 	return validateRecordFields(r.Manifest.Target, string(r.State), r.NextRetry, r.Failure, r.TargetLocator, r.Revision, r.Updated,
-		r.State == SourceRetryWait, r.State == SourceFailed, r.State == SourceAccepted, r.State == SourceAccepted)
+		r.State == SourceRetryWait || r.State == SourceLaunchRetryWait,
+		r.State == SourceFailed, r.State == SourceAccepted, r.State == SourceAccepted)
 }
 
 func (r TargetRecord) validate() error {
@@ -122,7 +125,7 @@ func (r TargetRecord) validate() error {
 		return fmt.Errorf("invalid target state %q", r.State)
 	}
 	return validateRecordFields(r.Manifest.Target, string(r.State), r.NextRetry, r.Failure, r.TargetLocator, r.Revision, r.Updated,
-		r.State == TargetWaitingAssets, r.State == TargetRejected,
+		r.State == TargetWaitingAssets || r.State == TargetLaunchWaitingAssets, r.State == TargetRejected,
 		r.State == TargetLaunching || r.State == TargetAccepted, r.State == TargetAccepted)
 }
 
@@ -212,7 +215,7 @@ func (l TargetLocator) validate() error {
 
 func validSourceState(state SourceState) bool {
 	switch state {
-	case SourceQueued, SourcePreparingRemote, SourceRemotePrepared, SourceLaunchingRemote, SourceAccepted, SourceRetryWait, SourceFailed:
+	case SourceQueued, SourcePreparingRemote, SourceRemotePrepared, SourceLaunchingRemote, SourceAccepted, SourceRetryWait, SourceLaunchRetryWait, SourceFailed:
 		return true
 	default:
 		return false
@@ -221,7 +224,7 @@ func validSourceState(state SourceState) bool {
 
 func validTargetState(state TargetState) bool {
 	switch state {
-	case TargetReceived, TargetValidating, TargetPrepared, TargetWaitingAssets, TargetLaunching, TargetAccepted, TargetRejected:
+	case TargetReceived, TargetValidating, TargetPrepared, TargetWaitingAssets, TargetLaunching, TargetLaunchWaitingAssets, TargetAccepted, TargetRejected:
 		return true
 	default:
 		return false
@@ -237,9 +240,11 @@ func legalSourceTransition(from, to SourceState) bool {
 	case SourceRemotePrepared:
 		return to == SourceLaunchingRemote || to == SourceRetryWait || to == SourceFailed
 	case SourceLaunchingRemote:
-		return to == SourceAccepted || to == SourceRetryWait || to == SourceFailed
+		return to == SourceAccepted || to == SourceLaunchRetryWait || to == SourceFailed
 	case SourceRetryWait:
 		return to == SourcePreparingRemote || to == SourceFailed
+	case SourceLaunchRetryWait:
+		return to == SourceLaunchingRemote || to == SourceFailed
 	default:
 		return false
 	}
@@ -256,7 +261,9 @@ func legalTargetTransition(from, to TargetState) bool {
 	case TargetPrepared:
 		return to == TargetLaunching || to == TargetRejected
 	case TargetLaunching:
-		return to == TargetAccepted || to == TargetWaitingAssets || to == TargetRejected
+		return to == TargetAccepted || to == TargetLaunchWaitingAssets || to == TargetRejected
+	case TargetLaunchWaitingAssets:
+		return to == TargetLaunching || to == TargetRejected
 	default:
 		return false
 	}

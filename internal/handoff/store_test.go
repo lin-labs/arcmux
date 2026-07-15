@@ -261,12 +261,12 @@ func TestTargetLocatorLifecycleIsStateBound(t *testing.T) {
 	}
 	retryAt := start.Add(time.Minute)
 	retryFailure := Failure{Code: FailureUnavailable, Message: "launch interrupted", Retryable: true, At: start.Add(4 * time.Second)}
-	if _, err := store.TransitionTarget(target.Manifest.HandoffID, launching.Revision, TargetWaitingAssets, Transition{
+	if _, err := store.TransitionTarget(target.Manifest.HandoffID, launching.Revision, TargetLaunchWaitingAssets, Transition{
 		At: start.Add(4 * time.Second), NextRetry: &retryAt, Failure: &retryFailure, TargetLocator: &locator,
 	}); err == nil {
 		t.Fatal("retry transition accepted a supplied target locator")
 	}
-	waiting, err := store.TransitionTarget(target.Manifest.HandoffID, launching.Revision, TargetWaitingAssets, Transition{
+	waiting, err := store.TransitionTarget(target.Manifest.HandoffID, launching.Revision, TargetLaunchWaitingAssets, Transition{
 		At: start.Add(4 * time.Second), NextRetry: &retryAt, Failure: &retryFailure,
 	})
 	if err != nil {
@@ -275,19 +275,17 @@ func TestTargetLocatorLifecycleIsStateBound(t *testing.T) {
 	if waiting.TargetLocator != nil {
 		t.Fatalf("retry retained target locator: %+v", waiting.TargetLocator)
 	}
-	validating, _ = store.TransitionTarget(target.Manifest.HandoffID, waiting.Revision, TargetValidating, Transition{At: retryAt})
-	prepared, _ = store.TransitionTarget(target.Manifest.HandoffID, validating.Revision, TargetPrepared, Transition{At: retryAt.Add(time.Second)})
-	launching, _ = store.TransitionTarget(target.Manifest.HandoffID, prepared.Revision, TargetLaunching, Transition{
-		At: retryAt.Add(2 * time.Second), TargetLocator: &locator,
+	launching, _ = store.TransitionTarget(target.Manifest.HandoffID, waiting.Revision, TargetLaunching, Transition{
+		At: retryAt, TargetLocator: &locator,
 	})
-	rejectedFailure := Failure{Code: FailureLaunch, Message: "launch rejected", At: retryAt.Add(3 * time.Second)}
+	rejectedFailure := Failure{Code: FailureLaunch, Message: "launch rejected", At: retryAt.Add(time.Second)}
 	if _, err := store.TransitionTarget(target.Manifest.HandoffID, launching.Revision, TargetRejected, Transition{
-		At: retryAt.Add(3 * time.Second), Failure: &rejectedFailure, TargetLocator: &locator,
+		At: retryAt.Add(time.Second), Failure: &rejectedFailure, TargetLocator: &locator,
 	}); err == nil {
 		t.Fatal("rejection transition accepted a supplied target locator")
 	}
 	rejected, err := store.TransitionTarget(target.Manifest.HandoffID, launching.Revision, TargetRejected, Transition{
-		At: retryAt.Add(3 * time.Second), Failure: &rejectedFailure,
+		At: retryAt.Add(time.Second), Failure: &rejectedFailure,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -357,6 +355,9 @@ func TestRetryDueAndRestart(t *testing.T) {
 	if persisted.State != SourceRetryWait || persisted.Attempts != 1 || persisted.NextRetry == nil || !persisted.NextRetry.Equal(retryAt) {
 		t.Fatalf("persisted retry = %+v", persisted)
 	}
+	if _, err := reopened.TransitionSource(persisted.Manifest.HandoffID, persisted.Revision, SourceLaunchingRemote, Transition{At: retryAt}); !errors.Is(err, ErrIllegalTransition) {
+		t.Fatalf("prepare retry flowed into launch: %v", err)
+	}
 	retried, err := reopened.TransitionSource(persisted.Manifest.HandoffID, persisted.Revision, SourcePreparingRemote, Transition{At: retryAt})
 	if err != nil {
 		t.Fatal(err)
@@ -396,6 +397,9 @@ func TestTargetWaitingAssetsIsDueAndPersists(t *testing.T) {
 	if due, err := reopened.DueTarget(retryAt); err != nil || len(due) != 1 || due[0].Manifest.HandoffID != waiting.Manifest.HandoffID {
 		t.Fatalf("target due=%+v err=%v", due, err)
 	}
+	if _, err := reopened.TransitionTarget(waiting.Manifest.HandoffID, waiting.Revision, TargetLaunching, Transition{At: retryAt}); !errors.Is(err, ErrIllegalTransition) {
+		t.Fatalf("prepare asset wait flowed into launch: %v", err)
+	}
 }
 
 func TestListRecordsIsDeterministic(t *testing.T) {
@@ -418,6 +422,82 @@ func TestListRecordsIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestRestartEnumerationIgnoresOnlyPrivateCrashTemps(t *testing.T) {
+	store, root := openTestStore(t)
+	manifest := testManifest()
+	manifest.HandoffID = "real-record"
+	if _, _, err := store.QueueSource(manifest); err != nil {
+		t.Fatal(err)
+	}
+	sourceDir := filepath.Join(root, "handoffs", "source")
+	crashTemp, err := os.CreateTemp(sourceDir, ".handoff-*.tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isGeneratedHandoffTemp(filepath.Base(crashTemp.Name())) {
+		t.Fatalf("generated temp name is not recognized: %s", crashTemp.Name())
+	}
+	if err := crashTemp.Chmod(0o600); err != nil {
+		crashTemp.Close()
+		t.Fatal(err)
+	}
+	if _, err := crashTemp.Write([]byte(`{"partial":`)); err != nil {
+		crashTemp.Close()
+		t.Fatal(err)
+	}
+	if err := crashTemp.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := reopened.ListSource()
+	if err != nil || len(records) != 1 || records[0].Manifest.HandoffID != manifest.HandoffID {
+		t.Fatalf("list with crash temp records=%+v err=%v", records, err)
+	}
+	runnable, err := reopened.RunnableSource(time.Now().UTC())
+	if err != nil || len(runnable) != 1 || runnable[0].Manifest.HandoffID != manifest.HandoffID {
+		t.Fatalf("recovery with crash temp records=%+v err=%v", runnable, err)
+	}
+}
+
+func TestRestartEnumerationRejectsUnsafeTempLookalikes(t *testing.T) {
+	tests := []struct {
+		name  string
+		entry func(t *testing.T, dir string)
+	}{
+		{"malformed name", func(t *testing.T, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, ".handoff-not-random.tmp"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"open permissions", func(t *testing.T, dir string) {
+			file := filepath.Join(dir, ".handoff-123.tmp")
+			if err := os.WriteFile(file, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(file, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"symlink", func(t *testing.T, dir string) {
+			if err := os.Symlink(filepath.Join(t.TempDir(), "outside"), filepath.Join(dir, ".handoff-123.tmp")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store, root := openTestStore(t)
+			test.entry(t, filepath.Join(root, "handoffs", "source"))
+			if _, err := store.ListSource(); err == nil {
+				t.Fatal("unsafe temp lookalike was ignored")
+			}
+		})
+	}
+}
+
 func TestRunnableSourceAfterRestart(t *testing.T) {
 	store, root := openTestStore(t)
 	start := time.Date(2026, 7, 15, 4, 0, 0, 0, time.UTC)
@@ -425,13 +505,14 @@ func TestRunnableSourceAfterRestart(t *testing.T) {
 	dueAt := start.Add(time.Hour)
 	for _, state := range []SourceState{
 		SourceQueued, SourcePreparingRemote, SourceRemotePrepared, SourceLaunchingRemote,
-		SourceAccepted, SourceRetryWait, SourceFailed,
+		SourceAccepted, SourceRetryWait, SourceLaunchRetryWait, SourceFailed,
 	} {
 		id := "source-" + string(state)
 		retryAt := dueAt.Add(-time.Minute)
 		createSourceInState(t, store, id, state, start, retryAt)
 	}
 	createSourceInState(t, store, "source-retry-future", SourceRetryWait, start, dueAt.Add(time.Minute))
+	createSourceInState(t, store, "source-launch-retry-future", SourceLaunchRetryWait, start, dueAt.Add(time.Minute))
 
 	reopened, err := Open(root)
 	if err != nil {
@@ -441,9 +522,24 @@ func TestRunnableSourceAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"source-launching_remote", "source-preparing_remote", "source-queued", "source-retry_wait"}
+	want := []string{"source-launch_retry_wait", "source-launching_remote", "source-preparing_remote", "source-queued", "source-retry_wait"}
 	if got := sourceIDs(records); !reflect.DeepEqual(got, want) {
 		t.Fatalf("runnable source ids = %v, want %v", got, want)
+	}
+	dueRecords, err := reopened.DueSource(dueAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, wantDue := sourceIDs(dueRecords), []string{"source-launch_retry_wait", "source-retry_wait"}; !reflect.DeepEqual(got, wantDue) {
+		t.Fatalf("due source ids = %v, want %v", got, wantDue)
+	}
+	launchRetry := sourceRecordByID(t, records, "source-launch_retry_wait")
+	if _, err := reopened.TransitionSource(launchRetry.Manifest.HandoffID, launchRetry.Revision, SourcePreparingRemote, Transition{At: dueAt}); !errors.Is(err, ErrIllegalTransition) {
+		t.Fatalf("launch retry flowed into prepare: %v", err)
+	}
+	resumed, err := reopened.TransitionSource(launchRetry.Manifest.HandoffID, launchRetry.Revision, SourceLaunchingRemote, Transition{At: dueAt})
+	if err != nil || resumed.State != SourceLaunchingRemote || resumed.NextRetry != nil {
+		t.Fatalf("launch retry did not resume launch: %+v err=%v", resumed, err)
 	}
 }
 
@@ -454,13 +550,14 @@ func TestRecoverableTargetAfterRestart(t *testing.T) {
 	dueAt := start.Add(time.Hour)
 	for _, state := range []TargetState{
 		TargetReceived, TargetValidating, TargetPrepared, TargetLaunching,
-		TargetAccepted, TargetWaitingAssets, TargetRejected,
+		TargetAccepted, TargetWaitingAssets, TargetLaunchWaitingAssets, TargetRejected,
 	} {
 		id := "target-" + string(state)
 		retryAt := dueAt.Add(-time.Minute)
 		createTargetInState(t, store, id, state, start, retryAt)
 	}
 	createTargetInState(t, store, "target-waiting-future", TargetWaitingAssets, start, dueAt.Add(time.Minute))
+	createTargetInState(t, store, "target-launch-waiting-future", TargetLaunchWaitingAssets, start, dueAt.Add(time.Minute))
 
 	reopened, err := Open(root)
 	if err != nil {
@@ -470,9 +567,26 @@ func TestRecoverableTargetAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"target-launching", "target-received", "target-validating", "target-waiting_assets"}
+	want := []string{"target-launch_waiting_assets", "target-launching", "target-received", "target-validating", "target-waiting_assets"}
 	if got := targetIDs(records); !reflect.DeepEqual(got, want) {
 		t.Fatalf("recoverable target ids = %v, want %v", got, want)
+	}
+	dueRecords, err := reopened.DueTarget(dueAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, wantDue := targetIDs(dueRecords), []string{"target-launch_waiting_assets", "target-waiting_assets"}; !reflect.DeepEqual(got, wantDue) {
+		t.Fatalf("due target ids = %v, want %v", got, wantDue)
+	}
+	launchWaiting := targetRecordByID(t, records, "target-launch_waiting_assets")
+	for _, wrong := range []TargetState{TargetValidating, TargetPrepared} {
+		if _, err := reopened.TransitionTarget(launchWaiting.Manifest.HandoffID, launchWaiting.Revision, wrong, Transition{At: dueAt}); !errors.Is(err, ErrIllegalTransition) {
+			t.Fatalf("launch wait flowed into %s: %v", wrong, err)
+		}
+	}
+	resumed, err := reopened.TransitionTarget(launchWaiting.Manifest.HandoffID, launchWaiting.Revision, TargetLaunching, Transition{At: dueAt})
+	if err != nil || resumed.State != TargetLaunching || resumed.NextRetry != nil {
+		t.Fatalf("launch wait did not resume launch: %+v err=%v", resumed, err)
 	}
 }
 
@@ -519,6 +633,14 @@ func createSourceInState(t *testing.T, store *Store, id string, state SourceStat
 	}
 	record, err = store.TransitionSource(id, record.Revision, SourceLaunchingRemote, Transition{At: start.Add(3 * time.Second)})
 	if err != nil || state == SourceLaunchingRemote {
+		if err != nil {
+			t.Fatal(err)
+		}
+		return record
+	}
+	if state == SourceLaunchRetryWait {
+		failure := Failure{Code: FailureUnavailable, Message: "launch offline", Retryable: true, At: start.Add(4 * time.Second)}
+		record, err = store.TransitionSource(id, record.Revision, state, Transition{At: start.Add(4 * time.Second), NextRetry: &retryAt, Failure: &failure})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -580,6 +702,14 @@ func createTargetInState(t *testing.T, store *Store, id string, state TargetStat
 		}
 		return record
 	}
+	if state == TargetLaunchWaitingAssets {
+		failure := Failure{Code: FailureUnavailable, Message: "launch offline", Retryable: true, At: start.Add(4 * time.Second)}
+		record, err = store.TransitionTarget(id, record.Revision, state, Transition{At: start.Add(4 * time.Second), NextRetry: &retryAt, Failure: &failure})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return record
+	}
 	locator := testTargetLocator()
 	record, err = store.TransitionTarget(id, record.Revision, TargetAccepted, Transition{At: start.Add(4 * time.Second), TargetLocator: &locator})
 	if err != nil {
@@ -602,6 +732,28 @@ func targetIDs(records []TargetRecord) []string {
 		ids[i] = record.Manifest.HandoffID
 	}
 	return ids
+}
+
+func sourceRecordByID(t *testing.T, records []SourceRecord, id string) SourceRecord {
+	t.Helper()
+	for _, record := range records {
+		if record.Manifest.HandoffID == id {
+			return record
+		}
+	}
+	t.Fatalf("source record %q not found", id)
+	return SourceRecord{}
+}
+
+func targetRecordByID(t *testing.T, records []TargetRecord, id string) TargetRecord {
+	t.Helper()
+	for _, record := range records {
+		if record.Manifest.HandoffID == id {
+			return record
+		}
+	}
+	t.Fatalf("target record %q not found", id)
+	return TargetRecord{}
 }
 
 func testTargetLocator() TargetLocator {
