@@ -9,11 +9,11 @@ import (
 )
 
 func TestReadLaunchInstructionsResolvesOpaqueMarker(t *testing.T) {
-	store, root := openTestStore(t)
+	store, root, start := openInstructionTestStore(t)
 	record := createTargetInState(
 		t, store, "receive-marker", TargetLaunching,
-		time.Date(2026, 7, 15, 15, 0, 0, 0, time.UTC),
-		time.Date(2026, 7, 15, 15, 1, 0, 0, time.UTC),
+		start,
+		start.Add(time.Minute),
 	)
 	dir := filepath.Join(root, "handoff-"+record.Manifest.HandoffID)
 	if err := os.Mkdir(dir, 0o700); err != nil {
@@ -34,11 +34,11 @@ func TestReadLaunchInstructionsResolvesOpaqueMarker(t *testing.T) {
 }
 
 func TestReadLaunchInstructionsRejectsHardlinkedArtifact(t *testing.T) {
-	store, root := openTestStore(t)
+	store, root, start := openInstructionTestStore(t)
 	record := createTargetInState(
 		t, store, "receive-hardlink", TargetLaunching,
-		time.Date(2026, 7, 15, 15, 0, 0, 0, time.UTC),
-		time.Date(2026, 7, 15, 15, 1, 0, 0, time.UTC),
+		start,
+		start.Add(time.Minute),
 	)
 	dir := filepath.Join(root, "handoff-"+record.Manifest.HandoffID)
 	if err := os.Mkdir(dir, 0o700); err != nil {
@@ -60,11 +60,11 @@ func TestReadLaunchInstructionsRejectsHardlinkedArtifact(t *testing.T) {
 func TestLaunchRendezvousFindsAlternateProtocolRoot(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	store, root := openTestStore(t)
+	store, root, start := openInstructionTestStore(t)
 	record := createTargetInState(
 		t, store, "receive-alternate-root", TargetLaunching,
-		time.Date(2026, 7, 15, 15, 0, 0, 0, time.UTC),
-		time.Date(2026, 7, 15, 15, 1, 0, 0, time.UTC),
+		start,
+		start.Add(time.Minute),
 	)
 	dir := filepath.Join(root, "handoff-"+record.Manifest.HandoffID)
 	if err := os.Mkdir(dir, 0o700); err != nil {
@@ -86,4 +86,12 @@ func TestLaunchRendezvousFindsAlternateProtocolRoot(t *testing.T) {
 	if string(got) != string(want) {
 		t.Fatalf("rendezvous instructions = %q, want %q", got, want)
 	}
+}
+
+func openInstructionTestStore(t *testing.T) (*Store, string, time.Time) {
+	t.Helper()
+	store, root := openTestStore(t)
+	start := time.Date(2026, 7, 15, 15, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return start }
+	return store, root, start
 }
