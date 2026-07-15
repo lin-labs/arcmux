@@ -566,30 +566,50 @@ func writePreparationMarker(root, handoffID string, want preparationMarker) erro
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || !ownedByCurrentEUID(info) {
 			return repositoryError(RepositoryErrorDeterministic, "preparation marker temporary path is unsafe")
 		}
+		stale, err := opened.OpenFile(tempName, os.O_RDWR, 0)
+		if err != nil {
+			return repositoryError(RepositoryErrorRetryable, "open preparation marker temporary file failed")
+		}
+		staleInfo, statErr := stale.Stat()
+		if statErr != nil || !os.SameFile(info, staleInfo) {
+			stale.Close()
+			return repositoryError(RepositoryErrorRetryable, "preparation marker temporary file changed while opening")
+		}
+		if err := flockExclusiveNonblocking(stale); err != nil {
+			stale.Close()
+			return repositoryError(RepositoryErrorRetryable, "preparation marker publication is already in progress")
+		}
 		if err := opened.Remove(tempName); err != nil {
+			releaseHistorySnapshotLock(stale)
 			return repositoryError(RepositoryErrorRetryable, "remove interrupted preparation marker failed")
 		}
+		releaseHistorySnapshotLock(stale)
 	} else if !os.IsNotExist(err) {
 		return repositoryError(RepositoryErrorRetryable, "inspect preparation marker temporary path failed")
 	}
-	file, err := opened.OpenFile(tempName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	file, err := opened.OpenFile(tempName, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return repositoryError(RepositoryErrorRetryable, "create preparation marker temporary file failed")
 	}
-	if err := file.Chmod(0o600); err != nil {
+	if err := flockExclusiveNonblocking(file); err != nil {
 		file.Close()
+		return repositoryError(RepositoryErrorRetryable, "lock preparation marker temporary file failed")
+	}
+	defer releaseHistorySnapshotLock(file)
+	if err := file.Chmod(0o600); err != nil {
 		return repositoryError(RepositoryErrorRetryable, "secure preparation marker failed")
 	}
+	if exists, err := verifyPreparationMarker(opened, name, want); err != nil {
+		return err
+	} else if exists {
+		_ = opened.Remove(tempName)
+		return nil
+	}
 	if _, err := file.Write(data); err != nil {
-		file.Close()
 		return repositoryError(RepositoryErrorRetryable, "write preparation marker failed")
 	}
 	if err := file.Sync(); err != nil {
-		file.Close()
 		return repositoryError(RepositoryErrorRetryable, "sync preparation marker failed")
-	}
-	if err := file.Close(); err != nil {
-		return repositoryError(RepositoryErrorRetryable, "close preparation marker failed")
 	}
 	if err := opened.Rename(tempName, name); err != nil {
 		return repositoryError(RepositoryErrorRetryable, "publish preparation marker failed")
