@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -140,6 +141,80 @@ func TestSnapshotHistoryIdempotentReplayAndConflict(t *testing.T) {
 	conflict := historyRefFor("other.md", []byte("other history!"))
 	_, err = SnapshotHistory(historyRoot, private, "replay", conflict)
 	requireHistoryCode(t, err, HistoryErrorInvalid)
+}
+
+func TestSnapshotHistoryRecoversPermanentStaleLock(t *testing.T) {
+	historyRoot := t.TempDir()
+	content := []byte("history after process crash")
+	ref := historyRefFor("session.md", content)
+	if err := os.WriteFile(filepath.Join(historyRoot, ref.Basename), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	private := privateHistoryRoot(t)
+	handoffDir := filepath.Join(private, "handoff-stale-lock")
+	if err := os.Mkdir(handoffDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := filepath.Join(handoffDir, ".history.lock")
+	if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SnapshotHistory(historyRoot, private, "stale-lock", ref); err != nil {
+		t.Fatalf("SnapshotHistory with stale lock: %v", err)
+	}
+	if mode := mustMode(t, lockPath); mode != 0o600 {
+		t.Fatalf("permanent lock mode = %o, want 0600", mode)
+	}
+}
+
+func TestSnapshotHistoryConcurrentPreparersAreSafe(t *testing.T) {
+	historyRoot := t.TempDir()
+	content := make([]byte, 4<<20)
+	for i := range content {
+		content[i] = byte(i)
+	}
+	ref := historyRefFor("session.md", content)
+	if err := os.WriteFile(filepath.Join(historyRoot, ref.Basename), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	private := privateHistoryRoot(t)
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	var wait sync.WaitGroup
+	for range 2 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			_, err := SnapshotHistory(historyRoot, private, "concurrent", ref)
+			results <- err
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(results)
+	successes := 0
+	for err := range results {
+		if err == nil {
+			successes++
+			continue
+		}
+		code, ok := HistoryErrorCodeOf(err)
+		if !ok || code != HistoryErrorRetryable {
+			t.Fatalf("concurrent error = %v, want retryable", err)
+		}
+	}
+	if successes == 0 {
+		t.Fatal("neither concurrent snapshot completed")
+	}
+	snapshot, err := SnapshotHistory(historyRoot, private, "concurrent", ref)
+	if err != nil {
+		t.Fatalf("replay after concurrent snapshots: %v", err)
+	}
+	got, err := os.ReadFile(snapshot)
+	if err != nil || string(got) != string(content) {
+		t.Fatalf("snapshot after concurrency has wrong content or error: %v", err)
+	}
 }
 
 func TestSnapshotHistoryRejectsInvalidBasenames(t *testing.T) {

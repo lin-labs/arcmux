@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // HistoryErrorCode separates a deterministic invalid handoff input from a
@@ -98,10 +99,7 @@ func SnapshotHistory(historyRoot, privateRoot, handoffID string, ref HistoryRef)
 	if err != nil {
 		return "", err
 	}
-	defer func() {
-		_ = lock.Close()
-		_ = handoff.Remove(".history.lock")
-	}()
+	defer releaseHistorySnapshotLock(lock)
 	// Another cooperating preparer may have finished immediately before this
 	// process acquired the lock.
 	if exists, err := verifyHistorySnapshot(handoff, snapshotName, ref); err != nil {
@@ -268,24 +266,73 @@ func ensurePrivateDir(root *os.Root, name string) error {
 }
 
 func acquireHistorySnapshotLock(root *os.Root) (*os.File, error) {
-	if info, err := root.Lstat(".history.lock"); err == nil {
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return nil, historyError(HistoryErrorInvalid, "private history lock path is unsafe")
+	const name = ".history.lock"
+	for range 2 {
+		before, err := root.Lstat(name)
+		if os.IsNotExist(err) {
+			created, createErr := root.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+			if createErr == nil {
+				if chmodErr := created.Chmod(0o600); chmodErr != nil {
+					created.Close()
+					return nil, historyError(HistoryErrorRetryable, "secure private history lock failed")
+				}
+				if syncErr := created.Sync(); syncErr != nil {
+					created.Close()
+					return nil, historyError(HistoryErrorRetryable, "sync private history lock failed")
+				}
+				created.Close()
+				continue
+			}
+			if os.IsExist(createErr) {
+				continue
+			}
+			return nil, historyError(HistoryErrorRetryable, "create private history lock failed")
 		}
-		return nil, historyError(HistoryErrorRetryable, "private history snapshot is already in progress")
-	} else if !os.IsNotExist(err) {
-		return nil, historyError(HistoryErrorRetryable, "inspect private history lock failed")
+		if err != nil {
+			return nil, historyError(HistoryErrorRetryable, "inspect private history lock failed")
+		}
+		if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() || before.Mode().Perm() != 0o600 {
+			return nil, historyError(HistoryErrorInvalid, "private history lock must be a regular 0600 file")
+		}
+		lock, err := root.OpenFile(name, os.O_RDWR, 0)
+		if err != nil {
+			return nil, historyError(HistoryErrorRetryable, "open private history lock failed")
+		}
+		opened, err := lock.Stat()
+		if err != nil || !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
+			lock.Close()
+			return nil, historyError(HistoryErrorRetryable, "private history lock changed while opening")
+		}
+		after, err := root.Lstat(name)
+		if err != nil || after.Mode()&os.ModeSymlink != 0 || !os.SameFile(opened, after) {
+			lock.Close()
+			return nil, historyError(HistoryErrorRetryable, "private history lock changed while validating")
+		}
+		if err := flockExclusiveNonblocking(lock); err != nil {
+			lock.Close()
+			if errors.Is(err, errHistoryLockBusy) {
+				return nil, historyError(HistoryErrorRetryable, "private history snapshot is already in progress")
+			}
+			return nil, historyError(HistoryErrorRetryable, "lock private history snapshot failed")
+		}
+		return lock, nil
 	}
-	lock, err := root.OpenFile(".history.lock", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return nil, historyError(HistoryErrorRetryable, "acquire private history lock failed")
+	return nil, historyError(HistoryErrorRetryable, "open private history lock failed")
+}
+
+var errHistoryLockBusy = errors.New("history lock busy")
+
+func flockExclusiveNonblocking(file *os.File) error {
+	err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+		return errHistoryLockBusy
 	}
-	if err := lock.Chmod(0o600); err != nil {
-		lock.Close()
-		root.Remove(".history.lock")
-		return nil, historyError(HistoryErrorRetryable, "secure private history lock failed")
-	}
-	return lock, nil
+	return err
+}
+
+func releaseHistorySnapshotLock(file *os.File) {
+	_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+	_ = file.Close()
 }
 
 func createHistoryTemp(root *os.Root) (*os.File, string, error) {
