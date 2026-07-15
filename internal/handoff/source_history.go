@@ -24,8 +24,9 @@ const (
 )
 
 type sourceHistoryPublishHooks struct {
-	afterSourceOpen func()
-	afterCopy       func()
+	afterSourceOpen       func()
+	beforeTempPublication func()
+	afterCopy             func()
 }
 
 // PublishSourceHistory copies one exact, verified session-history version to
@@ -82,6 +83,33 @@ func publishSourceHistory(historyRoot, basename, conversationID string, nonce fu
 		hooks.afterSourceOpen()
 	}
 
+	digestHex, size, err := hashSourceHistory(source)
+	if err != nil {
+		return HistoryRef{}, err
+	}
+	if size != before.Size {
+		return HistoryRef{}, historyError(HistoryErrorRetryable, "history file changed while reading; wait for sync to settle and retry")
+	}
+	if err := verifySourceHistoryUnchanged(rootFD, sourceFD, basename, before); err != nil {
+		return HistoryRef{}, err
+	}
+	ref := sourceHistoryRef(digestHex, size, conversationID)
+	if err := ref.Validate(); err != nil {
+		return HistoryRef{}, historyError(HistoryErrorInvalid, "history publication cannot form a safe handoff reference")
+	}
+	exists, err := verifyExistingPublishedSourceHistory(rootFD, ref)
+	if err != nil {
+		return HistoryRef{}, err
+	}
+	if exists {
+		return ref, nil
+	}
+	if hooks.beforeTempPublication != nil {
+		hooks.beforeTempPublication()
+	}
+	if offset, err := source.Seek(0, io.SeekStart); err != nil || offset != 0 {
+		return HistoryRef{}, historyError(HistoryErrorRetryable, "rewind history file failed; retry after storage is available")
+	}
 	temp, tempName, err := createSourceHistoryTemp(rootFD, nonce)
 	if err != nil {
 		return HistoryRef{}, err
@@ -91,16 +119,16 @@ func publishSourceHistory(historyRoot, basename, conversationID string, nonce fu
 		_ = unix.Unlinkat(rootFD, tempName, 0)
 	}()
 
-	digest := sha256.New()
-	written, err := io.Copy(io.MultiWriter(temp, digest), io.LimitReader(source, maxHistoryBytes+1))
+	secondDigest := sha256.New()
+	written, err := io.Copy(io.MultiWriter(temp, secondDigest), io.LimitReader(source, maxHistoryBytes+1))
 	if err != nil {
 		return HistoryRef{}, historyError(HistoryErrorRetryable, "copy history publication failed; retry after storage is available")
 	}
 	if hooks.afterCopy != nil {
 		hooks.afterCopy()
 	}
-	if written != before.Size {
-		return HistoryRef{}, historyError(HistoryErrorRetryable, "history file changed while reading; wait for sync to settle and retry")
+	if written != ref.SizeBytes || hex.EncodeToString(secondDigest.Sum(nil)) != ref.SHA256 {
+		return HistoryRef{}, historyError(HistoryErrorRetryable, "history file changed between publication passes; wait for sync to settle and retry")
 	}
 	if err := verifySourceHistoryUnchanged(rootFD, sourceFD, basename, before); err != nil {
 		return HistoryRef{}, err
@@ -112,20 +140,7 @@ func publishSourceHistory(historyRoot, basename, conversationID string, nonce fu
 		return HistoryRef{}, err
 	}
 
-	digestHex := hex.EncodeToString(digest.Sum(nil))
-	publishedName := sourceHistoryPublicationName(digestHex)
-	ref := HistoryRef{
-		ArtifactID:     "history-" + digestHex,
-		Basename:       publishedName,
-		SHA256:         digestHex,
-		SizeBytes:      written,
-		ConversationID: conversationID,
-	}
-	if err := ref.Validate(); err != nil {
-		return HistoryRef{}, historyError(HistoryErrorInvalid, "history publication cannot form a safe handoff reference")
-	}
-
-	err = renameSourceHistoryNoReplace(rootFD, tempName, publishedName)
+	err = renameSourceHistoryNoReplace(rootFD, tempName, ref.Basename)
 	switch {
 	case err == nil:
 		if err := unix.Fsync(rootFD); err != nil {
@@ -141,6 +156,38 @@ func publishSourceHistory(historyRoot, basename, conversationID string, nonce fu
 		return HistoryRef{}, err
 	}
 	return ref, nil
+}
+
+func hashSourceHistory(source *os.File) (string, int64, error) {
+	digest := sha256.New()
+	size, err := io.Copy(digest, io.LimitReader(source, maxHistoryBytes+1))
+	if err != nil {
+		return "", 0, historyError(HistoryErrorRetryable, "read history file failed; retry after storage is available")
+	}
+	return hex.EncodeToString(digest.Sum(nil)), size, nil
+}
+
+func sourceHistoryRef(digest string, size int64, conversationID string) HistoryRef {
+	return HistoryRef{
+		ArtifactID:     "history-" + digest,
+		Basename:       sourceHistoryPublicationName(digest),
+		SHA256:         digest,
+		SizeBytes:      size,
+		ConversationID: conversationID,
+	}
+}
+
+func verifyExistingPublishedSourceHistory(rootFD int, ref HistoryRef) (bool, error) {
+	var stat unix.Stat_t
+	if err := unix.Fstatat(rootFD, ref.Basename, &stat, unix.AT_SYMLINK_NOFOLLOW); errors.Is(err, unix.ENOENT) {
+		return false, nil
+	} else if err != nil {
+		return false, historyError(HistoryErrorRetryable, "inspect published history failed; retry after storage is stable")
+	}
+	if err := verifyPublishedSourceHistory(rootFD, ref); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func openVerifiedSourceHistory(rootFD int, basename string) (int, unix.Stat_t, error) {

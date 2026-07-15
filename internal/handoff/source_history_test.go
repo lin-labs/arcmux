@@ -158,6 +158,62 @@ func TestPublishSourceHistoryReplayAndConcurrentSameContent(t *testing.T) {
 	}
 }
 
+func TestPublishSourceHistoryReplayNeverEntersTempPublication(t *testing.T) {
+	root := t.TempDir()
+	name := "session.md"
+	if err := os.WriteFile(filepath.Join(root, name), []byte("stable replay history\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first, err := PublishSourceHistory(root, name, "conversation-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tempEntered := false
+	nonceCalls := 0
+	second, err := publishSourceHistory(root, name, "conversation-1", func() (string, error) {
+		nonceCalls++
+		return "replay", nil
+	}, sourceHistoryPublishHooks{
+		beforeTempPublication: func() { tempEntered = true },
+	})
+	if err != nil || !reflect.DeepEqual(first, second) {
+		t.Fatalf("replay first=%#v second=%#v err=%v", first, second, err)
+	}
+	if tempEntered || nonceCalls != 0 {
+		t.Fatalf("replay entered temp publication: hook=%t nonce_calls=%d", tempEntered, nonceCalls)
+	}
+}
+
+func TestPublishSourceHistoryRejectsMutationBetweenHashAndPublicationPasses(t *testing.T) {
+	root := t.TempDir()
+	name := "session.md"
+	path := filepath.Join(root, name)
+	original := []byte("AAAAAAAAAAAAAAAA\n")
+	mutated := []byte("BBBBBBBBBBBBBBBB\n")
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = publishSourceHistory(root, name, "", fixedSourceHistoryNonce("two-pass"), sourceHistoryPublishHooks{
+		beforeTempPublication: func() {
+			if writeErr := os.WriteFile(path, mutated, 0o600); writeErr != nil {
+				t.Fatal(writeErr)
+			}
+			if timeErr := os.Chtimes(path, before.ModTime(), before.ModTime()); timeErr != nil {
+				t.Fatal(timeErr)
+			}
+		},
+	})
+	assertSourceHistoryError(t, err, HistoryErrorRetryable)
+	oldDigest := sha256.Sum256(original)
+	if _, statErr := os.Lstat(filepath.Join(root, sourceHistoryPublicationName(hex.EncodeToString(oldDigest[:])))); !os.IsNotExist(statErr) {
+		t.Fatalf("mutation published first-pass content: %v", statErr)
+	}
+}
+
 func TestPublishSourceHistoryRejectsSourceLinkAndMutationAttacks(t *testing.T) {
 	t.Run("symlink", func(t *testing.T) {
 		root := t.TempDir()
@@ -309,8 +365,14 @@ func TestPublishSourceHistoryDetectsStablePublishedMismatch(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, ref.Basename), corrupt, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err = PublishSourceHistory(root, "session.md", "")
+	tempEntered := false
+	_, err = publishSourceHistory(root, "session.md", "", fixedSourceHistoryNonce("invalid-replay"), sourceHistoryPublishHooks{
+		beforeTempPublication: func() { tempEntered = true },
+	})
 	assertSourceHistoryError(t, err, HistoryErrorInvalid)
+	if tempEntered {
+		t.Fatal("invalid existing publication entered temp publication")
+	}
 }
 
 func TestPublishSourceHistoryErrorsDoNotExposeRootPath(t *testing.T) {
