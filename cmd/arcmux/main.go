@@ -143,6 +143,7 @@ Usage:
   arcmux surface show|list|unbind                         Inspect or remove durable cmux bindings
   arcmux handoff prepare <peer> <scope> <session> ...     Queue and materialize a remote handoff; never launch it
   arcmux handoff launch <handoff-id> [--wait duration]    Explicitly launch one prepared remote continuation
+  arcmux handoff receive <marker>                         Read owner-local target instructions for a launch marker
   arcmux handoff list|show|retry                          Inspect or retry the durable handoff outbox
   arcmux pulse --project <slug> [--interval 10s] [--once] Debug-only: pulse one project (the daemon does this for all projects)
   arcmux version                                          Print version

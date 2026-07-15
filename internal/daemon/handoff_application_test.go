@@ -1090,6 +1090,7 @@ func TestHandoffLaunchGrantDoesNotAuthorizePrepare(t *testing.T) {
 
 func TestHandoffLaunchWaitsForHandshakeAndKeepsSensitiveContextOutOfPrompt(t *testing.T) {
 	app, manifest := newHandoffTestApplication(t, true)
+	app.launchRendezvousRoot = filepath.Join(t.TempDir(), "handoff-receive")
 	manifest.ParentHandoffID = "handoff-parent"
 	prepared := prepareTargetHandoffForLaunch(t, app, manifest)
 	worktree := filepath.Join(t.TempDir(), "private-worktree")
@@ -1164,7 +1165,8 @@ func TestHandoffLaunchWaitsForHandshakeAndKeepsSensitiveContextOutOfPrompt(t *te
 			t.Fatalf("confirmed prompt leaked %q: %q", forbidden, sentPrompt)
 		}
 	}
-	if !strings.Contains(sentPrompt, "ARCMUX_HANDOFF_INSTRUCTIONS") || len([]rune(handoffLaunchSafePreamble(prepared))) != handoffSafePreambleRunes {
+	receiveCommand := "arcmux handoff receive " + handoff.LaunchMarker(prepared.Manifest.HandoffID, prepared.Digest)
+	if !strings.Contains(sentPrompt, receiveCommand) || strings.Contains(sentPrompt, "ARCMUX_HANDOFF_INSTRUCTIONS") || len([]rune(handoffLaunchSafePreamble(prepared))) != handoffSafePreambleRunes {
 		t.Fatalf("safe prompt contract missing: %q", sentPrompt)
 	}
 	instructions := createRequest.Env["ARCMUX_HANDOFF_INSTRUCTIONS"]
@@ -1188,6 +1190,10 @@ func TestHandoffLaunchWaitsForHandshakeAndKeepsSensitiveContextOutOfPrompt(t *te
 	}
 	if private.Lineage != wantLineage {
 		t.Fatalf("private lineage = %+v, want %+v", private.Lineage, wantLineage)
+	}
+	received, err := handoff.ReceiveLaunchInstructions(app.launchRendezvousRoot, handoff.LaunchMarker(prepared.Manifest.HandoffID, prepared.Digest))
+	if err != nil || string(received) != string(content) {
+		t.Fatalf("owner-local rendezvous instructions=%q err=%v, want %q", received, err, content)
 	}
 	for _, required := range []string{manifest.Goal.Text, manifest.Repository.Branch, manifest.Repository.SourceHead, worktree, "history.md"} {
 		if !strings.Contains(string(content), required) {

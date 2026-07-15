@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/lin-labs/arcmux/internal/handoff"
 )
 
 func TestReadHandoffGoalFromStdinAndNoFollowFile(t *testing.T) {
@@ -178,6 +180,52 @@ func TestHandoffLaunchWaitPollsWithoutImplicitRetry(t *testing.T) {
 	}
 }
 
+func TestHandoffReceiveReadsOwnerLocalInstructionsByMarker(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := filepath.Join(t.TempDir(), "mux")
+	store, err := handoff.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := handoffCommandManifest()
+	record, _, err := store.ReceiveTarget(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err = store.TransitionTarget(manifest.HandoffID, record.Revision, handoff.TargetValidating, handoff.Transition{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err = store.TransitionTarget(manifest.HandoffID, record.Revision, handoff.TargetPrepared, handoff.Transition{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err = store.TransitionTarget(manifest.HandoffID, record.Revision, handoff.TargetLaunching, handoff.Transition{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "handoff-"+manifest.HandoffID)
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	want := []byte(`{"goal":"reply HANDOFF_OK","history":"/private/history.md"}` + "\n")
+	if err := os.WriteFile(filepath.Join(dir, "launch-instructions.json"), want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	marker := handoff.LaunchMarker(manifest.HandoffID, record.Digest)
+	if err := handoff.PublishLaunchRendezvous(handoff.DefaultLaunchRendezvousRoot(), marker, root); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdHandoff([]string{"receive", marker}, strings.NewReader(""), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != string(want) {
+		t.Fatalf("receive output = %q, want %q", out.String(), want)
+	}
+}
+
 func TestHandoffListShowRetryAndMainRouting(t *testing.T) {
 	var mu sync.Mutex
 	requests := make([]string, 0, 5)
@@ -250,5 +298,33 @@ func TestHandoffLaunchRejectsNegativeDuration(t *testing.T) {
 	err := cmdHandoff([]string{"launch", "handoff-1", "--wait", (-time.Second).String()}, strings.NewReader(""), &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "must not be negative") {
 		t.Fatalf("negative launch wait err=%v", err)
+	}
+}
+
+func handoffCommandManifest() handoff.Manifest {
+	now := time.Date(2026, 7, 15, 15, 0, 0, 0, time.UTC)
+	return handoff.Manifest{
+		SchemaVersion: handoff.ManifestVersion,
+		HandoffID:     "handoff-command-receive",
+		TraceID:       "trace-command-receive",
+		Source: handoff.SourceSession{
+			DeviceID: "ref", ProfileScope: "root", SessionID: "source-session",
+		},
+		SourceAgent: "codex",
+		Target:      handoff.TargetAgent{DeviceID: "devbox", Profile: "codex"},
+		Goal: handoff.GoalSummary{
+			Text: "Reply HANDOFF_OK.", Provenance: "explicit_operator", UpdatedAt: now,
+		},
+		History: handoff.HistoryRef{
+			ArtifactID: "history-command", Basename: "history.snapshot", SHA256: strings.Repeat("a", 64), SizeBytes: 128,
+		},
+		Repository: handoff.RepositorySnapshot{
+			ProjectSlug: "arcmux", RepoSlug: "lin-labs/arcmux", Branch: "boyan/handoff",
+			SourceHead: strings.Repeat("b", 40), BaseCommit: strings.Repeat("c", 40), TreeDigest: strings.Repeat("d", 40),
+			Cleanliness: handoff.RepositoryClean, Transfer: handoff.TransferRemoteBranch,
+		},
+		Artifacts:  []handoff.ArtifactRef{},
+		Validation: handoff.ValidationEvidence{State: handoff.ValidationPassed, RepositoryRevision: strings.Repeat("b", 40), CompletedAt: &now},
+		CreatedAt:  now,
 	}
 }

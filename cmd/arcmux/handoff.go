@@ -39,7 +39,7 @@ type handoffSourceStatus struct {
 
 func cmdHandoff(args []string, stdin io.Reader, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: arcmux handoff prepare|launch|list|show|retry")
+		return errors.New("usage: arcmux handoff prepare|launch|receive|list|show|retry")
 	}
 	switch args[0] {
 	case "prepare":
@@ -52,9 +52,23 @@ func cmdHandoff(args []string, stdin io.Reader, stdout io.Writer) error {
 		return cmdHandoffRetry(args[1:], stdout)
 	case "launch":
 		return cmdHandoffLaunch(args[1:], stdout)
+	case "receive":
+		return cmdHandoffReceive(args[1:], stdout)
 	default:
 		return fmt.Errorf("unknown handoff subcommand %q", args[0])
 	}
+}
+
+func cmdHandoffReceive(args []string, stdout io.Writer) error {
+	if len(args) != 1 || args[0] == "" {
+		return errors.New("usage: arcmux handoff receive <marker>")
+	}
+	instructions, err := handoff.ReceiveLaunchInstructions(handoff.DefaultLaunchRendezvousRoot(), args[0])
+	if err != nil {
+		return errors.New("handoff instructions are unavailable")
+	}
+	_, err = stdout.Write(instructions)
+	return err
 }
 
 func cmdHandoffLaunch(args []string, stdout io.Writer) error {

@@ -281,27 +281,7 @@ func (d *Daemon) initMeshApplication() error {
 }
 
 func (d *Daemon) meshProtocolRoot() (string, error) {
-	if stateDir := strings.TrimSpace(d.cfg.Hooks.SessionStateDir); stateDir != "" {
-		clean := filepath.Clean(stateDir)
-		if filepath.Base(clean) == "sessions" {
-			return filepath.Dir(clean), nil
-		}
-		return filepath.Join(filepath.Dir(clean), "mesh"), nil
-	}
-	if d.cfg.Daemon.StatePath != "" {
-		return filepath.Join(filepath.Dir(d.cfg.Daemon.StatePath), "mesh"), nil
-	}
-	if d.cfg.Daemon.Socket != "" {
-		return filepath.Join(filepath.Dir(d.cfg.Daemon.Socket), "mesh-state"), nil
-	}
-	if d.cfg.Mesh.RegistryPath != "" {
-		return filepath.Join(filepath.Dir(d.cfg.Mesh.RegistryPath), ".mesh-state"), nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve home for mesh state: %w", err)
-	}
-	return filepath.Join(home, "data", "mux"), nil
+	return d.cfg.ProtocolStateRoot()
 }
 
 func (d *Daemon) meshStateStore() (*meshstate.Store, error) {

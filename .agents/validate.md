@@ -54,9 +54,12 @@ make start && sleep 1 && make status
   attempt without the second grant enters retryable `launch_retry_wait`; then
   replace the target grant list with the read scopes plus both handoff scopes,
   launch to acceptance, and replay launch. The replay must return the same root
-  target session locator, target/source worktrees must stay clean at the exact
-  head, and HTTP `/sessions` plus mesh session listings must not expose the
-  private target CWD, goal, history, or prompt-derived context. The owner-local
+  target session locator. Confirm the target agent follows the opaque prompt's
+  `arcmux handoff receive <marker>` rendezvous and completes the private goal
+  even when its tool subprocess does not inherit pane-local environment. Target
+  and source worktrees must stay clean at the exact head, and HTTP `/sessions`
+  plus mesh session listings must not expose the private target CWD, goal,
+  history, instruction path, or prompt-derived context. The owner-local
   Unix-socket gRPC API remains an intentional inspection surface. Kill only the
   disposable sessions after capturing the evidence.
 - `make deploy` to labs followed by an SSH-side `make status` and a curl from

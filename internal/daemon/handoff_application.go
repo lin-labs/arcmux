@@ -72,40 +72,42 @@ type handoffPrepareLock struct {
 }
 
 type handoffApplication struct {
-	store             *handoff.Store
-	historyRoot       string
-	projectsPath      string
-	now               func() time.Time
-	snapshotHistory   func(string, string, string, handoff.HistoryRef) (string, error)
-	loadProjects      func(string) (*project.ConsolidatedRegistry, error)
-	prepareRepository repositoryPreparer
-	prepareLaunchRepo launchRepositoryPreparer
-	publishLaunchFile func(string, string, string, handoff.Manifest, handoff.RepositoryPreparation) (string, error)
-	validateProfile   targetProfileValidator
-	createSession     targetSessionCreator
-	lookupSession     targetSessionLookup
-	sendPrompt        targetPromptSender
-	persistSessions   func() error
-	recordLocator     targetLocatorRecorder
-	resumeTimeout     time.Duration
-	launchPoll        time.Duration
-	prepareMu         sync.Mutex
-	prepareLocks      map[string]*handoffPrepareLock
+	store                *handoff.Store
+	historyRoot          string
+	projectsPath         string
+	launchRendezvousRoot string
+	now                  func() time.Time
+	snapshotHistory      func(string, string, string, handoff.HistoryRef) (string, error)
+	loadProjects         func(string) (*project.ConsolidatedRegistry, error)
+	prepareRepository    repositoryPreparer
+	prepareLaunchRepo    launchRepositoryPreparer
+	publishLaunchFile    func(string, string, string, handoff.Manifest, handoff.RepositoryPreparation) (string, error)
+	validateProfile      targetProfileValidator
+	createSession        targetSessionCreator
+	lookupSession        targetSessionLookup
+	sendPrompt           targetPromptSender
+	persistSessions      func() error
+	recordLocator        targetLocatorRecorder
+	resumeTimeout        time.Duration
+	launchPoll           time.Duration
+	prepareMu            sync.Mutex
+	prepareLocks         map[string]*handoffPrepareLock
 }
 
 func newHandoffApplication(store *handoff.Store, profiles map[string]profile.Profile) *handoffApplication {
 	app := &handoffApplication{
-		store:             store,
-		historyRoot:       defaultHandoffHistoryRoot(),
-		projectsPath:      project.DefaultConsolidatedPath(),
-		now:               time.Now,
-		snapshotHistory:   handoff.SnapshotHistory,
-		loadProjects:      project.LoadConsolidated,
-		prepareRepository: prepareHandoffRepository,
-		prepareLaunchRepo: handoff.PrepareRepository,
-		publishLaunchFile: publishHandoffLaunchInstructions,
-		resumeTimeout:     targetHandoffResumeTimeout,
-		launchPoll:        handoffLaunchPollInterval,
+		store:                store,
+		historyRoot:          defaultHandoffHistoryRoot(),
+		projectsPath:         project.DefaultConsolidatedPath(),
+		launchRendezvousRoot: handoff.DefaultLaunchRendezvousRoot(),
+		now:                  time.Now,
+		snapshotHistory:      handoff.SnapshotHistory,
+		loadProjects:         project.LoadConsolidated,
+		prepareRepository:    prepareHandoffRepository,
+		prepareLaunchRepo:    handoff.PrepareRepository,
+		publishLaunchFile:    publishHandoffLaunchInstructions,
+		resumeTimeout:        targetHandoffResumeTimeout,
+		launchPoll:           handoffLaunchPollInterval,
 		validateProfile: func(name string) error {
 			return validateHandoffTargetProfile(profiles, name)
 		},
@@ -519,6 +521,13 @@ func (a *handoffApplication) resumeLaunch(ctx context.Context, record handoff.Ta
 	if err != nil {
 		return a.waitForLaunch(record, handoff.FailureInternal, "private target instructions are not ready")
 	}
+	if err := handoff.PublishLaunchRendezvous(
+		a.launchRendezvousRoot,
+		handoff.LaunchMarker(record.Manifest.HandoffID, record.Digest),
+		a.store.Root(),
+	); err != nil {
+		return a.waitForLaunch(record, handoff.FailureInternal, "private target instructions are not ready")
+	}
 	sess, current, alreadyDelivered, err := a.targetLaunchSession(ctx, record, prepared, instructionsPath)
 	if err != nil {
 		if errors.Is(err, errHandoffLaunchConflict) {
@@ -645,8 +654,7 @@ func handoffLaunchSessionIdentity(record handoff.TargetRecord) (string, string) 
 }
 
 func handoffLaunchMarker(record handoff.TargetRecord) string {
-	digest := sha256.Sum256([]byte("arcmux-handoff-prompt-v1\x00" + record.Manifest.HandoffID + "\x00" + record.Digest))
-	return "arcmux-handoff-v1:" + hex.EncodeToString(digest[:])
+	return handoff.LaunchMarker(record.Manifest.HandoffID, record.Digest)
 }
 
 func handoffLaunchSafePreamble(record handoff.TargetRecord) string {
@@ -659,9 +667,10 @@ func handoffLaunchCurrentCommand(record handoff.TargetRecord) string {
 }
 
 func handoffLaunchPrompt(record handoff.TargetRecord) string {
+	marker := handoffLaunchMarker(record)
 	return handoffLaunchSafePreamble(record) + "\n\n" +
-		"Resume this explicitly authorized handoff. Read the private instructions named by " +
-		"ARCMUX_HANDOFF_INSTRUCTIONS before acting; the exact continuation checkout is already active."
+		"Resume this explicitly authorized handoff. Run `arcmux handoff receive " + marker +
+		"` to read the owner-local instructions before acting; the exact continuation checkout is already active."
 }
 
 type handoffLaunchLineage struct {

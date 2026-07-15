@@ -136,12 +136,16 @@ later `launch` resumes the durable record after connectivity or grants recover.
 
 The target agent receives its goal, lineage, history path, checkout, branch,
 and exact head only through a target-local `0600` instruction file. Its
-confirmed prompt contains a generic marker, private delivery evidence never
-leaves the device, and HTTP `/sessions` plus mesh session listings redact its
-checkout and prompt-derived context. The owner-local Unix-socket gRPC API
-remains a trusted inspection surface. The first release supports clean pushed branches;
-stored-patch/bundle materialization for dirty work remains a follow-up, so dirty
-or artifact-bearing requests fail closed instead of copying state implicitly.
+confirmed prompt contains an opaque marker and an `arcmux handoff receive
+<marker>` command. That owner-local command resolves the marker against durable
+target state and reads the private instructions without depending on pane
+environment variables reaching a shared agent backend. Private delivery
+evidence never leaves the device, and HTTP `/sessions` plus mesh session
+listings redact the continuation's checkout and prompt-derived context. The
+owner-local Unix-socket gRPC API remains a trusted inspection surface. The
+first release supports clean pushed branches; stored-patch/bundle
+materialization for dirty work remains a follow-up, so dirty or
+artifact-bearing requests fail closed instead of copying state implicitly.
 
 ---
 
