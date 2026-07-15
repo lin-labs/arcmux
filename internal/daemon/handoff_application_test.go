@@ -536,7 +536,11 @@ func TestTargetLaunchReconcilerTimesOutBlockedRecordAndDrainsNext(t *testing.T) 
 			t.Fatal(err)
 		}
 	}
-	app.resumeTimeout = 25 * time.Millisecond
+	// Leave enough budget for the next record's fsync-backed launch under the
+	// race detector while keeping the first deliberately blocked record
+	// bounded. The test observes the completed reconciliation pass, not the
+	// earlier locator-persistence midpoint.
+	app.resumeTimeout = 500 * time.Millisecond
 	app.launchPoll = time.Millisecond
 
 	releaseBlocked := make(chan struct{})
@@ -602,14 +606,14 @@ func TestTargetLaunchReconcilerTimesOutBlockedRecordAndDrainsNext(t *testing.T) 
 	}()
 	select {
 	case <-blockedStarted:
-	case <-time.After(time.Second):
+	case <-time.After(3 * time.Second):
 		close(releaseBlocked)
 		<-done
 		t.Fatal("blocked launch recovery did not start")
 	}
 	select {
 	case <-done:
-	case <-time.After(time.Second):
+	case <-time.After(3 * time.Second):
 		close(releaseBlocked)
 		<-done
 		t.Fatal("blocked launch recovery starved the next target")
