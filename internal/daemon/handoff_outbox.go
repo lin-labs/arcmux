@@ -68,7 +68,7 @@ func (e *sourceHandoffError) Error() string { return e.message }
 type sourceSessionLookup func(sessionview.ProfileScope, string) (sessionview.Detail, bool)
 type sourceProjectLoader func(string) (*project.ConsolidatedRegistry, error)
 type sourceRepositoryInspector func(context.Context, string, project.ResolvedProject) (handoff.RepositorySnapshot, error)
-type sourceHistoryInspector func(string, string, string) (handoff.HistoryRef, error)
+type sourceHistoryPublisher func(string, string, string) (handoff.HistoryRef, error)
 type sourceHandoffPrepareCaller func(context.Context, string, meshHandoffPrepareRequest) (meshHandoffStatus, error)
 type safeIDGenerator func(string) (string, error)
 
@@ -81,7 +81,7 @@ type sourceHandoffOutbox struct {
 	lookupSession     sourceSessionLookup
 	loadProjects      sourceProjectLoader
 	inspectRepository sourceRepositoryInspector
-	inspectHistory    sourceHistoryInspector
+	publishHistory    sourceHistoryPublisher
 	callPrepare       sourceHandoffPrepareCaller
 	newID             safeIDGenerator
 	attemptTimeout    time.Duration
@@ -111,7 +111,7 @@ func (d *Daemon) sourceHandoffOutbox() (*sourceHandoffOutbox, error) {
 		},
 		loadProjects:      project.LoadConsolidated,
 		inspectRepository: handoff.InspectSourceRepository,
-		inspectHistory:    handoff.InspectHistory,
+		publishHistory:    handoff.PublishSourceHistory,
 		callPrepare:       d.callRemoteHandoffPrepare,
 		newID:             newHandoffSafeID,
 		attemptTimeout:    sourceHandoffAttemptTimeout,
@@ -140,7 +140,7 @@ func newHandoffSafeID(prefix string) (string, error) {
 
 func (o *sourceHandoffOutbox) prepare(ctx context.Context, request sourceHandoffPrepareRequest) (sourceHandoffDTO, error) {
 	if o == nil || o.store == nil || o.lookupSession == nil || o.loadProjects == nil || o.inspectRepository == nil ||
-		o.inspectHistory == nil || o.callPrepare == nil || o.newID == nil || o.now == nil {
+		o.publishHistory == nil || o.callPrepare == nil || o.newID == nil || o.now == nil {
 		return sourceHandoffDTO{}, sourceOutboxUnavailable("handoff preparation is unavailable")
 	}
 	if request.Validation == "" {
@@ -184,7 +184,7 @@ func (o *sourceHandoffOutbox) prepare(ctx context.Context, request sourceHandoff
 	if historyName == "" {
 		return sourceHandoffDTO{}, sourceOutboxInvalid("source session has no synced history; provide --history after sync completes")
 	}
-	history, err := o.inspectHistory(o.historyRoot, historyName, request.ConversationID)
+	history, err := o.publishHistory(o.historyRoot, historyName, request.ConversationID)
 	if err != nil {
 		if code, classified := handoff.HistoryErrorCodeOf(err); classified && code == handoff.HistoryErrorRetryable {
 			return sourceHandoffDTO{}, sourceOutboxUnavailable(err.Error())

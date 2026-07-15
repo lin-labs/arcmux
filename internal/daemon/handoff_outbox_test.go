@@ -69,12 +69,12 @@ func newSourceOutboxFixture(t *testing.T) *sourceOutboxFixture {
 				Cleanliness: handoff.RepositoryClean, Transfer: handoff.TransferRemoteBranch,
 			}, nil
 		},
-		inspectHistory: func(root, basename, conversation string) (handoff.HistoryRef, error) {
+		publishHistory: func(root, basename, conversation string) (handoff.HistoryRef, error) {
 			if root != fixture.outbox.historyRoot || basename != "session-history.md" || conversation != "conversation-1" {
 				t.Fatalf("history inspection root=%q basename=%q conversation=%q", root, basename, conversation)
 			}
 			return handoff.HistoryRef{
-				ArtifactID: "history-" + strings.Repeat("c", 64), Basename: basename,
+				ArtifactID: "history-" + strings.Repeat("c", 64), Basename: ".arcmux-handoff-sha256-" + strings.Repeat("c", 64) + ".snapshot",
 				SHA256: strings.Repeat("c", 64), SizeBytes: 128, ConversationID: conversation,
 			}, nil
 		},
@@ -130,7 +130,7 @@ func TestSourceHandoffPrepareDerivesImmutableManifestAndPrepares(t *testing.T) {
 		manifest.Source.SessionID != "session-1" || fixture.inspectedCWD != "/actual/source/worktree" {
 		t.Fatalf("source derivation manifest=%#v cwd=%q", manifest, fixture.inspectedCWD)
 	}
-	if manifest.Goal.Provenance != "explicit_operator" || manifest.History.Basename != "session-history.md" || manifest.Artifacts == nil || len(manifest.Artifacts) != 0 {
+	if manifest.Goal.Provenance != "explicit_operator" || !strings.HasPrefix(manifest.History.Basename, ".arcmux-handoff-sha256-") || manifest.Artifacts == nil || len(manifest.Artifacts) != 0 {
 		t.Fatalf("derived manifest = %#v", manifest)
 	}
 	if manifest.Validation.RepositoryRevision != manifest.Repository.SourceHead || manifest.Validation.CompletedAt == nil {
@@ -139,6 +139,56 @@ func TestSourceHandoffPrepareDerivesImmutableManifestAndPrepares(t *testing.T) {
 	stored, err := fixture.store.GetSource(dto.HandoffID)
 	if err != nil || stored.State != handoff.SourceRemotePrepared || stored.Digest != dto.ManifestDigest {
 		t.Fatalf("stored=%#v err=%v", stored, err)
+	}
+}
+
+func TestSourceHandoffPreparePublishesHistoryBeforeQueueAndSurvivesLaterTurns(t *testing.T) {
+	fixture := newSourceOutboxFixture(t)
+	if err := os.Mkdir(fixture.outbox.historyRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	original := []byte("# Session\n\nStable handoff point.\n")
+	originalPath := filepath.Join(fixture.outbox.historyRoot, "session-history.md")
+	if err := os.WriteFile(originalPath, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture.outbox.publishHistory = handoff.PublishSourceHistory
+	fixture.remote = func(_ context.Context, _ string, request meshHandoffPrepareRequest) (meshHandoffStatus, error) {
+		if request.Manifest.History.Basename == "session-history.md" || !strings.HasPrefix(request.Manifest.History.Basename, ".arcmux-handoff-sha256-") {
+			t.Fatalf("remote received mutable history ref: %#v", request.Manifest.History)
+		}
+		if _, err := os.Lstat(filepath.Join(fixture.outbox.historyRoot, request.Manifest.History.Basename)); err != nil {
+			t.Fatalf("remote called before history publication: %v", err)
+		}
+		queued, err := fixture.store.GetSource(request.Manifest.HandoffID)
+		if err != nil || queued.Manifest.History.Basename != request.Manifest.History.Basename {
+			t.Fatalf("remote called before durable manifest queue: queued=%#v err=%v", queued, err)
+		}
+		digest, _ := request.Manifest.Digest()
+		return meshHandoffStatus{HandoffID: request.Manifest.HandoffID, ManifestDigest: digest, State: handoff.TargetPrepared}, nil
+	}
+	dto, err := fixture.outbox.prepare(context.Background(), sourcePrepareRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(originalPath, []byte("# Session\n\nCompletely rewritten later turn.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record, err := fixture.store.GetSource(dto.HandoffID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	private := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(private, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := handoff.SnapshotHistory(fixture.outbox.historyRoot, private, record.Manifest.HandoffID, record.Manifest.History)
+	if err != nil {
+		t.Fatalf("target snapshot after later source turn: %v", err)
+	}
+	got, err := os.ReadFile(snapshot)
+	if err != nil || string(got) != string(original) {
+		t.Fatalf("target snapshot=%q err=%v, want %q", got, err, original)
 	}
 }
 
