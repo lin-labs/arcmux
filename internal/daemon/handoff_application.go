@@ -128,6 +128,26 @@ func (d *Daemon) scheduleTargetHandoffReconcile() {
 	}
 }
 
+func (d *Daemon) scheduleSourceHandoffReconcile() {
+	d.meshMu.RLock()
+	app := d.meshApp
+	d.meshMu.RUnlock()
+	if app == nil {
+		return
+	}
+	app.runtimeMu.Lock()
+	wake := app.sourceHandoffWake
+	app.runtimeMu.Unlock()
+	if wake == nil {
+		return
+	}
+	select {
+	case wake <- struct{}{}:
+	default:
+		// One serialized source worker drains the durable prepare outbox.
+	}
+}
+
 // reconcileTargetHandoffs resumes only prepare-phase target work. Launching
 // and launch-retry states are deliberately reserved for the future launch
 // driver even though the store exposes them in its broader recovery query.

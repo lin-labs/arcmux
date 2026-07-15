@@ -102,11 +102,12 @@ type meshApplication struct {
 	sessionPages  map[string]cachedSessionInventory
 	artifactPages map[string]cachedArtifactInventory
 
-	runtimeMu   sync.Mutex
-	cancel      context.CancelFunc
-	runtimeCtx  context.Context
-	handoffWake chan struct{}
-	wg          sync.WaitGroup
+	runtimeMu         sync.Mutex
+	cancel            context.CancelFunc
+	runtimeCtx        context.Context
+	handoffWake       chan struct{}
+	sourceHandoffWake chan struct{}
+	wg                sync.WaitGroup
 
 	syncMu            sync.Mutex
 	syncing           map[string]*meshSyncState
@@ -1121,6 +1122,7 @@ func (app *meshApplication) stopRuntime() {
 	app.cancel = nil
 	app.runtimeCtx = nil
 	app.handoffWake = nil
+	app.sourceHandoffWake = nil
 	app.runtimeMu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -1155,7 +1157,9 @@ func (d *Daemon) startMeshApplicationRuntime(manager *arcmuxmesh.Manager) {
 	app.runtimeCtx = ctx
 	app.handoffWake = make(chan struct{}, 1)
 	handoffWake := app.handoffWake
-	app.wg.Add(2)
+	app.sourceHandoffWake = make(chan struct{}, 1)
+	sourceHandoffWake := app.sourceHandoffWake
+	app.wg.Add(3)
 	app.runtimeMu.Unlock()
 	go func() {
 		defer app.wg.Done()
@@ -1199,6 +1203,7 @@ func (d *Daemon) startMeshApplicationRuntime(manager *arcmuxmesh.Manager) {
 				d.retryMeshGaps(manager)
 			case <-reconcileTicker.C:
 				d.scheduleTargetHandoffReconcile()
+				d.scheduleSourceHandoffReconcile()
 				for _, peer := range d.connectedDesiredMeshPeers(manager) {
 					d.scheduleMeshSync(peer, d.meshSubscriptionNeedsRestore(manager, peer))
 				}
@@ -1216,7 +1221,19 @@ func (d *Daemon) startMeshApplicationRuntime(manager *arcmuxmesh.Manager) {
 			}
 		}
 	}()
+	go func() {
+		defer app.wg.Done()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-sourceHandoffWake:
+				d.reconcileSourceHandoffs(ctx, time.Now().UTC())
+			}
+		}
+	}()
 	d.scheduleTargetHandoffReconcile()
+	d.scheduleSourceHandoffReconcile()
 }
 
 func (d *Daemon) reconcileMeshStatuses(manager *arcmuxmesh.Manager, known map[string]time.Time) {
@@ -1237,6 +1254,7 @@ func (d *Daemon) reconcileMeshStatuses(manager *arcmuxmesh.Manager, known map[st
 				d.clearSubscriptionUnlessConnection(status.PeerID, *status.ConnectedAt)
 				d.scheduleMeshSync(status.PeerID, true)
 				d.scheduleTargetHandoffReconcile()
+				d.scheduleSourceHandoffReconcile()
 			}
 			continue
 		}

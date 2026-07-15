@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -249,4 +251,211 @@ func TestSourceHandoffDTORedactsManifest(t *testing.T) {
 			t.Fatalf("redacted DTO contains %q: %s", forbidden, encoded)
 		}
 	}
+}
+
+func TestSourceHandoffReconcileResumesPrepareWorkAndLeavesOtherPhasesInert(t *testing.T) {
+	fixture := newSourceOutboxFixture(t)
+	_, base := newHandoffTestApplication(t, true)
+	scanAt := time.Now().UTC().Add(time.Minute)
+	fixture.outbox.now = func() time.Time { return scanAt }
+
+	states := []struct {
+		id        string
+		state     handoff.SourceState
+		nextRetry time.Time
+	}{
+		{id: "reconcile-queued", state: handoff.SourceQueued},
+		{id: "reconcile-preparing", state: handoff.SourcePreparingRemote},
+		{id: "reconcile-due", state: handoff.SourceRetryWait, nextRetry: scanAt.Add(-time.Second)},
+		{id: "reconcile-future", state: handoff.SourceRetryWait, nextRetry: scanAt.Add(time.Hour)},
+		{id: "reconcile-prepared", state: handoff.SourceRemotePrepared},
+		{id: "reconcile-launching", state: handoff.SourceLaunchingRemote},
+		{id: "reconcile-launch-retry", state: handoff.SourceLaunchRetryWait, nextRetry: scanAt.Add(-time.Second)},
+		{id: "reconcile-accepted", state: handoff.SourceAccepted},
+		{id: "reconcile-failed", state: handoff.SourceFailed},
+	}
+	for _, item := range states {
+		manifest := base
+		manifest.HandoffID = item.id
+		seedSourceHandoffState(t, fixture.store, manifest, item.state, item.nextRetry)
+	}
+
+	var mu sync.Mutex
+	calls := make(map[string]int)
+	fixture.outbox.callPrepare = func(_ context.Context, _ string, request meshHandoffPrepareRequest) (meshHandoffStatus, error) {
+		mu.Lock()
+		calls[request.Manifest.HandoffID]++
+		mu.Unlock()
+		digest, err := request.Manifest.Digest()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return meshHandoffStatus{HandoffID: request.Manifest.HandoffID, ManifestDigest: digest, State: handoff.TargetPrepared}, nil
+	}
+	if err := fixture.outbox.reconcile(context.Background(), scanAt); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, id := range []string{"reconcile-queued", "reconcile-preparing", "reconcile-due"} {
+		record, err := fixture.store.GetSource(id)
+		if err != nil || record.State != handoff.SourceRemotePrepared || calls[id] != 1 {
+			t.Fatalf("resumed %s record=%+v calls=%d err=%v", id, record, calls[id], err)
+		}
+	}
+	for _, item := range states[3:] {
+		record, err := fixture.store.GetSource(item.id)
+		if err != nil || record.State != item.state || calls[item.id] != 0 {
+			t.Fatalf("inert %s record=%+v calls=%d err=%v", item.id, record, calls[item.id], err)
+		}
+	}
+}
+
+func TestSourceHandoffReconcileSerializesConcurrentPassesPerID(t *testing.T) {
+	fixture := newSourceOutboxFixture(t)
+	_, manifest := newHandoffTestApplication(t, true)
+	manifest.HandoffID = "reconcile-concurrent"
+	seedSourceHandoffState(t, fixture.store, manifest, handoff.SourceQueued, time.Time{})
+	scanAt := time.Now().UTC().Add(time.Minute)
+	fixture.outbox.now = func() time.Time { return scanAt }
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	fixture.outbox.callPrepare = func(_ context.Context, _ string, request meshHandoffPrepareRequest) (meshHandoffStatus, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		digest, err := request.Manifest.Digest()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return meshHandoffStatus{HandoffID: request.Manifest.HandoffID, ManifestDigest: digest, State: handoff.TargetPrepared}, nil
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	for range 2 {
+		go func() {
+			<-start
+			errs <- fixture.outbox.reconcile(context.Background(), scanAt)
+		}()
+	}
+	close(start)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("first recovery RPC did not start")
+	}
+	close(release)
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("remote calls = %d, want 1", got)
+	}
+	record, err := fixture.store.GetSource(manifest.HandoffID)
+	if err != nil || record.State != handoff.SourceRemotePrepared {
+		t.Fatalf("record=%+v err=%v", record, err)
+	}
+}
+
+func TestSourceHandoffReconcileTimesOutBlockedPeerAndDrainsNextID(t *testing.T) {
+	fixture := newSourceOutboxFixture(t)
+	_, base := newHandoffTestApplication(t, true)
+	blocked := base
+	blocked.HandoffID = "reconcile-timeout-a"
+	next := base
+	next.HandoffID = "reconcile-timeout-b"
+	seedSourceHandoffState(t, fixture.store, blocked, handoff.SourceQueued, time.Time{})
+	seedSourceHandoffState(t, fixture.store, next, handoff.SourceQueued, time.Time{})
+	scanAt := time.Now().UTC().Add(time.Minute)
+	fixture.outbox.now = func() time.Time { return scanAt }
+	fixture.outbox.attemptTimeout = 25 * time.Millisecond
+
+	var calls atomic.Int32
+	fixture.outbox.callPrepare = func(ctx context.Context, _ string, request meshHandoffPrepareRequest) (meshHandoffStatus, error) {
+		calls.Add(1)
+		if request.Manifest.HandoffID == blocked.HandoffID {
+			<-ctx.Done()
+			return meshHandoffStatus{}, ctx.Err()
+		}
+		digest, err := request.Manifest.Digest()
+		if err != nil {
+			return meshHandoffStatus{}, err
+		}
+		return meshHandoffStatus{HandoffID: request.Manifest.HandoffID, ManifestDigest: digest, State: handoff.TargetPrepared}, nil
+	}
+	started := time.Now()
+	if err := fixture.outbox.reconcile(context.Background(), scanAt); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("blocked recovery took %s", elapsed)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("remote calls = %d, want 2", got)
+	}
+	blockedRecord, err := fixture.store.GetSource(blocked.HandoffID)
+	if err != nil || blockedRecord.State != handoff.SourceRetryWait || blockedRecord.Failure == nil || !blockedRecord.Failure.Retryable {
+		t.Fatalf("blocked record=%+v err=%v", blockedRecord, err)
+	}
+	nextRecord, err := fixture.store.GetSource(next.HandoffID)
+	if err != nil || nextRecord.State != handoff.SourceRemotePrepared {
+		t.Fatalf("next record=%+v err=%v", nextRecord, err)
+	}
+}
+
+func seedSourceHandoffState(t *testing.T, store *handoff.Store, manifest handoff.Manifest, state handoff.SourceState, nextRetry time.Time) handoff.SourceRecord {
+	t.Helper()
+	record, replay, err := store.QueueSource(manifest)
+	if err != nil || replay {
+		t.Fatalf("queue %s replay=%t err=%v", manifest.HandoffID, replay, err)
+	}
+	if state == handoff.SourceQueued {
+		return record
+	}
+	transition := func(next handoff.SourceState, detail handoff.Transition) {
+		var transitionErr error
+		record, transitionErr = store.TransitionSource(manifest.HandoffID, record.Revision, next, detail)
+		if transitionErr != nil {
+			t.Fatalf("transition %s to %s: %v", manifest.HandoffID, next, transitionErr)
+		}
+	}
+	if state == handoff.SourceFailed {
+		failure := &handoff.Failure{Code: handoff.FailureVerification, Message: "test failure", At: record.Updated}
+		transition(handoff.SourceFailed, handoff.Transition{At: record.Updated, Failure: failure})
+		return record
+	}
+	transition(handoff.SourcePreparingRemote, handoff.Transition{At: record.Updated})
+	if state == handoff.SourcePreparingRemote {
+		return record
+	}
+	if state == handoff.SourceRetryWait {
+		failure := &handoff.Failure{Code: handoff.FailureUnavailable, Message: "test retry", Retryable: true, At: record.Updated}
+		transition(handoff.SourceRetryWait, handoff.Transition{At: record.Updated, NextRetry: &nextRetry, Failure: failure})
+		return record
+	}
+	transition(handoff.SourceRemotePrepared, handoff.Transition{At: record.Updated})
+	if state == handoff.SourceRemotePrepared {
+		return record
+	}
+	transition(handoff.SourceLaunchingRemote, handoff.Transition{At: record.Updated})
+	if state == handoff.SourceLaunchingRemote {
+		return record
+	}
+	if state == handoff.SourceLaunchRetryWait {
+		failure := &handoff.Failure{Code: handoff.FailureUnavailable, Message: "test launch retry", Retryable: true, At: record.Updated}
+		transition(handoff.SourceLaunchRetryWait, handoff.Transition{At: record.Updated, NextRetry: &nextRetry, Failure: failure})
+		return record
+	}
+	if state == handoff.SourceAccepted {
+		locator := &handoff.TargetLocator{DeviceID: manifest.Target.DeviceID, ProfileScope: "profile:codex", SessionID: "target-session"}
+		transition(handoff.SourceAccepted, handoff.Transition{At: record.Updated, TargetLocator: locator})
+		return record
+	}
+	t.Fatalf("unsupported source state %s", state)
+	return handoff.SourceRecord{}
 }

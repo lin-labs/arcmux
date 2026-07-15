@@ -14,7 +14,10 @@ import (
 	"github.com/lin-labs/arcmux/internal/sessionview"
 )
 
-const sourceHandoffRetryDelay = 15 * time.Second
+const (
+	sourceHandoffRetryDelay     = 15 * time.Second
+	sourceHandoffAttemptTimeout = 10 * time.Second
+)
 
 // sourceHandoffPrepareRequest is deliberately an operator-intent request, not
 // a partially trusted manifest. Device identity, source agent/CWD, repository
@@ -81,6 +84,7 @@ type sourceHandoffOutbox struct {
 	inspectHistory    sourceHistoryInspector
 	callPrepare       sourceHandoffPrepareCaller
 	newID             safeIDGenerator
+	attemptTimeout    time.Duration
 }
 
 func (d *Daemon) sourceHandoffOutbox() (*sourceHandoffOutbox, error) {
@@ -110,6 +114,7 @@ func (d *Daemon) sourceHandoffOutbox() (*sourceHandoffOutbox, error) {
 		inspectHistory:    handoff.InspectHistory,
 		callPrepare:       d.callRemoteHandoffPrepare,
 		newID:             newHandoffSafeID,
+		attemptTimeout:    sourceHandoffAttemptTimeout,
 	}, nil
 }
 
@@ -270,6 +275,70 @@ func (o *sourceHandoffOutbox) retry(ctx context.Context, id string) (sourceHando
 		return sourceHandoffDTO{}, sourceOutboxConflict("only a prepare retry_wait handoff can be retried")
 	}
 	return o.attempt(ctx, id, true)
+}
+
+// reconcile resumes only source-side prepare work. RunnableSource also
+// exposes launch recovery states for the future launch driver, so filter them
+// here rather than treating restart or connectivity as launch authorization.
+func (o *sourceHandoffOutbox) reconcile(ctx context.Context, at time.Time) error {
+	if o == nil || o.store == nil || o.now == nil {
+		return errors.New("source handoff recovery is unavailable")
+	}
+	records, err := o.store.RunnableSource(at)
+	if err != nil {
+		return err
+	}
+	attemptTimeout := o.attemptTimeout
+	if attemptTimeout <= 0 {
+		attemptTimeout = sourceHandoffAttemptTimeout
+	}
+	var firstErr error
+	for _, candidate := range records {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		switch candidate.State {
+		case handoff.SourceQueued, handoff.SourcePreparingRemote:
+		case handoff.SourceRetryWait:
+			if candidate.NextRetry == nil || candidate.NextRetry.After(at) {
+				continue
+			}
+		default:
+			continue
+		}
+
+		// attempt reloads under the shared per-store/per-ID lock. Concurrent
+		// operator retries and coalesced runtime passes therefore make one RPC.
+		attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
+		_, attemptErr := o.attempt(attemptCtx, candidate.Manifest.HandoffID, false)
+		cancel()
+		if attemptErr != nil && ctx.Err() == nil {
+			// A concurrent state transition is already durable and will be
+			// considered by a later pass; continue draining unrelated IDs.
+			if firstErr == nil {
+				firstErr = attemptErr
+			}
+			continue
+		}
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return firstErr
+}
+
+func (d *Daemon) reconcileSourceHandoffs(ctx context.Context, at time.Time) {
+	outbox, err := d.sourceHandoffOutbox()
+	if err != nil {
+		return
+	}
+	// Use the scan timestamp for due checks and state transitions so a pass is
+	// internally consistent. Runtime callers always provide the current UTC
+	// time; tests can exercise the deadline boundary deterministically.
+	outbox.now = func() time.Time { return at }
+	if err := outbox.reconcile(ctx, at); err != nil && ctx.Err() == nil {
+		d.logger.Warn("source handoff recovery scan failed")
+	}
 }
 
 var sourceAttemptLocks = newSourceHandoffLocks()

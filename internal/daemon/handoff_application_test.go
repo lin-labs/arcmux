@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	arcmuxmesh "github.com/lin-labs/arcmux/internal/mesh"
 	"github.com/lin-labs/arcmux/internal/profile"
 	"github.com/lin-labs/arcmux/internal/project"
+	"github.com/lin-labs/arcmux/internal/session"
 )
 
 func TestHandoffPrepareBindsAuthenticatedSourceAndLocalTargetBeforePersist(t *testing.T) {
@@ -421,6 +423,171 @@ func TestMeshRuntimeImmediatelyAndPeriodicallyReconcilesTargetHandoffs(t *testin
 	}
 	waitForTargetState(receivedManifest.HandoffID, handoff.TargetPrepared)
 	waitForTargetState(waitingManifest.HandoffID, handoff.TargetPrepared)
+}
+
+func TestMeshRuntimeResumesInterruptedSourcePreparationOnStartup(t *testing.T) {
+	server := newMeshApplicationTestDaemon(t, "server")
+	client := newMeshApplicationTestDaemon(t, "client")
+	targetApp, manifest := newHandoffTestApplication(t, true)
+	manifest.HandoffID = "source-runtime-restart"
+	server.meshMu.Lock()
+	server.meshApp.handoffs = targetApp
+	server.meshMu.Unlock()
+	client.meshMu.RLock()
+	sourceStore := client.meshApp.handoffs.store
+	client.meshMu.RUnlock()
+	sourceSession := session.NewSession(manifest.Source.SessionID, "source stays live", manifest.SourceAgent, t.TempDir())
+	sourceSession.SetState(session.StateIdle)
+	client.mu.Lock()
+	client.sessions[sourceSession.ID] = sourceSession
+	client.mu.Unlock()
+	seedSourceHandoffState(t, sourceStore, manifest, handoff.SourcePreparingRemote, time.Time{})
+
+	startDaemonMeshPairWithScopes(t, server, client, []string{arcmuxmesh.ScopeHandoffsPrepare})
+	waitForSourceHandoffState(t, sourceStore, manifest.HandoffID, handoff.SourceRemotePrepared)
+	record, err := sourceStore.GetSource(manifest.HandoffID)
+	if err != nil || record.Attempts != 1 {
+		t.Fatalf("recovered record=%+v err=%v", record, err)
+	}
+	kept, ok := client.GetSession(sourceSession.ID)
+	if !ok || kept != sourceSession {
+		t.Fatalf("source session removed or replaced during handoff recovery: kept=%p ok=%t", kept, ok)
+	}
+	if snapshot := kept.Snapshot(); snapshot.State != session.StateIdle {
+		t.Fatalf("source session changed during handoff recovery: %+v", snapshot)
+	}
+}
+
+func TestMeshRuntimePeriodicallyReconcilesDueButNotFutureSourceRetries(t *testing.T) {
+	server := newMeshApplicationTestDaemon(t, "server")
+	client := newMeshApplicationTestDaemon(t, "client")
+	targetApp, manifest := newHandoffTestApplication(t, true)
+	server.meshMu.Lock()
+	server.meshApp.handoffs = targetApp
+	server.meshMu.Unlock()
+	client.meshMu.Lock()
+	client.meshApp.reconcileInterval = 20 * time.Millisecond
+	sourceStore := client.meshApp.handoffs.store
+	client.meshMu.Unlock()
+	startDaemonMeshPairWithScopes(t, server, client, []string{arcmuxmesh.ScopeHandoffsPrepare})
+
+	dueManifest := manifest
+	dueManifest.HandoffID = "source-runtime-periodic-due"
+	futureManifest := manifest
+	futureManifest.HandoffID = "source-runtime-periodic-future"
+	dueAt := time.Now().UTC().Add(100 * time.Millisecond)
+	seedSourceHandoffState(t, sourceStore, dueManifest, handoff.SourceRetryWait, dueAt)
+	seedSourceHandoffState(t, sourceStore, futureManifest, handoff.SourceRetryWait, dueAt.Add(time.Hour))
+
+	waitForSourceHandoffState(t, sourceStore, dueManifest.HandoffID, handoff.SourceRemotePrepared)
+	future, err := sourceStore.GetSource(futureManifest.HandoffID)
+	if err != nil || future.State != handoff.SourceRetryWait || future.Attempts != 1 {
+		t.Fatalf("future retry changed early: %+v err=%v", future, err)
+	}
+}
+
+func TestMeshConnectionWakeHonorsThenAcceleratesDueSourceRetry(t *testing.T) {
+	server := newMeshApplicationTestDaemon(t, "server")
+	client := newMeshApplicationTestDaemon(t, "client")
+	targetApp, manifest := newHandoffTestApplication(t, true)
+	manifest.HandoffID = "source-runtime-reconnect"
+	server.meshMu.Lock()
+	server.meshApp.handoffs = targetApp
+	server.meshMu.Unlock()
+	client.meshMu.Lock()
+	client.meshApp.reconcileInterval = time.Hour
+	sourceStore := client.meshApp.handoffs.store
+	client.meshMu.Unlock()
+
+	_, clientManager := startDaemonMeshPairWithScopes(t, server, client, []string{arcmuxmesh.ScopeHandoffsPrepare})
+	dueAt := time.Now().UTC().Add(150 * time.Millisecond)
+	seedSourceHandoffState(t, sourceStore, manifest, handoff.SourceRetryWait, dueAt)
+
+	// A newly observed connection wakes recovery, but the future deadline is
+	// still authoritative.
+	client.reconcileMeshStatuses(clientManager, make(map[string]time.Time))
+	time.Sleep(40 * time.Millisecond)
+	beforeDue, err := sourceStore.GetSource(manifest.HandoffID)
+	if err != nil || beforeDue.State != handoff.SourceRetryWait || beforeDue.Attempts != 1 {
+		t.Fatalf("connection bypassed future retry: %+v err=%v", beforeDue, err)
+	}
+
+	if wait := time.Until(dueAt); wait > 0 {
+		time.Sleep(wait + 20*time.Millisecond)
+	}
+	// Treating the same connected transport as newly established models the
+	// reconnect edge that reconcileMeshStatuses reports to the runtime.
+	client.reconcileMeshStatuses(clientManager, make(map[string]time.Time))
+	waitForSourceHandoffState(t, sourceStore, manifest.HandoffID, handoff.SourceRemotePrepared)
+}
+
+func TestMeshRuntimeBlockedSourcePeerDoesNotStarveTargetRecovery(t *testing.T) {
+	server := newMeshApplicationTestDaemon(t, "server")
+	client := newMeshApplicationTestDaemon(t, "client")
+	serverTargetApp, sourceManifest := newHandoffTestApplication(t, true)
+	sourceManifest.HandoffID = "source-runtime-blocked"
+	clientApp, localTargetManifest := newHandoffTestApplication(t, true)
+	localTargetManifest.HandoffID = "target-runtime-independent"
+	localTargetManifest.Source.DeviceID = "server"
+	localTargetManifest.Target.DeviceID = "client"
+	if _, _, err := clientApp.store.ReceiveTarget(localTargetManifest); err != nil {
+		t.Fatalf("seed local target recovery: %v", err)
+	}
+	seedSourceHandoffState(t, clientApp.store, sourceManifest, handoff.SourceQueued, time.Time{})
+
+	sourceStarted := make(chan struct{})
+	releaseSource := make(chan struct{})
+	var startedOnce sync.Once
+	releaseOnce := sync.OnceFunc(func() { close(releaseSource) })
+	defer releaseOnce()
+	serverTargetApp.prepareRepository = func(context.Context, handoff.Manifest, project.ResolvedProject) error {
+		startedOnce.Do(func() { close(sourceStarted) })
+		<-releaseSource
+		return nil
+	}
+	server.meshMu.Lock()
+	server.meshApp.handoffs = serverTargetApp
+	server.meshMu.Unlock()
+	client.meshMu.Lock()
+	client.meshApp.handoffs = clientApp
+	client.meshMu.Unlock()
+
+	startDaemonMeshPairWithScopes(t, server, client, []string{arcmuxmesh.ScopeHandoffsPrepare})
+	select {
+	case <-sourceStarted:
+	case <-time.After(time.Second):
+		t.Fatal("source recovery RPC did not block")
+	}
+	waitForTargetHandoffState(t, clientApp.store, localTargetManifest.HandoffID, handoff.TargetPrepared)
+	releaseOnce()
+}
+
+func waitForSourceHandoffState(t *testing.T, store *handoff.Store, id string, want handoff.SourceState) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		record, err := store.GetSource(id)
+		if err == nil && record.State == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	record, err := store.GetSource(id)
+	t.Fatalf("source %s state=%s err=%v, want %s", id, record.State, err, want)
+}
+
+func waitForTargetHandoffState(t *testing.T, store *handoff.Store, id string, want handoff.TargetState) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		record, err := store.GetTarget(id)
+		if err == nil && record.State == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	record, err := store.GetTarget(id)
+	t.Fatalf("target %s state=%s err=%v, want %s", id, record.State, err, want)
 }
 
 func TestHandoffPrepareClassifiesRepositoryValidation(t *testing.T) {
