@@ -14,7 +14,10 @@ import (
 	"github.com/lin-labs/arcmux/internal/project"
 )
 
-const handoffAssetRetryDelay = 15 * time.Second
+const (
+	handoffAssetRetryDelay     = 15 * time.Second
+	targetHandoffResumeTimeout = 10 * time.Second
+)
 
 type meshHandoffPrepareRequest struct {
 	Manifest handoff.Manifest `json:"manifest"`
@@ -45,8 +48,8 @@ type repositoryPreparer func(context.Context, handoff.Manifest, project.Resolved
 type targetProfileValidator func(string) error
 
 type handoffPrepareLock struct {
-	mu   sync.Mutex
-	refs int
+	token chan struct{}
+	refs  int
 }
 
 type handoffApplication struct {
@@ -58,6 +61,7 @@ type handoffApplication struct {
 	loadProjects      func(string) (*project.ConsolidatedRegistry, error)
 	prepareRepository repositoryPreparer
 	validateProfile   targetProfileValidator
+	resumeTimeout     time.Duration
 	prepareMu         sync.Mutex
 	prepareLocks      map[string]*handoffPrepareLock
 }
@@ -71,6 +75,7 @@ func newHandoffApplication(store *handoff.Store, profiles map[string]profile.Pro
 		snapshotHistory:   handoff.SnapshotHistory,
 		loadProjects:      project.LoadConsolidated,
 		prepareRepository: prepareHandoffRepository,
+		resumeTimeout:     targetHandoffResumeTimeout,
 		validateProfile: func(name string) error {
 			return validateHandoffTargetProfile(profiles, name)
 		},
@@ -161,6 +166,10 @@ func (d *Daemon) reconcileTargetHandoffs(ctx context.Context, at time.Time) {
 		d.logger.Warn("target handoff recovery scan failed")
 		return
 	}
+	resumeTimeout := app.resumeTimeout
+	if resumeTimeout <= 0 {
+		resumeTimeout = targetHandoffResumeTimeout
+	}
 	for _, candidate := range records {
 		if ctx.Err() != nil {
 			return
@@ -171,21 +180,45 @@ func (d *Daemon) reconcileTargetHandoffs(ctx context.Context, at time.Time) {
 			continue
 		}
 
-		release := app.lockPrepare(candidate.Manifest.HandoffID)
+		resumeCtx, cancel := context.WithTimeout(ctx, resumeTimeout)
+		release, lockErr := app.lockPrepareContext(resumeCtx, candidate.Manifest.HandoffID)
+		if lockErr != nil {
+			cancel()
+			if ctx.Err() != nil {
+				return
+			}
+			d.logger.Warn("target handoff recovery attempt timed out",
+				"handoff_id", candidate.Manifest.HandoffID,
+				"state", candidate.State)
+			continue
+		}
 		current, getErr := app.store.GetTarget(candidate.Manifest.HandoffID)
 		if getErr != nil {
 			release()
+			cancel()
 			d.logger.Warn("target handoff recovery reload failed", "handoff_id", candidate.Manifest.HandoffID)
 			continue
 		}
 		if current.State == handoff.TargetWaitingAssets && (current.NextRetry == nil || current.NextRetry.After(at)) {
 			release()
+			cancel()
 			continue
 		}
 		switch current.State {
 		case handoff.TargetReceived, handoff.TargetValidating, handoff.TargetWaitingAssets:
-			_, resumeErr := app.resumeTarget(ctx, current, d.meshDeviceID())
-			release()
+			result := make(chan error, 1)
+			go func() {
+				_, resumeErr := app.resumeTarget(resumeCtx, current, d.meshDeviceID())
+				release()
+				result <- resumeErr
+			}()
+			var resumeErr error
+			select {
+			case resumeErr = <-result:
+			case <-resumeCtx.Done():
+				resumeErr = resumeCtx.Err()
+			}
+			cancel()
 			if resumeErr != nil && ctx.Err() == nil {
 				d.logger.Warn("target handoff recovery attempt failed",
 					"handoff_id", current.Manifest.HandoffID,
@@ -194,6 +227,7 @@ func (d *Daemon) reconcileTargetHandoffs(ctx context.Context, at time.Time) {
 			}
 		default:
 			release()
+			cancel()
 		}
 	}
 }
@@ -217,8 +251,17 @@ func (a *handoffApplication) prepare(ctx context.Context, principal arcmuxmesh.P
 	if localDeviceID == "" || manifest.Target.DeviceID != localDeviceID {
 		return meshHandoffStatus{}, meshInvalidRequest(errors.New("handoff target does not match this device"))
 	}
-	release := a.lockPrepare(manifest.HandoffID)
+	if len(manifest.Artifacts) != 0 {
+		return meshHandoffStatus{}, meshInvalidRequest(errors.New("handoff artifacts are not supported"))
+	}
+	release, err := a.lockPrepareContext(ctx, manifest.HandoffID)
+	if err != nil {
+		return meshHandoffStatus{}, err
+	}
 	defer release()
+	if err := ctx.Err(); err != nil {
+		return meshHandoffStatus{}, err
+	}
 
 	record, _, err := a.store.ReceiveTarget(manifest)
 	if err != nil {
@@ -237,9 +280,16 @@ func (a *handoffApplication) resumeTarget(ctx context.Context, record handoff.Ta
 		return meshHandoffStatus{}, err
 	}
 	switch record.State {
+	case handoff.TargetReceived, handoff.TargetValidating, handoff.TargetWaitingAssets:
+		if len(record.Manifest.Artifacts) != 0 {
+			return a.reject(record, handoff.FailureInvalidManifest, "handoff artifacts are not supported")
+		}
+	}
+	switch record.State {
 	case handoff.TargetReceived, handoff.TargetWaitingAssets:
 		var err error
-		record, err = a.store.TransitionTarget(record.Manifest.HandoffID, record.Revision, handoff.TargetValidating, handoff.Transition{})
+		at := targetTransitionTime(a.now, record.Updated)
+		record, err = a.store.TransitionTarget(record.Manifest.HandoffID, record.Revision, handoff.TargetValidating, handoff.Transition{At: at})
 		if err != nil {
 			return meshHandoffStatus{}, &arcmuxmesh.RPCError{Code: arcmuxmesh.ErrorInternal, Message: "unable to validate handoff"}
 		}
@@ -258,9 +308,15 @@ func (a *handoffApplication) resumeTarget(ctx context.Context, record handoff.Ta
 	if err := a.validateProfile(record.Manifest.Target.Profile); err != nil {
 		return a.reject(record, handoff.FailureVerification, "target agent profile is not available for supervised launch")
 	}
+	if err := ctx.Err(); err != nil {
+		return meshHandoffStatus{}, err
+	}
 
 	manifest := record.Manifest
 	registry, err := a.loadProjects(a.projectsPath)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return meshHandoffStatus{}, ctxErr
+	}
 	if err != nil {
 		return a.reject(record, handoff.FailureVerification, "target project registry is invalid")
 	}
@@ -269,7 +325,11 @@ func (a *handoffApplication) resumeTarget(ctx context.Context, record handoff.Ta
 		return a.reject(record, handoff.FailureVerification, "target project is not registered")
 	}
 
-	if _, err := a.snapshotHistory(a.historyRoot, a.store.Root(), manifest.HandoffID, manifest.History); err != nil {
+	_, err = a.snapshotHistory(a.historyRoot, a.store.Root(), manifest.HandoffID, manifest.History)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return meshHandoffStatus{}, ctxErr
+	}
+	if err != nil {
 		if code, ok := handoff.HistoryErrorCodeOf(err); ok && code == handoff.HistoryErrorRetryable {
 			return a.waitForAssets(record, "synced session history is not available")
 		}
@@ -277,10 +337,17 @@ func (a *handoffApplication) resumeTarget(ctx context.Context, record handoff.Ta
 	}
 
 	if err := a.prepareRepository(ctx, manifest, resolvedProject); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return meshHandoffStatus{}, ctxErr
+		}
 		return a.classifyRepositoryFailure(record, err)
 	}
+	if err := ctx.Err(); err != nil {
+		return meshHandoffStatus{}, err
+	}
 
-	prepared, err := a.store.TransitionTarget(record.Manifest.HandoffID, record.Revision, handoff.TargetPrepared, handoff.Transition{})
+	at := targetTransitionTime(a.now, record.Updated)
+	prepared, err := a.store.TransitionTarget(record.Manifest.HandoffID, record.Revision, handoff.TargetPrepared, handoff.Transition{At: at})
 	if err != nil {
 		return meshHandoffStatus{}, &arcmuxmesh.RPCError{Code: arcmuxmesh.ErrorInternal, Message: "unable to prepare handoff"}
 	}
@@ -288,24 +355,39 @@ func (a *handoffApplication) resumeTarget(ctx context.Context, record handoff.Ta
 }
 
 func (a *handoffApplication) lockPrepare(id string) func() {
+	release, _ := a.lockPrepareContext(context.Background(), id)
+	return release
+}
+
+func (a *handoffApplication) lockPrepareContext(ctx context.Context, id string) (func(), error) {
 	a.prepareMu.Lock()
 	entry := a.prepareLocks[id]
 	if entry == nil {
-		entry = &handoffPrepareLock{}
+		entry = &handoffPrepareLock{token: make(chan struct{}, 1)}
+		entry.token <- struct{}{}
 		a.prepareLocks[id] = entry
 	}
 	entry.refs++
 	a.prepareMu.Unlock()
 
-	entry.mu.Lock()
-	return func() {
-		entry.mu.Unlock()
-		a.prepareMu.Lock()
-		entry.refs--
-		if entry.refs == 0 {
-			delete(a.prepareLocks, id)
-		}
-		a.prepareMu.Unlock()
+	select {
+	case <-entry.token:
+		return func() {
+			entry.token <- struct{}{}
+			a.releasePrepareLock(id, entry)
+		}, nil
+	case <-ctx.Done():
+		a.releasePrepareLock(id, entry)
+		return nil, ctx.Err()
+	}
+}
+
+func (a *handoffApplication) releasePrepareLock(id string, entry *handoffPrepareLock) {
+	a.prepareMu.Lock()
+	defer a.prepareMu.Unlock()
+	entry.refs--
+	if entry.refs == 0 {
+		delete(a.prepareLocks, id)
 	}
 }
 
@@ -327,7 +409,7 @@ func (a *handoffApplication) status(_ context.Context, principal arcmuxmesh.Prin
 }
 
 func (a *handoffApplication) waitForAssets(record handoff.TargetRecord, message string) (meshHandoffStatus, error) {
-	now := a.now().UTC()
+	now := targetTransitionTime(a.now, record.Updated)
 	next := now.Add(handoffAssetRetryDelay)
 	failure := &handoff.Failure{Code: handoff.FailureMissingAsset, Message: message, Retryable: true, At: now}
 	waiting, err := a.store.TransitionTarget(record.Manifest.HandoffID, record.Revision, handoff.TargetWaitingAssets, handoff.Transition{
@@ -340,7 +422,7 @@ func (a *handoffApplication) waitForAssets(record handoff.TargetRecord, message 
 }
 
 func (a *handoffApplication) reject(record handoff.TargetRecord, code handoff.FailureCode, message string) (meshHandoffStatus, error) {
-	now := a.now().UTC()
+	now := targetTransitionTime(a.now, record.Updated)
 	failure := &handoff.Failure{Code: code, Message: message, Retryable: false, At: now}
 	rejected, err := a.store.TransitionTarget(record.Manifest.HandoffID, record.Revision, handoff.TargetRejected, handoff.Transition{At: now, Failure: failure})
 	if err != nil {
@@ -372,4 +454,12 @@ func handoffStatusDTO(record handoff.TargetRecord) meshHandoffStatus {
 func prepareHandoffRepository(ctx context.Context, manifest handoff.Manifest, resolved project.ResolvedProject) error {
 	_, err := handoff.PrepareRepository(ctx, manifest, resolved)
 	return err
+}
+
+func targetTransitionTime(now func() time.Time, notBefore time.Time) time.Time {
+	at := now().UTC()
+	if at.Before(notBefore) {
+		return notBefore
+	}
+	return at
 }

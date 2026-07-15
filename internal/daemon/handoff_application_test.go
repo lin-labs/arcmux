@@ -40,6 +40,72 @@ func TestHandoffPrepareBindsAuthenticatedSourceAndLocalTargetBeforePersist(t *te
 	}
 }
 
+func TestHandoffPrepareRejectsArtifactsBeforePersistOrAssetSideEffects(t *testing.T) {
+	app, manifest := newHandoffTestApplication(t, true)
+	manifest.Artifacts = []handoff.ArtifactRef{{
+		Kind: handoff.ArtifactSessionHistory, ID: "history-1",
+		Session: &handoff.ArtifactSessionRef{
+			ProfileScope: "profile:codex",
+			SessionID:    "session-1",
+		},
+	}}
+	var historyCalls, repositoryCalls atomic.Int32
+	app.snapshotHistory = func(string, string, string, handoff.HistoryRef) (string, error) {
+		historyCalls.Add(1)
+		return "", nil
+	}
+	app.prepareRepository = func(context.Context, handoff.Manifest, project.ResolvedProject) error {
+		repositoryCalls.Add(1)
+		return nil
+	}
+
+	if _, err := app.prepare(context.Background(), arcmuxmesh.Principal{PeerID: "client"}, "server", meshHandoffPrepareRequest{Manifest: manifest}); !isMeshInvalidRequest(err) {
+		t.Fatalf("prepare with artifacts error = %v, want invalid_request", err)
+	}
+	if _, err := app.store.GetTarget(manifest.HandoffID); !errors.Is(err, handoff.ErrNotFound) {
+		t.Fatalf("unsupported artifacts persisted target record: %v", err)
+	}
+	if historyCalls.Load() != 0 || repositoryCalls.Load() != 0 {
+		t.Fatalf("unsupported artifacts ran history=%d repository=%d side effects", historyCalls.Load(), repositoryCalls.Load())
+	}
+}
+
+func TestHandoffResumeRejectsPersistedArtifactsBeforeAssetSideEffects(t *testing.T) {
+	app, manifest := newHandoffTestApplication(t, true)
+	manifest.HandoffID = "persisted-unsupported-artifacts"
+	manifest.Artifacts = []handoff.ArtifactRef{{
+		Kind: handoff.ArtifactSessionHistory, ID: "history-1",
+		Session: &handoff.ArtifactSessionRef{
+			ProfileScope: "profile:codex",
+			SessionID:    "session-1",
+		},
+	}}
+	record, replay, err := app.store.ReceiveTarget(manifest)
+	if err != nil || replay {
+		t.Fatalf("receive replay=%t err=%v", replay, err)
+	}
+	var historyCalls, repositoryCalls atomic.Int32
+	app.snapshotHistory = func(string, string, string, handoff.HistoryRef) (string, error) {
+		historyCalls.Add(1)
+		return "", nil
+	}
+	app.prepareRepository = func(context.Context, handoff.Manifest, project.ResolvedProject) error {
+		repositoryCalls.Add(1)
+		return nil
+	}
+
+	release := app.lockPrepare(manifest.HandoffID)
+	status, err := app.resumeTarget(context.Background(), record, "server")
+	release()
+	if err != nil || status.State != handoff.TargetRejected || status.Failure == nil ||
+		status.Failure.Code != handoff.FailureInvalidManifest || status.Failure.Retryable {
+		t.Fatalf("persisted artifact rejection status=%+v err=%v", status, err)
+	}
+	if historyCalls.Load() != 0 || repositoryCalls.Load() != 0 {
+		t.Fatalf("persisted artifacts ran history=%d repository=%d side effects", historyCalls.Load(), repositoryCalls.Load())
+	}
+}
+
 func TestHandoffPrepareRejectsUnavailableTargetProfileBeforeAssetSideEffects(t *testing.T) {
 	for _, targetProfile := range []string{"unknown", "codex_exec"} {
 		t.Run(targetProfile, func(t *testing.T) {
@@ -151,6 +217,26 @@ func TestHandoffPrepareConcurrentDuplicateIsIdempotent(t *testing.T) {
 	}
 	if got := repositoryCalls.Load(); got != 1 {
 		t.Fatalf("repository preparations = %d, want 1", got)
+	}
+}
+
+func TestHandoffPrepareStopsWaitingForPerIDLockWhenRequestIsCanceled(t *testing.T) {
+	app, manifest := newHandoffTestApplication(t, true)
+	release := app.lockPrepare(manifest.HandoffID)
+	defer release()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := app.prepare(ctx, arcmuxmesh.Principal{PeerID: "client"}, "server", meshHandoffPrepareRequest{Manifest: manifest})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("blocked duplicate error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("blocked duplicate took %s", elapsed)
+	}
+	if _, err := app.store.GetTarget(manifest.HandoffID); !errors.Is(err, handoff.ErrNotFound) {
+		t.Fatalf("canceled lock waiter persisted target record: %v", err)
 	}
 }
 
@@ -362,6 +448,167 @@ func TestTargetHandoffReconcilerRecoversPrepareStatesAndHonorsRetryDueTime(t *te
 	if got := repositoryCalls.Load(); got != 4 {
 		t.Fatalf("terminal pass repository calls = %d, want 4", got)
 	}
+}
+
+func TestTargetHandoffReconcilerTimesOutBlockedRecordAndDrainsNext(t *testing.T) {
+	app, base := newHandoffTestApplication(t, true)
+	blocked := base
+	blocked.HandoffID = "reconcile-timeout-a"
+	next := base
+	next.HandoffID = "reconcile-timeout-b"
+	for _, manifest := range []handoff.Manifest{blocked, next} {
+		if _, replay, err := app.store.ReceiveTarget(manifest); err != nil || replay {
+			t.Fatalf("seed %s replay=%t err=%v", manifest.HandoffID, replay, err)
+		}
+	}
+	app.resumeTimeout = 25 * time.Millisecond
+
+	releaseBlocked := make(chan struct{})
+	blockedStarted := make(chan struct{})
+	var startOnce sync.Once
+	app.snapshotHistory = func(_, _, id string, _ handoff.HistoryRef) (string, error) {
+		if id == blocked.HandoffID {
+			startOnce.Do(func() { close(blockedStarted) })
+			<-releaseBlocked
+		}
+		return "snapshot", nil
+	}
+	var repositoryCalls atomic.Int32
+	app.prepareRepository = func(_ context.Context, manifest handoff.Manifest, _ project.ResolvedProject) error {
+		repositoryCalls.Add(1)
+		if manifest.HandoffID == blocked.HandoffID {
+			t.Error("timed-out record reached repository preparation")
+		}
+		return nil
+	}
+
+	d := newMeshApplicationTestDaemon(t, "server")
+	d.meshMu.Lock()
+	d.meshApp.handoffs = app
+	d.meshMu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		d.reconcileTargetHandoffs(context.Background(), time.Now().UTC())
+		close(done)
+	}()
+	select {
+	case <-blockedStarted:
+	case <-time.After(time.Second):
+		close(releaseBlocked)
+		<-done
+		t.Fatal("blocked recovery did not start")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		close(releaseBlocked)
+		<-done
+		t.Fatal("blocked recovery starved the next target")
+	}
+	close(releaseBlocked)
+	// Wait for the timed-out goroutine to observe cancellation and release its
+	// per-ID lock before test cleanup removes its store and history roots.
+	release := app.lockPrepare(blocked.HandoffID)
+	release()
+
+	blockedRecord, err := app.store.GetTarget(blocked.HandoffID)
+	if err != nil || blockedRecord.State != handoff.TargetValidating {
+		t.Fatalf("blocked record=%+v err=%v, want validating", blockedRecord, err)
+	}
+	nextRecord, err := app.store.GetTarget(next.HandoffID)
+	if err != nil || nextRecord.State != handoff.TargetPrepared {
+		t.Fatalf("next record=%+v err=%v, want prepared", nextRecord, err)
+	}
+	if got := repositoryCalls.Load(); got != 1 {
+		t.Fatalf("repository calls = %d, want 1", got)
+	}
+}
+
+func TestTargetTransitionsClampBackwardWallClock(t *testing.T) {
+	t.Run("received validating and waiting assets resume", func(t *testing.T) {
+		for _, state := range []handoff.TargetState{
+			handoff.TargetReceived,
+			handoff.TargetValidating,
+			handoff.TargetWaitingAssets,
+		} {
+			t.Run(string(state), func(t *testing.T) {
+				app, manifest := newHandoffTestApplication(t, true)
+				manifest.HandoffID = "clock-backward-" + string(state)
+				record, replay, err := app.store.ReceiveTarget(manifest)
+				if err != nil || replay {
+					t.Fatalf("receive replay=%t err=%v", replay, err)
+				}
+				if state != handoff.TargetReceived {
+					record, err = app.store.TransitionTarget(manifest.HandoffID, record.Revision, handoff.TargetValidating, handoff.Transition{At: record.Updated})
+					if err != nil {
+						t.Fatalf("seed validating: %v", err)
+					}
+				}
+				if state == handoff.TargetWaitingAssets {
+					nextRetry := record.Updated.Add(time.Second)
+					failure := &handoff.Failure{
+						Code: handoff.FailureMissingAsset, Message: "pending", Retryable: true, At: record.Updated,
+					}
+					record, err = app.store.TransitionTarget(manifest.HandoffID, record.Revision, state, handoff.Transition{
+						At: record.Updated, NextRetry: &nextRetry, Failure: failure,
+					})
+					if err != nil {
+						t.Fatalf("seed waiting: %v", err)
+					}
+				}
+				notBefore := record.Updated
+				app.now = func() time.Time { return notBefore.Add(-time.Hour) }
+				status, err := app.prepare(context.Background(), arcmuxmesh.Principal{PeerID: "client"}, "server", meshHandoffPrepareRequest{Manifest: manifest})
+				if err != nil || status.State != handoff.TargetPrepared {
+					t.Fatalf("resume status=%+v err=%v", status, err)
+				}
+				prepared, err := app.store.GetTarget(manifest.HandoffID)
+				if err != nil || !prepared.Updated.Equal(notBefore) {
+					t.Fatalf("prepared updated=%v err=%v, want %v", prepared.Updated, err, notBefore)
+				}
+			})
+		}
+	})
+
+	t.Run("waiting and rejected failures", func(t *testing.T) {
+		tests := []struct {
+			name         string
+			writeHistory bool
+			mutate       func(*handoff.Manifest)
+			wantState    handoff.TargetState
+		}{
+			{name: "waiting", wantState: handoff.TargetWaitingAssets},
+			{
+				name: "rejected", writeHistory: true, wantState: handoff.TargetRejected,
+				mutate: func(manifest *handoff.Manifest) { manifest.Repository.ProjectSlug = "unknown-project" },
+			},
+		}
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				app, manifest := newHandoffTestApplication(t, test.writeHistory)
+				manifest.HandoffID = "clock-backward-" + test.name
+				if test.mutate != nil {
+					test.mutate(&manifest)
+				}
+				received, replay, err := app.store.ReceiveTarget(manifest)
+				if err != nil || replay {
+					t.Fatalf("receive replay=%t err=%v", replay, err)
+				}
+				app.now = func() time.Time { return received.Updated.Add(-time.Hour) }
+				status, err := app.prepare(context.Background(), arcmuxmesh.Principal{PeerID: "client"}, "server", meshHandoffPrepareRequest{Manifest: manifest})
+				if err != nil || status.State != test.wantState {
+					t.Fatalf("prepare status=%+v err=%v", status, err)
+				}
+				updated, err := app.store.GetTarget(manifest.HandoffID)
+				if err != nil || !updated.Updated.Equal(received.Updated) || updated.Failure == nil || !updated.Failure.At.Equal(received.Updated) {
+					t.Fatalf("updated record=%+v err=%v, want transition at %v", updated, err, received.Updated)
+				}
+				if test.wantState == handoff.TargetWaitingAssets && (updated.NextRetry == nil || !updated.NextRetry.Equal(received.Updated.Add(handoffAssetRetryDelay))) {
+					t.Fatalf("waiting next_retry=%v, want %v", updated.NextRetry, received.Updated.Add(handoffAssetRetryDelay))
+				}
+			})
+		}
+	})
 }
 
 func TestMeshRuntimeImmediatelyAndPeriodicallyReconcilesTargetHandoffs(t *testing.T) {
@@ -763,10 +1010,7 @@ func newHandoffTestApplication(t *testing.T, writeHistory bool) (*handoffApplica
 			TreeDigest: strings.Repeat("c", 40), Cleanliness: handoff.RepositoryClean,
 			Transfer: handoff.TransferRemoteBranch,
 		},
-		Artifacts: []handoff.ArtifactRef{{
-			Kind: handoff.ArtifactSessionHistory, ID: "history-1",
-			Session: &handoff.ArtifactSessionRef{ProfileScope: "profile:codex", SessionID: "session-1"},
-		}},
+		Artifacts:  []handoff.ArtifactRef{},
 		Validation: handoff.ValidationEvidence{State: handoff.ValidationNotRun},
 		CreatedAt:  now,
 	}
