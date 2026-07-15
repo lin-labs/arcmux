@@ -504,6 +504,10 @@ func (s *Store) GetRemoteSession(locator RemoteSessionLocator) (RemoteSessionPro
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.getRemoteSessionLocked(locator)
+}
+
+func (s *Store) getRemoteSessionLocked(locator RemoteSessionLocator) (RemoteSessionProjection, error) {
 	file, err := s.remoteSessionPath(locator)
 	if err != nil {
 		return RemoteSessionProjection{}, err
@@ -624,6 +628,10 @@ func (s *Store) PutSurfaceBinding(binding SurfaceBinding, replace bool) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.putSurfaceBindingLocked(binding, replace)
+}
+
+func (s *Store) putSurfaceBindingLocked(binding SurfaceBinding, replace bool) error {
 	file, err := s.surfaceBindingPath(binding.SurfaceID)
 	if err != nil {
 		return err
@@ -635,6 +643,16 @@ func (s *Store) PutSurfaceBinding(binding SurfaceBinding, replace bool) error {
 		}
 		if existing.sameTarget(binding) {
 			binding.CreatedAt = existing.CreatedAt
+			// Source is creation provenance, not target identity. Preserve the
+			// original writer when another owner path idempotently asserts the
+			// same exact binding (for example surface bind followed by mesh bind).
+			binding.Source = existing.Source
+			// TransportBindingID is mutable attachment metadata, not session
+			// identity. A new non-empty observation updates it; an omitted one
+			// preserves the last known attachment instead of erasing it.
+			if binding.Locator.TransportBindingID == "" {
+				binding.Locator.TransportBindingID = existing.Locator.TransportBindingID
+			}
 		}
 	} else if !errors.Is(err, ErrNotFound) {
 		return err
@@ -644,6 +662,55 @@ func (s *Store) PutSurfaceBinding(binding SurfaceBinding, replace bool) error {
 	}
 	s.publishLocked(ChangeUpsert, EntitySurfaceBinding, binding.SurfaceID)
 	return nil
+}
+
+// ValidateAndPutSurfaceBinding atomically validates an exact cached session is
+// not gone and writes the surface binding under the same owner-local lock. This
+// closes the check/write race that would otherwise allow an authoritative
+// completed inventory to mark the target gone between the two operations.
+func (s *Store) ValidateAndPutSurfaceBinding(binding SurfaceBinding, replace bool) (ResolvedSurfaceBinding, error) {
+	if binding.SchemaVersion == 0 {
+		binding.SchemaVersion = SchemaVersion
+	}
+	now := s.now().UTC()
+	if binding.CreatedAt.IsZero() {
+		binding.CreatedAt = now
+	}
+	binding.UpdatedAt = now
+	if err := binding.Validate(); err != nil {
+		return ResolvedSurfaceBinding{}, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	projection, err := s.getRemoteSessionLocked(binding.Locator)
+	if err != nil {
+		return ResolvedSurfaceBinding{}, err
+	}
+	if !projection.Locator.EqualIdentity(binding.Locator) {
+		return ResolvedSurfaceBinding{}, errors.New("cached remote session locator does not match binding target")
+	}
+	if projection.Freshness == FreshnessGone {
+		return ResolvedSurfaceBinding{}, errors.New("cached remote session is gone")
+	}
+	if err := s.putSurfaceBindingLocked(binding, replace); err != nil {
+		return ResolvedSurfaceBinding{}, err
+	}
+	stored, err := s.getSurfaceBindingLocked(binding.SurfaceID)
+	if err != nil {
+		return ResolvedSurfaceBinding{}, err
+	}
+	resolved := ResolvedSurfaceBinding{
+		Binding: stored, Projection: &projection,
+		PeerFreshness: FreshnessStale, EffectiveFreshness: projection.Freshness,
+	}
+	if peer, err := s.getPeerLocked(binding.Locator.DeviceID); err == nil {
+		resolved.Peer = &peer
+		resolved.PeerFreshness = peer.Freshness
+	} else if !errors.Is(err, ErrNotFound) {
+		return ResolvedSurfaceBinding{}, err
+	}
+	return resolved, nil
 }
 
 func (s *Store) GetSurfaceBinding(surfaceID string) (SurfaceBinding, error) {

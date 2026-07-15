@@ -1,6 +1,7 @@
 package hooks
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -22,13 +23,20 @@ func TestTurnContractRecording(t *testing.T) {
 	if st.TurnContract == nil || st.TurnContract.OverallGoal != "build the X feature" {
 		t.Fatalf("launch seed missing: %+v", st.TurnContract)
 	}
+	if st.TurnContract.OverallGoalProvenance != "" {
+		t.Fatalf("raw launch prompt gained trusted provenance: %+v", st.TurnContract)
+	}
 
 	// A turn records the gauged goal + raw last message (3-line truncated).
 	rec := TurnContractUpdate{
 		Goal:            "add tests for X",
 		LastUserMessage: "line1\nline2\nline3\nline4\nline5",
 	}
-	if err := ApplyEventWithContract(dir, id, "claude", EventTurnEnd, "", rec, now.Add(time.Minute)); err != nil {
+	if err := ApplyEventWithContract(dir, id, "claude", EventPromptSubmit, "", rec, now.Add(30*time.Second)); err != nil {
+		t.Fatalf("prompt_submit: %v", err)
+	}
+	turnEnd := now.Add(time.Minute)
+	if err := ApplyEvent(dir, id, "claude", EventTurnEnd, "", turnEnd); err != nil {
 		t.Fatalf("turn_end: %v", err)
 	}
 	st, _ = ReadSessionState(dir, id)
@@ -45,12 +53,16 @@ func TestTurnContractRecording(t *testing.T) {
 	// The background summarizer refreshes overall_goal WITHOUT moving counters.
 	beforeEvents := st.EventsSeen
 	beforeTurns := st.TurnCount
-	if err := ApplyContractOnly(dir, id, "claude", TurnContractUpdate{OverallGoal: "ship X end to end"}, now.Add(2*time.Minute)); err != nil {
+	if err := ApplySummarizedOverallGoal(dir, id, "claude", "ship X end to end", st.TurnCount, st.LastTurnEndAt, now.Add(2*time.Minute)); err != nil {
 		t.Fatalf("contract-only: %v", err)
 	}
 	st, _ = ReadSessionState(dir, id)
 	if st.TurnContract.OverallGoal != "ship X end to end" {
 		t.Fatalf("overall goal should evolve: %+v", st.TurnContract)
+	}
+	if st.TurnContract.OverallGoalProvenance != OverallGoalSummarizerProvenance ||
+		!st.TurnContract.OverallGoalUpdatedAt.Equal(now.Add(2*time.Minute)) {
+		t.Fatalf("summarized field provenance missing: %+v", st.TurnContract)
 	}
 	if st.EventsSeen != beforeEvents || st.TurnCount != beforeTurns {
 		t.Fatalf("contract-only refresh must not move counters: events %d->%d turns %d->%d",
@@ -59,6 +71,60 @@ func TestTurnContractRecording(t *testing.T) {
 	// Latest goal untouched by the overall refresh.
 	if st.TurnContract.Goal != "add tests for X" {
 		t.Fatalf("latest goal should be untouched: %+v", st.TurnContract)
+	}
+
+	// Any later unproven replacement revokes the old proof instead of
+	// inheriting it onto raw or caller-supplied text.
+	if err := ApplyContractOnly(dir, id, "claude", TurnContractUpdate{OverallGoal: "raw replacement"}, now.Add(3*time.Minute)); err != nil {
+		t.Fatalf("unproven contract-only: %v", err)
+	}
+	st, _ = ReadSessionState(dir, id)
+	if st.TurnContract.OverallGoalProvenance != "" {
+		t.Fatalf("unproven replacement inherited provenance: %+v", st.TurnContract)
+	}
+}
+
+func TestSummarizedOverallGoalRejectsStaleTurnAndAdvancesFreshness(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	now := time.Date(2026, 7, 15, 18, 0, 0, 0, time.UTC)
+	if err := ApplyEvent(dir, "s-race", "codex", EventPromptSubmit, "", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyEvent(dir, "s-race", "codex", EventTurnEnd, "", now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	old, _ := ReadSessionState(dir, "s-race")
+	releaseOldSummary := make(chan struct{})
+	oldSummaryErr := make(chan error, 1)
+	go func() {
+		<-releaseOldSummary
+		oldSummaryErr <- ApplySummarizedOverallGoal(
+			dir, "s-race", "codex", "stale turn one",
+			old.TurnCount, old.LastTurnEndAt, now.Add(4*time.Second),
+		)
+	}()
+	if err := ApplyEvent(dir, "s-race", "codex", EventPromptSubmit, "", now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyEvent(dir, "s-race", "codex", EventTurnEnd, "", now.Add(3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	close(releaseOldSummary)
+	if err := <-oldSummaryErr; !errors.Is(err, ErrStaleOverallGoal) {
+		t.Fatalf("stale summary error=%v", err)
+	}
+	current, _ := ReadSessionState(dir, "s-race")
+	updatedAt := now.Add(5 * time.Second)
+	if err := ApplySummarizedOverallGoal(dir, "s-race", "codex", "fresh turn two", current.TurnCount, current.LastTurnEndAt, updatedAt); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := ReadSessionState(dir, "s-race")
+	if got.TurnContract.OverallGoal != "fresh turn two" || got.TurnContract.OverallGoalProvenance != OverallGoalSummarizerProvenance {
+		t.Fatalf("contract=%+v", got.TurnContract)
+	}
+	if !got.UpdatedAt.Equal(updatedAt) {
+		t.Fatalf("source freshness=%s want %s", got.UpdatedAt, updatedAt)
 	}
 }
 

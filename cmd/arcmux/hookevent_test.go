@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/lin-labs/arcmux/internal/hooks"
@@ -89,6 +90,32 @@ func TestCmdHookUpdatesTurnContract(t *testing.T) {
 	}
 	if st.TurnContract.Source != "UserPromptSubmit" {
 		t.Fatalf("source = %q", st.TurnContract.Source)
+	}
+}
+
+func TestPaneCallableHookCannotAssertTrustedProvenance(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("ARCMUX_SESSION_ID", "")
+	t.Setenv("ARCMUX_SESSION_STATE_DIR", "")
+	args := []string{
+		"--session", "s-summary", "--agent", "claude", "--state-dir", dir,
+		"--overall-goal", "caller-controlled raw text",
+	}
+	if err := cmdHook(args); err != nil {
+		t.Fatal(err)
+	}
+	st, err := hooks.ReadSessionState(dir, "s-summary")
+	if err != nil || st == nil || st.TurnContract == nil {
+		t.Fatalf("state=%+v err=%v", st, err)
+	}
+	if st.TurnContract.OverallGoalProvenance != "" {
+		t.Fatalf("caller-controlled text gained provenance: %+v", st.TurnContract)
+	}
+	if err := cmdHook([]string{"--session", "s-summary", "--state-dir", dir, "--overall-goal-provenance", hooks.OverallGoalSummarizerProvenance}); err == nil {
+		t.Fatal("public hook caller was allowed to assert provenance")
+	}
+	if err := run([]string{"hook-summary", "--overall-goal", "caller-controlled"}); err == nil || !strings.Contains(err.Error(), "unknown command") {
+		t.Fatalf("trusted summary writer remained pane-callable: %v", err)
 	}
 }
 

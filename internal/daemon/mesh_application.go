@@ -888,6 +888,11 @@ func meshSanitizeSummary(summary sessionview.Summary) (sessionview.Summary, erro
 	summary.OwnerID = meshCleanText(summary.OwnerID, meshSessionOwnerRunes)
 	summary.State = meshCleanText(summary.State, meshSessionFieldRunes)
 	summary.Health = meshCleanText(summary.Health, meshSessionFieldRunes)
+	currentWork, err := sessionview.NormalizeCurrentWork(summary.CurrentWork)
+	if err != nil {
+		return sessionview.Summary{}, err
+	}
+	summary.CurrentWork = currentWork
 	if strings.TrimSpace(summary.Agent) == "" || strings.TrimSpace(summary.State) == "" {
 		return sessionview.Summary{}, errors.New("session agent and state are required")
 	}
@@ -898,6 +903,11 @@ func meshSanitizeSummary(summary sessionview.Summary) (sessionview.Summary, erro
 		"freshness.source_updated_at": summary.Freshness.SourceUpdatedAt,
 	} {
 		if err := validateMeshTimestamp(field, value, now); err != nil {
+			return sessionview.Summary{}, err
+		}
+	}
+	if summary.CurrentWork != nil {
+		if err := validateMeshTimestamp("current_work.updated_at", summary.CurrentWork.UpdatedAt, now); err != nil {
 			return sessionview.Summary{}, err
 		}
 	}

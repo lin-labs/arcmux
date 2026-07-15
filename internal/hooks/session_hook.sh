@@ -13,11 +13,9 @@
 #        - goal:              latest gauged "Your ask:" (the current sub-task)
 #        - last_user_message: the raw last user turn (Go truncates to 3 lines)
 #        - vault_link:        where the conversation is saved in the vault
-#   3) on turn_end, fire a background, best-effort summarizer (xAI grok) that
-#      passes the kept conversation + the current overall goal to the model and
-#      writes back a refreshed, continuously-evolving overall_goal — one
-#      succinct line, or a checklist with prior gears checked off when the
-#      conversation has split into separate themes.
+#
+# The daemon owner observes turn_end state and performs overall-goal inference.
+# The pane hook deliberately has no command that can stamp trusted provenance.
 #
 # Input dialects, all understood by the same script:
 #   - Claude Code: stdin {"hook_event_name":...,"tool_name":...,"prompt":...,
@@ -263,58 +261,4 @@ if [ -n "$GOAL$USER_MSG$VAULT_LINK" ]; then
 fi
 "$ARCMUX_BIN" "$@" >/dev/null 2>&1 || true
 
-# 5) Continuously-evolving overall_goal: on turn_end, refresh it in the
-# background (best-effort, debounced) by passing the kept conversation + the
-# current overall goal to xAI grok. Never blocks the turn; if grok is missing or
-# fails, overall_goal simply keeps its prior value.
-arcmux_refresh_overall() {
-  [ -n "$VAULT_LINK" ] && [ -f "$VAULT_LINK" ] || return 0
-  goal_bin="${ARCMUX_GOAL_BIN:-grok}"
-  command -v "$goal_bin" >/dev/null 2>&1 || return 0
-  [ -n "$ARCMUX_SESSION_STATE_DIR" ] || return 0
-
-  # Debounce: at most one refresh per session at a time (mkdir is atomic).
-  lock="$ARCMUX_SESSION_STATE_DIR/.overall-goal-${ARCMUX_SESSION_ID}.lock"
-  mkdir "$lock" 2>/dev/null || return 0
-  trap 'rmdir "$lock" 2>/dev/null' EXIT
-
-  state="$ARCMUX_SESSION_STATE_DIR/$ARCMUX_SESSION_ID.json"
-  current=$(python3 -c 'import json,sys
-try:
-    d=json.load(open(sys.argv[1]))
-    print(((d.get("turn_contract") or {}).get("overall_goal") or ""))
-except Exception:
-    pass' "$state" 2>/dev/null)
-
-  convo=$(tail -c 12000 "$VAULT_LINK" 2>/dev/null)
-  [ -n "$convo" ] || return 0
-
-  pf=$(mktemp 2>/dev/null) || return 0
-  {
-    printf '%s\n' "You maintain a running OVERALL GOAL for an agent work session: what the user is ultimately trying to achieve across the whole conversation."
-    printf '%s\n\n' "It evolves with the conversation."
-    printf '%s\n%s\n\n' "Current overall goal:" "${current:-(none yet)}"
-    printf '%s\n%s\n\n' "Conversation so far (newest last):" "$convo"
-    printf '%s\n' "Return the UPDATED overall goal. Normally ONE succinct line. If the conversation has clearly shifted into multiple separate themes, return a short markdown checklist instead: completed or abandoned earlier goals as '- [x] ...' and the active one(s) as '- [ ] ...'. Output ONLY the goal text — no preamble, no quotes, no explanation."
-  } > "$pf"
-
-  # Bound the call and detach stdin: an unauthenticated/slow grok must degrade
-  # (overall_goal keeps its prior value) rather than hang as a lingering process
-  # or block on an interactive auth prompt.
-  if command -v timeout >/dev/null 2>&1; then
-    new=$(timeout "${ARCMUX_GOAL_TIMEOUT:-90}" "$goal_bin" --no-alt-screen --disable-web-search -m "${ARCMUX_GOAL_MODEL:-grok-4.3}" --prompt-file "$pf" </dev/null 2>/dev/null)
-  else
-    new=$("$goal_bin" --no-alt-screen --disable-web-search -m "${ARCMUX_GOAL_MODEL:-grok-4.3}" --prompt-file "$pf" </dev/null 2>/dev/null)
-  fi
-  rm -f "$pf"
-  # Trim leading/trailing blank lines.
-  new=$(printf '%s\n' "$new" | sed -e '/./,$!d' | sed -e ':a' -e '/^\n*$/{$d;N;ba}' 2>/dev/null)
-  [ -n "$new" ] || return 0
-  # Contract-only write (no --event): refreshes overall_goal without perturbing
-  # the event stream or counters.
-  "$ARCMUX_BIN" hook --overall-goal "$new" >/dev/null 2>&1 || true
-}
-if [ "$CANON" = "turn_end" ]; then
-  ( arcmux_refresh_overall & ) >/dev/null 2>&1
-fi
 exit 0

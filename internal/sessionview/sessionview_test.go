@@ -115,3 +115,97 @@ func TestProfileScopeAndDeterministicSort(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildCurrentWorkRequiresSummarizerProvenance(t *testing.T) {
+	now := time.Date(2026, 7, 15, 16, 0, 0, 0, time.UTC)
+	snap := session.Snapshot{
+		ID: "s-work", Agent: "codex", State: session.StateWorking,
+		StartedAt: now.Add(-time.Hour), LastActivityAt: now,
+	}
+	raw := &hooks.SessionState{TurnContract: &hooks.TurnContract{
+		OverallGoal: "raw launch prompt", OverallGoalUpdatedAt: now,
+	}}
+	summary, _, err := Build(RootProfileScope, snap, raw, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.CurrentWork != nil {
+		t.Fatalf("unproven overall goal crossed into current work: %#v", summary.CurrentWork)
+	}
+
+	proven := &hooks.SessionState{TurnContract: &hooks.TurnContract{
+		OverallGoal:           "  Ship\nremote surfaces api_key=sk-live123456789  ",
+		OverallGoalProvenance: hooks.OverallGoalSummarizerProvenance,
+		OverallGoalUpdatedAt:  now,
+	}}
+	summary, _, err = Build(RootProfileScope, snap, proven, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.CurrentWork != nil {
+		t.Fatalf("credential-like current work must be omitted, got %#v", summary.CurrentWork)
+	}
+}
+
+func TestBuildCurrentWorkAdvancesSourceFreshness(t *testing.T) {
+	now := time.Date(2026, 7, 15, 16, 0, 0, 0, time.UTC)
+	summaryUpdated := now.Add(2 * time.Minute)
+	snap := session.Snapshot{
+		ID: "s-fresh", Agent: "codex", State: session.StateWorking,
+		StartedAt: now.Add(-time.Hour), LastActivityAt: now,
+	}
+	hookState := &hooks.SessionState{UpdatedAt: summaryUpdated, TurnContract: &hooks.TurnContract{
+		OverallGoal: "Ship exact native remote identity", OverallGoalProvenance: hooks.OverallGoalSummarizerProvenance,
+		OverallGoalUpdatedAt: summaryUpdated,
+	}}
+	summary, _, err := Build(RootProfileScope, snap, hookState, summaryUpdated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.CurrentWork == nil || !summary.Freshness.SourceUpdatedAt.Equal(summaryUpdated) {
+		t.Fatalf("summary=%+v", summary)
+	}
+}
+
+func TestNormalizeCurrentWorkRejectsCredentialLikeSummary(t *testing.T) {
+	now := time.Now().UTC()
+	for _, value := range []string{
+		"postgres://user:password@host/db",
+		"https://user:pass@example.com/path",
+		"OPENAI_API_KEY=sk-proj-abcdefghijklmnop",
+		"AWS_SECRET_ACCESS_KEY=abcdefghijklmnop",
+		"GCP_CREDENTIALS=/tmp/gcp.json",
+		"xai_api_key=xai_abcdefghijklmnop",
+		"api key = sk-proj-abcdefghijklmnop",
+		"access token: abcdefghijklmnop",
+		"Authorization: Basic dXNlcjpwYXNzd29yZA==",
+		"JWT eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijk",
+		"-----BEGIN PRIVATE KEY-----",
+	} {
+		if _, err := NormalizeCurrentWork(&CurrentWorkSummary{
+			Summary: value, Provenance: hooks.OverallGoalSummarizerProvenance, UpdatedAt: now,
+		}); err == nil {
+			t.Fatalf("credential-like current work accepted: %q", value)
+		}
+	}
+}
+
+func TestNormalizeCurrentWorkBoundsAndRejectsSpoofedSource(t *testing.T) {
+	now := time.Now().UTC()
+	if _, err := NormalizeCurrentWork(&CurrentWorkSummary{
+		Summary: "pretend safe", Provenance: "hook.raw_prompt", UpdatedAt: now,
+	}); err == nil {
+		t.Fatal("spoofed provenance accepted")
+	}
+	value, err := NormalizeCurrentWork(&CurrentWorkSummary{
+		Summary:    strings.Repeat("x", 300),
+		Provenance: hooks.OverallGoalSummarizerProvenance,
+		UpdatedAt:  now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len([]rune(value.Summary)) != maxCurrentWorkRunes {
+		t.Fatalf("summary runes=%d", len([]rune(value.Summary)))
+	}
+}

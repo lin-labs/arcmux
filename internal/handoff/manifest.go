@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/lin-labs/arcmux/internal/safetext"
 )
 
 const ManifestVersion = 1
@@ -26,15 +28,11 @@ const (
 )
 
 var (
-	safeID            = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
-	profileScope      = regexp.MustCompile(`^(?:root|profile:[a-z0-9](?:[a-z0-9_-]{0,61}[a-z0-9])?)$`)
-	repoSlug          = regexp.MustCompile(`^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$`)
-	objectID          = regexp.MustCompile(`^[0-9a-f]{40,64}$`)
-	sha256Hex         = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	secretAssignment  = regexp.MustCompile(`(?i)(api[_ -]?key|access[_ -]?token|auth[_ -]?token|authorization|password|secret)\s*[:=]\s*\S+`)
-	bearerCredential  = regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}`)
-	privateKey        = regexp.MustCompile(`(?i)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----`)
-	keyLikeCredential = regexp.MustCompile(`(?i)\b(?:ghp[_-]|github_pat[_-]|xox[baprs]-|xai[_-]|sk[_-])[A-Za-z0-9_-]{8,}`)
+	safeID       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	profileScope = regexp.MustCompile(`^(?:root|profile:[a-z0-9](?:[a-z0-9_-]{0,61}[a-z0-9])?)$`)
+	repoSlug     = regexp.MustCompile(`^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$`)
+	objectID     = regexp.MustCompile(`^[0-9a-f]{40,64}$`)
+	sha256Hex    = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 // Manifest is immutable once queued or received. Other than the explicitly
@@ -438,7 +436,7 @@ func validateOperatorText(name, value string, maxRunes int, required bool) error
 			return fmt.Errorf("%s contains control characters", name)
 		}
 	}
-	if privateKey.MatchString(value) || secretAssignment.MatchString(value) || bearerCredential.MatchString(value) || keyLikeCredential.MatchString(value) {
+	if safetext.ContainsCredentialLike(value) {
 		return fmt.Errorf("%s appears to contain credential material", name)
 	}
 	return nil

@@ -318,6 +318,48 @@ func (h *HTTPServer) handleMeshSurfaceBindings(w http.ResponseWriter, r *http.Re
 	}
 }
 
+func (h *HTTPServer) handleMeshValidatedSurfaceBinding(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "POST required"})
+		return
+	}
+	store, err := h.daemon.meshStateStore()
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: err.Error()})
+		return
+	}
+	var binding meshstate.SurfaceBinding
+	if err := decodeMeshHTTPJSON(w, r, &binding); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	localDeviceID := h.daemon.meshDeviceID()
+	if localDeviceID == "" {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "local mesh device identity is unavailable"})
+		return
+	}
+	if binding.LocalDeviceID != "" && binding.LocalDeviceID != localDeviceID {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "local_device_id does not match this daemon"})
+		return
+	}
+	binding.LocalDeviceID = localDeviceID
+	replace := false
+	if raw := r.URL.Query().Get("replace"); raw != "" {
+		parsed, err := strconv.ParseBool(raw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, errorResponse{Error: "replace must be a boolean"})
+			return
+		}
+		replace = parsed
+	}
+	resolved, err := store.ValidateAndPutSurfaceBinding(binding, replace)
+	if err != nil {
+		writeMeshStateError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resolved)
+}
+
 func decodeMeshHTTPJSON(w http.ResponseWriter, r *http.Request, target any) error {
 	r.Body = http.MaxBytesReader(w, r.Body, maxMeshHTTPBody)
 	decoder := json.NewDecoder(r.Body)

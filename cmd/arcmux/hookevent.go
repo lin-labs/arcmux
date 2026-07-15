@@ -29,7 +29,7 @@ import (
 // the turn-contract an accurate record, not a steer:
 //
 //	--goal <text>          the latest gauged "Your ask:" (the current sub-task)
-//	--overall-goal <text>  the whole-conversation objective (summarizer-refreshed)
+//	--overall-goal <text>  an unproven whole-conversation objective
 //	--last-message <text>  the raw, verbatim last user turn (3-line truncated)
 //	--vault-link <path>    where the conversation is saved in the vault
 //	--verification <text>  optional, current concrete success check

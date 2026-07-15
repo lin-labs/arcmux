@@ -2,6 +2,7 @@ package hooks
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,7 +19,14 @@ const (
 	EventToolEnd      = "tool_end"      // a tool call finished (still in turn)
 	EventTurnEnd      = "turn_end"      // agent finished its turn (now idle)
 	EventNotification = "notification"  // informational, no state transition
+
+	// OverallGoalSummarizerProvenance is the field-level proof stamped only by
+	// the background hook summarizer. A launch prompt, raw user message, or
+	// transcript-derived "Your ask" must never inherit this provenance.
+	OverallGoalSummarizerProvenance = "hook.overall_goal_summarizer.v1"
 )
+
+var ErrStaleOverallGoal = errors.New("overall-goal summary is stale")
 
 // CanonicalEvents lists the accepted --event values for `arcmux hook`.
 var CanonicalEvents = []string{
@@ -26,8 +34,8 @@ var CanonicalEvents = []string{
 }
 
 // SessionState is the cached per-session view the hooks judge reads. It is
-// mutated only through ApplyEvent (single-writer `arcmux hook`) and seeded by
-// InitSessionState (daemon on session start).
+// mutated only through the locked hook writers and seeded by InitSessionState
+// when the daemon starts watching a session.
 type SessionState struct {
 	SessionID  string    `json:"session_id"`
 	Agent      string    `json:"agent"`
@@ -69,7 +77,9 @@ type TurnContract struct {
 	// OverallGoal is the whole-conversation objective, continuously evolving
 	// (see the type doc). Seeded from the launch prompt, then refreshed by the
 	// background summarizer; may hold a multi-theme checklist.
-	OverallGoal string `json:"overall_goal,omitempty"`
+	OverallGoal           string    `json:"overall_goal,omitempty"`
+	OverallGoalProvenance string    `json:"overall_goal_provenance,omitempty"`
+	OverallGoalUpdatedAt  time.Time `json:"overall_goal_updated_at,omitempty"`
 	// LastUserMessage is the raw, verbatim most-recent user prompt (truncated to
 	// 3 lines) — recorded alongside the gauged goal, never as a substitute.
 	LastUserMessage string `json:"last_user_message,omitempty"`
@@ -154,6 +164,8 @@ func InitSessionState(stateDir, sessionID, agent, launchGoal string, now time.Ti
 			}
 			if st.TurnContract.OverallGoal == "" {
 				st.TurnContract.OverallGoal = launchGoal
+				st.TurnContract.OverallGoalProvenance = ""
+				st.TurnContract.OverallGoalUpdatedAt = now
 			}
 		}
 	})
@@ -167,10 +179,9 @@ func ApplyEvent(stateDir, sessionID, agent, event, tool string, now time.Time) e
 	return ApplyEventWithContract(stateDir, sessionID, agent, event, tool, TurnContractUpdate{}, now)
 }
 
-// ApplyContractOnly updates just the turn-contract recording fields without
-// recording an event — no counters move, Working/TurnCount/last_event are
-// untouched. It is the write path for the background overall-goal summarizer,
-// which refreshes OverallGoal out-of-band after a turn has already ended.
+// ApplyContractOnly updates untrusted recording fields without recording an
+// event. In particular, an OverallGoal written here never gains summarizer
+// provenance. Background summaries must use ApplySummarizedOverallGoal.
 func ApplyContractOnly(stateDir, sessionID, agent string, contract TurnContractUpdate, now time.Time) error {
 	return mutateSessionState(stateDir, sessionID, func(st *SessionState) {
 		st.SessionID = sessionID
@@ -181,6 +192,42 @@ func ApplyContractOnly(stateDir, sessionID, agent string, contract TurnContractU
 			st.CreatedAt = now
 		}
 		applyTurnContractUpdate(st, contract, now)
+		st.UpdatedAt = now
+	})
+}
+
+// ApplySummarizedOverallGoal is the writer-owned summary path. The provenance
+// is fixed here (callers cannot assert it) and the write is conditional on the
+// exact turn snapshot used by the summarizer. A slow turn N summary therefore
+// cannot overwrite turn N+1.
+func ApplySummarizedOverallGoal(stateDir, sessionID, agent, overallGoal string, expectedTurnCount int, expectedLastTurnEndAt, now time.Time) error {
+	overallGoal = compactContractText(overallGoal)
+	if overallGoal == "" {
+		return errors.New("summarized overall goal is required")
+	}
+	if expectedTurnCount < 1 || expectedLastTurnEndAt.IsZero() {
+		return errors.New("summary turn snapshot is required")
+	}
+	return mutateSessionStateChecked(stateDir, sessionID, func(st *SessionState) error {
+		if st.TurnCount != expectedTurnCount || !st.LastTurnEndAt.Equal(expectedLastTurnEndAt) {
+			return ErrStaleOverallGoal
+		}
+		st.SessionID = sessionID
+		if agent != "" {
+			st.Agent = agent
+		}
+		if st.CreatedAt.IsZero() {
+			st.CreatedAt = now
+		}
+		if st.TurnContract == nil {
+			st.TurnContract = &TurnContract{}
+		}
+		st.TurnContract.OverallGoal = overallGoal
+		st.TurnContract.OverallGoalProvenance = OverallGoalSummarizerProvenance
+		st.TurnContract.OverallGoalUpdatedAt = now
+		st.TurnContract.UpdatedAt = now
+		st.UpdatedAt = now
+		return nil
 	})
 }
 
@@ -253,6 +300,10 @@ func applyTurnContractUpdate(st *SessionState, update TurnContractUpdate, now ti
 	// OverallGoal evolves continuously — always take the latest summary.
 	if overall != "" {
 		st.TurnContract.OverallGoal = overall
+		// Provenance is replaced together with the field. An unproven update
+		// deliberately revokes earlier proof instead of inheriting it.
+		st.TurnContract.OverallGoalProvenance = ""
+		st.TurnContract.OverallGoalUpdatedAt = now
 	}
 	if lastMsg != "" {
 		st.TurnContract.LastUserMessage = lastMsg
@@ -349,6 +400,13 @@ func ArchiveSessionState(stateDir, sessionID string) error {
 // concurrent `arcmux hook` invocations; the write itself is atomic via
 // temp-file + rename so a reader never sees a half-written document.
 func mutateSessionState(stateDir, sessionID string, mutate func(*SessionState)) error {
+	return mutateSessionStateChecked(stateDir, sessionID, func(st *SessionState) error {
+		mutate(st)
+		return nil
+	})
+}
+
+func mutateSessionStateChecked(stateDir, sessionID string, mutate func(*SessionState) error) error {
 	if !sessionIDRe.MatchString(sessionID) {
 		return fmt.Errorf("invalid session id %q", sessionID)
 	}
@@ -374,7 +432,9 @@ func mutateSessionState(stateDir, sessionID string, mutate func(*SessionState)) 
 		return fmt.Errorf("read session state: %w", err)
 	}
 
-	mutate(st)
+	if err := mutate(st); err != nil {
+		return err
+	}
 
 	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {

@@ -129,6 +129,14 @@ func TestInstaller_EnsureGenericHook_WithoutSession(t *testing.T) {
 	}
 }
 
+func TestGenericHookCannotStampTrustedOverallGoal(t *testing.T) {
+	for _, forbidden := range []string{"hook-summary", "--overall-goal-provenance"} {
+		if strings.Contains(genericHookScript, forbidden) {
+			t.Fatalf("generic hook exposes trusted summary writer %q", forbidden)
+		}
+	}
+}
+
 // TestGenericHook_DerivesPathFromEnv runs the generated script under /bin/sh
 // and asserts it writes a valid JSON line to the env-derived per-session JSONL
 // — and that with the env unset it no-ops (writes nothing, exits 0).

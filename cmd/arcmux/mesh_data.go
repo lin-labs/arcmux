@@ -57,6 +57,94 @@ func cmdMeshSession(args []string, stdout io.Writer) error {
 	return writeMeshJSON(cfg, http.MethodGet, path, nil, stdout)
 }
 
+type meshBindResult struct {
+	SchemaVersion int                               `json:"schema_version"`
+	SurfaceID     string                            `json:"surface_id"`
+	WorkspaceID   string                            `json:"workspace_id"`
+	Locator       meshstate.RemoteSessionLocator    `json:"locator"`
+	Binding       meshstate.SurfaceBinding          `json:"binding"`
+	Session       meshstate.RemoteSessionProjection `json:"session"`
+}
+
+// cmdMeshBind atomically validates one exact cached remote locator and binds
+// the calling stable cmux surface UUID to it. It intentionally makes no claim
+// to open or own the terminal transport; the explicit binding is what lets
+// Mission Control render a remotely attached surface natively.
+func cmdMeshBind(args []string, stdout io.Writer) error {
+	cfg, rest, err := meshConfig(args)
+	if err != nil {
+		return err
+	}
+	if len(rest) < 3 {
+		return errors.New("usage: arcmux mesh bind <device> <root|profile:name> <session-id> [--replace]")
+	}
+	deviceID, profile, sessionID := rest[0], rest[1], rest[2]
+	fs := flag.NewFlagSet("mesh bind", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	replace := fs.Bool("replace", false, "explicitly replace another target")
+	surfaceID := fs.String("surface", os.Getenv("CMUX_SURFACE_ID"), "cmux surface UUID")
+	workspaceID := fs.String("workspace", os.Getenv("CMUX_WORKSPACE_ID"), "cmux workspace UUID")
+	transportID := fs.String("transport-binding", "", "optional attachment id")
+	if err := fs.Parse(rest[3:]); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("usage: arcmux mesh bind <device> <root|profile:name> <session-id> [--replace]")
+	}
+	if *surfaceID == "" || *workspaceID == "" {
+		return errors.New("CMUX_SURFACE_ID and CMUX_WORKSPACE_ID are both required (or pass --surface and --workspace)")
+	}
+	requested := meshstate.RemoteSessionLocator{
+		SchemaVersion: meshstate.SchemaVersion, DeviceID: deviceID,
+		ProfileScope: meshstate.ProfileScope(profile), SessionID: sessionID,
+		TransportBindingID: *transportID,
+	}
+	if err := requested.Validate(); err != nil {
+		return fmt.Errorf("remote session locator: %w", err)
+	}
+
+	binding, err := buildSurfaceBinding(cfg, requested, *surfaceID, *workspaceID, "mesh-bind")
+	if err != nil {
+		return err
+	}
+	body, err := json.Marshal(binding)
+	if err != nil {
+		return err
+	}
+	path := "/mesh/surface-bindings/validated"
+	if *replace {
+		path += "?replace=1"
+	}
+	response, err := meshAPIBody(cfg, http.MethodPost, path, body)
+	if err != nil {
+		return fmt.Errorf("validate and bind cached remote session: %w", err)
+	}
+	var resolved meshstate.ResolvedSurfaceBinding
+	if err := json.Unmarshal(response, &resolved); err != nil {
+		return fmt.Errorf("decode validated surface binding: %w", err)
+	}
+	if err := resolved.Binding.Validate(); err != nil {
+		return fmt.Errorf("invalid validated surface binding: %w", err)
+	}
+	if resolved.Projection == nil {
+		return errors.New("validated surface binding response omitted the cached session")
+	}
+	if err := resolved.Projection.Validate(); err != nil {
+		return fmt.Errorf("invalid validated cached session: %w", err)
+	}
+	if resolved.Binding.SurfaceID != binding.SurfaceID || resolved.Binding.WorkspaceID != binding.WorkspaceID ||
+		!resolved.Binding.Locator.EqualIdentity(requested) ||
+		!resolved.Projection.Locator.EqualIdentity(requested) || resolved.Projection.Freshness == meshstate.FreshnessGone {
+		return errors.New("validated surface binding response does not match requested live identity")
+	}
+	result := meshBindResult{
+		SchemaVersion: meshstate.SchemaVersion,
+		SurfaceID:     resolved.Binding.SurfaceID, WorkspaceID: resolved.Binding.WorkspaceID,
+		Locator: resolved.Binding.Locator, Binding: resolved.Binding, Session: *resolved.Projection,
+	}
+	return json.NewEncoder(stdout).Encode(result)
+}
+
 func cmdMeshRemoteArtifacts(args []string, stdout io.Writer) error {
 	cfg, rest, err := meshConfig(args)
 	if err != nil {
@@ -244,43 +332,76 @@ func cmdSurfaceBind(args []string, stdout io.Writer) error {
 	if fs.NArg() != 0 || *surfaceID == "" || *workspaceID == "" {
 		return errors.New("CMUX_SURFACE_ID and CMUX_WORKSPACE_ID are required (or pass --surface and --workspace)")
 	}
-	parsed, err := cfg.Mesh.Parse()
+	locator := meshstate.RemoteSessionLocator{
+		SchemaVersion: meshstate.SchemaVersion, DeviceID: deviceID,
+		ProfileScope: meshstate.ProfileScope(profile), SessionID: sessionID,
+		TransportBindingID: *transportID,
+	}
+	binding, err := buildSurfaceBinding(cfg, locator, *surfaceID, *workspaceID, "cmux-env")
 	if err != nil {
 		return err
+	}
+	stored, err := putSurfaceBinding(cfg, binding, *replace)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(stdout).Encode(stored)
+}
+
+func buildSurfaceBinding(cfg *config.Config, locator meshstate.RemoteSessionLocator, surfaceID, workspaceID, source string) (meshstate.SurfaceBinding, error) {
+	parsed, err := cfg.Mesh.Parse()
+	if err != nil {
+		return meshstate.SurfaceBinding{}, err
 	}
 	registry, err := mesh.LoadRegistry(parsed.RegistryPath)
 	if err != nil {
-		return err
+		return meshstate.SurfaceBinding{}, err
 	}
 	if registry.DeviceID == "" {
-		return errors.New("local mesh device identity is not configured")
+		return meshstate.SurfaceBinding{}, errors.New("local mesh device identity is not configured")
 	}
 	now := time.Now().UTC()
-	bindingID := "bnd-" + strings.ToLower(strings.ReplaceAll(*surfaceID, "-", ""))
+	bindingID := "bnd-" + strings.ToLower(strings.ReplaceAll(surfaceID, "-", ""))
 	binding := meshstate.SurfaceBinding{
 		SchemaVersion: meshstate.SchemaVersion,
 		BindingID:     bindingID,
 		LocalDeviceID: registry.DeviceID,
 		Mux:           "cmux",
-		SurfaceID:     *surfaceID,
-		WorkspaceID:   *workspaceID,
-		Locator: meshstate.RemoteSessionLocator{
-			SchemaVersion:      meshstate.SchemaVersion,
-			DeviceID:           deviceID,
-			ProfileScope:       meshstate.ProfileScope(profile),
-			SessionID:          sessionID,
-			TransportBindingID: *transportID,
-		},
-		Source:    "cmux-env",
-		CreatedAt: now,
-		UpdatedAt: now,
+		SurfaceID:     surfaceID,
+		WorkspaceID:   workspaceID,
+		Locator:       locator,
+		Source:        source,
+		CreatedAt:     now,
+		UpdatedAt:     now,
 	}
+	if err := binding.Validate(); err != nil {
+		return meshstate.SurfaceBinding{}, err
+	}
+	return binding, nil
+}
+
+func putSurfaceBinding(cfg *config.Config, binding meshstate.SurfaceBinding, replace bool) (meshstate.SurfaceBinding, error) {
 	body, _ := json.Marshal(binding)
 	path := "/mesh/surface-bindings"
-	if *replace {
+	if replace {
 		path += "?replace=1"
 	}
-	return writeMeshJSON(cfg, http.MethodPut, path, body, stdout)
+	response, err := meshAPIBody(cfg, http.MethodPut, path, body)
+	if err != nil {
+		return meshstate.SurfaceBinding{}, err
+	}
+	var stored meshstate.SurfaceBinding
+	if err := json.Unmarshal(response, &stored); err != nil {
+		return meshstate.SurfaceBinding{}, fmt.Errorf("decode stored surface binding: %w", err)
+	}
+	if err := stored.Validate(); err != nil {
+		return meshstate.SurfaceBinding{}, fmt.Errorf("invalid stored surface binding: %w", err)
+	}
+	if stored.SurfaceID != binding.SurfaceID || stored.WorkspaceID != binding.WorkspaceID ||
+		!stored.Locator.EqualIdentity(binding.Locator) {
+		return meshstate.SurfaceBinding{}, errors.New("stored surface binding does not match requested identity")
+	}
+	return stored, nil
 }
 
 func cmdSurfaceShow(args []string, stdout io.Writer) error {
