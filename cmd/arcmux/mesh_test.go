@@ -145,6 +145,63 @@ func TestMeshGrantIsExplicitReadOnlyAndRevokeRestoresTransportOnly(t *testing.T)
 	}
 }
 
+func TestMeshGrantAcceptsIndependentHandoffScopesWithoutChangingDefault(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := meshTestConfig(t, dir, "server")
+	registryPath := filepath.Join(dir, "server-mesh.json")
+	registry := &mesh.Registry{
+		Version: mesh.RegistryVersion, DeviceID: "server",
+		Accept: map[string]string{"client": mesh.TokenHash("token")}, Grants: map[string][]string{},
+	}
+	if err := mesh.SaveRegistry(registryPath, registry); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cmdMesh([]string{"grant", "client", mesh.ScopeHandoffsPrepare, "--config", cfgPath}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("prepare grant: %v", err)
+	}
+	updated, err := mesh.LoadRegistry(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := updated.Grants["client"]; len(got) != 1 || got[0] != mesh.ScopeHandoffsPrepare {
+		t.Fatalf("prepare grant = %v", got)
+	}
+
+	if err := cmdMesh([]string{"grant", "client", mesh.ScopeHandoffsLaunch, "--config", cfgPath}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("launch grant: %v", err)
+	}
+	updated, err = mesh.LoadRegistry(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := updated.Grants["client"]; len(got) != 1 || got[0] != mesh.ScopeHandoffsLaunch {
+		t.Fatalf("launch must not imply prepare, grants = %v", got)
+	}
+
+	if err := cmdMesh([]string{"grant", "client", "--config", cfgPath}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("default grant: %v", err)
+	}
+	updated, err = mesh.LoadRegistry(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{
+		mesh.ScopeArtifactsRead: true,
+		mesh.ScopeEventsRead:    true,
+		mesh.ScopeSessionsRead:  true,
+	}
+	if got := updated.Grants["client"]; len(got) != len(want) {
+		t.Fatalf("default grants = %v", got)
+	} else {
+		for _, scope := range got {
+			if !want[scope] {
+				t.Fatalf("default grant unexpectedly contains %q", scope)
+			}
+		}
+	}
+}
+
 func TestMeshServeValidatesBeforeWritingRegistry(t *testing.T) {
 	dir := t.TempDir()
 	cfg := meshTestConfig(t, dir, "server")

@@ -18,6 +18,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/lin-labs/arcmux/internal/handoff"
 	arcmuxmesh "github.com/lin-labs/arcmux/internal/mesh"
 	"github.com/lin-labs/arcmux/internal/meshstate"
 	"github.com/lin-labs/arcmux/internal/session"
@@ -40,6 +41,8 @@ const (
 	meshMethodArtifactsGet      = "artifacts.get"
 	meshMethodEventsSubscribe   = "events.subscribe"
 	meshMethodEventsUnsubscribe = "events.unsubscribe"
+	meshMethodHandoffsPrepare   = "handoffs.prepare"
+	meshMethodHandoffsStatus    = "handoffs.status"
 )
 
 var meshMethodSpecs = []arcmuxmesh.MethodSpec{
@@ -49,6 +52,8 @@ var meshMethodSpecs = []arcmuxmesh.MethodSpec{
 	{Name: meshMethodArtifactsGet, Capability: arcmuxmesh.CapabilityArtifactsReadV1, RequiredScope: arcmuxmesh.ScopeArtifactsRead},
 	{Name: meshMethodEventsSubscribe, Capability: arcmuxmesh.CapabilityEventsV1, RequiredScope: arcmuxmesh.ScopeEventsRead},
 	{Name: meshMethodEventsUnsubscribe, Capability: arcmuxmesh.CapabilityEventsV1, RequiredScope: arcmuxmesh.ScopeEventsRead},
+	{Name: meshMethodHandoffsPrepare, Capability: arcmuxmesh.CapabilityHandoffsV1, RequiredScope: arcmuxmesh.ScopeHandoffsPrepare},
+	{Name: meshMethodHandoffsStatus, Capability: arcmuxmesh.CapabilityHandoffsV1, RequiredScope: arcmuxmesh.ScopeHandoffsPrepare},
 }
 
 type meshPeerSubscription struct {
@@ -84,6 +89,7 @@ type cachedArtifactInventory struct {
 
 type meshApplication struct {
 	store    *meshstate.Store
+	handoffs *handoffApplication
 	epoch    string
 	deviceID string
 	revision atomic.Uint64
@@ -232,6 +238,10 @@ func (d *Daemon) initMeshApplication() error {
 	if err != nil {
 		return err
 	}
+	handoffStore, err := handoff.Open(root)
+	if err != nil {
+		return fmt.Errorf("open handoff state: %w", err)
+	}
 	outbound := make(map[string]meshPeerSubscription)
 	peers, err := store.ListPeers()
 	if err != nil {
@@ -254,7 +264,7 @@ func (d *Daemon) initMeshApplication() error {
 	d.meshMu.Lock()
 	if d.meshApp == nil {
 		d.meshApp = &meshApplication{
-			store: store, epoch: fmt.Sprintf("boot-%d", time.Now().UTC().UnixNano()),
+			store: store, handoffs: newHandoffApplication(handoffStore), epoch: fmt.Sprintf("boot-%d", time.Now().UTC().UnixNano()),
 			subs: make(map[string]meshPeerSubscription), outbound: outbound,
 			sessionPages: make(map[string]cachedSessionInventory), artifactPages: make(map[string]cachedArtifactInventory),
 			syncing: make(map[string]*meshSyncState), reconcileInterval: 15 * time.Second,
@@ -399,6 +409,28 @@ func (d *Daemon) registerMeshApplication(manager *arcmuxmesh.Manager) error {
 			}
 			d.clearPeerSubscription(principal.PeerID)
 			return meshSubscriptionResponse{Topics: []string{}}, nil
+		},
+		meshMethodHandoffsPrepare: func(ctx context.Context, principal arcmuxmesh.Principal, raw json.RawMessage) (any, error) {
+			var request meshHandoffPrepareRequest
+			if err := decodeMeshParams(raw, &request); err != nil {
+				return nil, meshInvalidRequest(errors.New("invalid handoff prepare request"))
+			}
+			app, err := d.handoffApplication()
+			if err != nil {
+				return nil, err
+			}
+			return app.prepare(ctx, principal, d.meshDeviceID(), request)
+		},
+		meshMethodHandoffsStatus: func(ctx context.Context, principal arcmuxmesh.Principal, raw json.RawMessage) (any, error) {
+			var request meshHandoffStatusRequest
+			if err := decodeMeshParams(raw, &request); err != nil {
+				return nil, meshInvalidRequest(errors.New("invalid handoff status request"))
+			}
+			app, err := d.handoffApplication()
+			if err != nil {
+				return nil, err
+			}
+			return app.status(ctx, principal, request)
 		},
 	}
 	for _, spec := range meshMethodSpecs {

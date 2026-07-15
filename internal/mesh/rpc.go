@@ -16,10 +16,13 @@ const (
 	CapabilitySessionsReadV1  = "sessions.read.v1"
 	CapabilityArtifactsReadV1 = "artifacts.read.v1"
 	CapabilityEventsV1        = "events.v1"
+	CapabilityHandoffsV1      = "handoffs.v1"
 
-	ScopeSessionsRead  = "sessions.read"
-	ScopeArtifactsRead = "artifacts.read"
-	ScopeEventsRead    = "events.read"
+	ScopeSessionsRead    = "sessions.read"
+	ScopeArtifactsRead   = "artifacts.read"
+	ScopeEventsRead      = "events.read"
+	ScopeHandoffsPrepare = "handoffs.prepare"
+	ScopeHandoffsLaunch  = "handoffs.launch"
 
 	MaxApplicationPayload = 48 << 10
 	MaxPendingCalls       = 128
@@ -34,6 +37,7 @@ var (
 	defaultCapabilities = []string{
 		CapabilityArtifactsReadV1,
 		CapabilityEventsV1,
+		CapabilityHandoffsV1,
 		CapabilityRPCV1,
 		CapabilitySessionsReadV1,
 	}
