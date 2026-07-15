@@ -128,7 +128,7 @@ Usage:
   arcmux mesh ping <peer>                                 Check a connected peer
   arcmux mesh serve <peer> --url <url> [--output file]    Create a one-time pairing invite
   arcmux mesh join <invite-file|->                        Join from a 0600 file or stdin
-  arcmux mesh grant <peer> [scopes...]                    Allow explicit read-only application access
+  arcmux mesh grant <peer> [scopes...]                    Grant explicit application scopes (default: safe reads)
   arcmux mesh revoke <peer>                               Return a peer to transport-only access
   arcmux mesh sessions <peer> [--profile scope]           Synchronize and list safe remote sessions
   arcmux mesh session <peer> <scope> <session-id>         Show one safe remote session projection
