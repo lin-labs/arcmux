@@ -30,6 +30,7 @@ import (
 //
 //	--goal <text>          the latest gauged "Your ask:" (the current sub-task)
 //	--overall-goal <text>  the whole-conversation objective (summarizer-refreshed)
+//	--overall-goal-provenance <source> field-level provenance for that exact update
 //	--last-message <text>  the raw, verbatim last user turn (3-line truncated)
 //	--vault-link <path>    where the conversation is saved in the vault
 //	--verification <text>  optional, current concrete success check
@@ -78,6 +79,8 @@ func cmdHook(args []string) error {
 			contract.Goal, err = next()
 		case "--overall-goal":
 			contract.OverallGoal, err = next()
+		case "--overall-goal-provenance":
+			contract.OverallGoalProvenance, err = next()
 		case "--last-message":
 			contract.LastUserMessage, err = next()
 		case "--vault-link":
@@ -103,6 +106,9 @@ func cmdHook(args []string) error {
 	hasContract := contract.Goal != "" || contract.OverallGoal != "" ||
 		contract.LastUserMessage != "" || contract.VaultLink != "" ||
 		contract.SuccessVerification != "" || contract.Path != ""
+	if contract.OverallGoalProvenance != "" && contract.OverallGoal == "" {
+		return fmt.Errorf("arcmux hook: --overall-goal-provenance requires --overall-goal")
+	}
 	if event == "" && !hasContract {
 		return fmt.Errorf("arcmux hook: --event is required (one of %v)", hooks.CanonicalEvents)
 	}

@@ -87,7 +87,7 @@ func TestMeshApplicationSessionsArtifactsAndExplicitEvents(t *testing.T) {
 	if remoteSummary.Name != local.Sessions[0].Name || remoteSummary.State != local.Sessions[0].State || remoteSummary.LaunchCWD != "~/Projects/arcmux" {
 		t.Fatalf("remote semantic summary = %#v, local = %#v", remoteSummary, local.Sessions[0])
 	}
-	if remoteSummary.Work != nil || strings.Contains(string(projections[0].Metadata), "flurple-zebra-7391") {
+	if remoteSummary.Work != nil || remoteSummary.CurrentWork != nil || strings.Contains(string(projections[0].Metadata), "flurple-zebra-7391") {
 		t.Fatalf("unproven turn-contract text crossed mesh: %s", projections[0].Metadata)
 	}
 	peerState, err := clientStore.GetPeer("server")
@@ -114,6 +114,31 @@ func TestMeshApplicationSessionsArtifactsAndExplicitEvents(t *testing.T) {
 		strings.Contains(liveArtifact.Body.String(), `"url"`) ||
 		strings.Contains(liveArtifact.Body.String(), "Server PR") {
 		t.Fatalf("live artifact HTTP status=%d body=%s", liveArtifact.Code, liveArtifact.Body.String())
+	}
+
+	if err := hooks.ApplyContractOnly(
+		server.cfg.Hooks.SessionStateDir, "s-shared", "codex",
+		hooks.TurnContractUpdate{
+			OverallGoal:           "Render remote surfaces as native Mission Control sessions",
+			OverallGoalProvenance: hooks.OverallGoalSummarizerProvenance,
+		}, time.Now(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	projections, err = client.RemoteSessionsList(ctx, "server")
+	if err != nil || len(projections) != 1 {
+		t.Fatalf("summarized RemoteSessionsList=%#v err=%v", projections, err)
+	}
+	if err := json.Unmarshal(projections[0].Metadata, &remoteSummary); err != nil {
+		t.Fatal(err)
+	}
+	if remoteSummary.CurrentWork == nil ||
+		remoteSummary.CurrentWork.Summary != "Render remote surfaces as native Mission Control sessions" ||
+		remoteSummary.CurrentWork.Provenance != hooks.OverallGoalSummarizerProvenance {
+		t.Fatalf("proven current work did not cross mesh: %s", projections[0].Metadata)
+	}
+	if remoteSummary.Work != nil || strings.Contains(string(projections[0].Metadata), "flurple-zebra-7391") {
+		t.Fatalf("local-only work leaked beside current_work: %s", projections[0].Metadata)
 	}
 
 	server.mu.Lock()
@@ -434,8 +459,15 @@ func TestMeshWireAllowlistRemovesArbitrarySecretsAndTerminalControls(t *testing.
 		StartedAt: now.Add(-time.Hour), LastActivityAt: now.Add(-time.Minute),
 		Freshness: sessionview.Freshness{ObservedAt: now, SourceUpdatedAt: now.Add(-time.Minute)},
 		Work:      &sessionview.WorkSummary{Goal: secret, OverallGoal: secret, Source: secret, UpdatedAt: now},
-		History:   &sessionview.HistoryReference{Basename: secret + ".md", Provenance: secret, UpdatedAt: now},
+		CurrentWork: &sessionview.CurrentWorkSummary{
+			Summary: secret, Provenance: "spoofed.source", UpdatedAt: now,
+		},
+		History: &sessionview.HistoryReference{Basename: secret + ".md", Provenance: secret, UpdatedAt: now},
 	}
+	if _, err := meshAcceptSummary(summary); err == nil {
+		t.Fatal("spoofed current-work provenance crossed session wire allowlist")
+	}
+	summary.CurrentWork = nil
 	accepted, err := meshAcceptSummary(summary)
 	if err != nil {
 		t.Fatal(err)
@@ -485,6 +517,36 @@ func TestMeshWireAllowlistRemovesArbitrarySecretsAndTerminalControls(t *testing.
 	future.StartedAt = now.Add(48 * time.Hour)
 	if _, err := meshAcceptSummary(future); err == nil {
 		t.Fatal("remote future timestamp was accepted")
+	}
+}
+
+func TestMeshWireCarriesOnlyProvenSummarizedCurrentWork(t *testing.T) {
+	now := time.Now().UTC()
+	summary := sessionview.Summary{
+		Locator: sessionview.Locator{Version: sessionview.LocatorVersion, ProfileScope: sessionview.RootProfileScope, SessionID: "s-work"},
+		Agent:   "codex", State: "working", StartedAt: now.Add(-time.Hour), LastActivityAt: now,
+		Freshness: sessionview.Freshness{ObservedAt: now, SourceUpdatedAt: now},
+		CurrentWork: &sessionview.CurrentWorkSummary{
+			Summary:    "  Ship\nremote surfaces password=hunter2  ",
+			Provenance: hooks.OverallGoalSummarizerProvenance,
+			UpdatedAt:  now,
+		},
+	}
+	accepted, err := meshAcceptSummary(summary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accepted.CurrentWork == nil || accepted.CurrentWork.Summary != "Ship remote surfaces password=[REDACTED]" {
+		t.Fatalf("current work=%#v", accepted.CurrentWork)
+	}
+	encoded, err := json.Marshal(accepted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"hunter2", `"work"`, `"history"`, `"last_user_message"`} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("forbidden %q crossed wire: %s", forbidden, encoded)
+		}
 	}
 }
 

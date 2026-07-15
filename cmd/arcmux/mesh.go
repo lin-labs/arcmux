@@ -49,6 +49,8 @@ func cmdMesh(args []string, stdin io.Reader, stdout io.Writer) error {
 		return cmdMeshSessions(args[1:], stdout)
 	case "session":
 		return cmdMeshSession(args[1:], stdout)
+	case "open":
+		return cmdMeshOpen(args[1:], stdout)
 	case "artifacts":
 		return cmdMeshRemoteArtifacts(args[1:], stdout)
 	case "artifact":

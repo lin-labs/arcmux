@@ -216,8 +216,7 @@ func (b SurfaceBinding) Validate() error {
 func (b SurfaceBinding) sameTarget(other SurfaceBinding) bool {
 	return b.BindingID == other.BindingID && b.LocalDeviceID == other.LocalDeviceID &&
 		b.Mux == other.Mux && b.SurfaceID == other.SurfaceID &&
-		b.WorkspaceID == other.WorkspaceID && b.Locator == other.Locator &&
-		b.Source == other.Source
+		b.WorkspaceID == other.WorkspaceID && b.Locator == other.Locator
 }
 
 type ArtifactKind string

@@ -92,6 +92,33 @@ func TestCmdHookUpdatesTurnContract(t *testing.T) {
 	}
 }
 
+func TestCmdHookRecordsFieldLevelOverallGoalProvenance(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("ARCMUX_SESSION_ID", "")
+	t.Setenv("ARCMUX_SESSION_STATE_DIR", "")
+	args := []string{
+		"--session", "s-summary", "--agent", "claude", "--state-dir", dir,
+		"--overall-goal", "ship the native remote surface flow",
+		"--overall-goal-provenance", hooks.OverallGoalSummarizerProvenance,
+	}
+	if err := cmdHook(args); err != nil {
+		t.Fatal(err)
+	}
+	st, err := hooks.ReadSessionState(dir, "s-summary")
+	if err != nil || st == nil || st.TurnContract == nil {
+		t.Fatalf("state=%+v err=%v", st, err)
+	}
+	if st.TurnContract.OverallGoalProvenance != hooks.OverallGoalSummarizerProvenance {
+		t.Fatalf("contract=%+v", st.TurnContract)
+	}
+	if err := cmdHook([]string{
+		"--session", "s-summary", "--state-dir", dir,
+		"--overall-goal-provenance", hooks.OverallGoalSummarizerProvenance,
+	}); err == nil {
+		t.Fatal("provenance without its summarized field was accepted")
+	}
+}
+
 func TestCmdHookRequiresEventAndStateDir(t *testing.T) {
 	t.Setenv("ARCMUX_SESSION_ID", "")
 	t.Setenv("ARCMUX_SESSION_STATE_DIR", "")

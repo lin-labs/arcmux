@@ -129,6 +129,13 @@ func TestInstaller_EnsureGenericHook_WithoutSession(t *testing.T) {
 	}
 }
 
+func TestGenericHookSummarizerStampsFieldLevelProvenance(t *testing.T) {
+	if !strings.Contains(genericHookScript,
+		"--overall-goal-provenance "+OverallGoalSummarizerProvenance) {
+		t.Fatal("generic hook summarizer does not stamp trusted overall-goal provenance")
+	}
+}
+
 // TestGenericHook_DerivesPathFromEnv runs the generated script under /bin/sh
 // and asserts it writes a valid JSON line to the env-derived per-session JSONL
 // — and that with the env unset it no-ops (writes nothing, exits 0).

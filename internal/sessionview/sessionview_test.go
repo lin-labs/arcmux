@@ -115,3 +115,58 @@ func TestProfileScopeAndDeterministicSort(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildCurrentWorkRequiresSummarizerProvenance(t *testing.T) {
+	now := time.Date(2026, 7, 15, 16, 0, 0, 0, time.UTC)
+	snap := session.Snapshot{
+		ID: "s-work", Agent: "codex", State: session.StateWorking,
+		StartedAt: now.Add(-time.Hour), LastActivityAt: now,
+	}
+	raw := &hooks.SessionState{TurnContract: &hooks.TurnContract{
+		OverallGoal: "raw launch prompt", OverallGoalUpdatedAt: now,
+	}}
+	summary, _, err := Build(RootProfileScope, snap, raw, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.CurrentWork != nil {
+		t.Fatalf("unproven overall goal crossed into current work: %#v", summary.CurrentWork)
+	}
+
+	proven := &hooks.SessionState{TurnContract: &hooks.TurnContract{
+		OverallGoal:           "  Ship\nremote surfaces api_key=sk-live123456789  ",
+		OverallGoalProvenance: hooks.OverallGoalSummarizerProvenance,
+		OverallGoalUpdatedAt:  now,
+	}}
+	summary, _, err = Build(RootProfileScope, snap, proven, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.CurrentWork == nil || summary.CurrentWork.Summary != "Ship remote surfaces api_key=[REDACTED]" {
+		t.Fatalf("current work=%#v", summary.CurrentWork)
+	}
+	if summary.CurrentWork.Provenance != hooks.OverallGoalSummarizerProvenance ||
+		!summary.CurrentWork.UpdatedAt.Equal(now) {
+		t.Fatalf("current-work proof=%#v", summary.CurrentWork)
+	}
+}
+
+func TestNormalizeCurrentWorkBoundsAndRejectsSpoofedSource(t *testing.T) {
+	now := time.Now().UTC()
+	if _, err := NormalizeCurrentWork(&CurrentWorkSummary{
+		Summary: "pretend safe", Provenance: "hook.raw_prompt", UpdatedAt: now,
+	}); err == nil {
+		t.Fatal("spoofed provenance accepted")
+	}
+	value, err := NormalizeCurrentWork(&CurrentWorkSummary{
+		Summary:    strings.Repeat("x", 300),
+		Provenance: hooks.OverallGoalSummarizerProvenance,
+		UpdatedAt:  now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len([]rune(value.Summary)) != maxCurrentWorkRunes {
+		t.Fatalf("summary runes=%d", len([]rune(value.Summary)))
+	}
+}

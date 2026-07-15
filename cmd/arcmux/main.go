@@ -134,6 +134,7 @@ Usage:
   arcmux mesh revoke <peer>                               Return a peer to transport-only access
   arcmux mesh sessions <peer> [--profile scope]           Synchronize and list safe remote sessions
   arcmux mesh session <peer> <scope> <session-id>         Show one safe remote session projection
+  arcmux mesh open <peer> <scope> <session-id>            Bind this cmux surface to one cached remote session
   arcmux mesh artifacts <peer> [--kind kind]              Synchronize and list remote artifact references
   arcmux mesh artifact <peer> <kind> <source-id>          Fetch one live remote artifact reference
   arcmux mesh subscribe <peer> [topics...]                Subscribe to typed session/artifact updates

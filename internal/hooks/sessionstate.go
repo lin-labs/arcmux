@@ -18,6 +18,11 @@ const (
 	EventToolEnd      = "tool_end"      // a tool call finished (still in turn)
 	EventTurnEnd      = "turn_end"      // agent finished its turn (now idle)
 	EventNotification = "notification"  // informational, no state transition
+
+	// OverallGoalSummarizerProvenance is the field-level proof stamped only by
+	// the background hook summarizer. A launch prompt, raw user message, or
+	// transcript-derived "Your ask" must never inherit this provenance.
+	OverallGoalSummarizerProvenance = "hook.overall_goal_summarizer.v1"
 )
 
 // CanonicalEvents lists the accepted --event values for `arcmux hook`.
@@ -69,7 +74,9 @@ type TurnContract struct {
 	// OverallGoal is the whole-conversation objective, continuously evolving
 	// (see the type doc). Seeded from the launch prompt, then refreshed by the
 	// background summarizer; may hold a multi-theme checklist.
-	OverallGoal string `json:"overall_goal,omitempty"`
+	OverallGoal           string    `json:"overall_goal,omitempty"`
+	OverallGoalProvenance string    `json:"overall_goal_provenance,omitempty"`
+	OverallGoalUpdatedAt  time.Time `json:"overall_goal_updated_at,omitempty"`
 	// LastUserMessage is the raw, verbatim most-recent user prompt (truncated to
 	// 3 lines) — recorded alongside the gauged goal, never as a substitute.
 	LastUserMessage string `json:"last_user_message,omitempty"`
@@ -88,13 +95,14 @@ type TurnContract struct {
 // Empty fields mean "leave the current value unchanged" so hook callers can
 // refresh one dimension without erasing the others.
 type TurnContractUpdate struct {
-	Goal                string
-	OverallGoal         string
-	LastUserMessage     string
-	VaultLink           string
-	SuccessVerification string
-	Path                string
-	Source              string
+	Goal                  string
+	OverallGoal           string
+	OverallGoalProvenance string
+	LastUserMessage       string
+	VaultLink             string
+	SuccessVerification   string
+	Path                  string
+	Source                string
 }
 
 // SessionStatePath returns the live state file path for a session.
@@ -154,6 +162,8 @@ func InitSessionState(stateDir, sessionID, agent, launchGoal string, now time.Ti
 			}
 			if st.TurnContract.OverallGoal == "" {
 				st.TurnContract.OverallGoal = launchGoal
+				st.TurnContract.OverallGoalProvenance = ""
+				st.TurnContract.OverallGoalUpdatedAt = now
 			}
 		}
 	})
@@ -234,6 +244,7 @@ func ApplyEventWithContract(stateDir, sessionID, agent, event, tool string, cont
 func applyTurnContractUpdate(st *SessionState, update TurnContractUpdate, now time.Time) {
 	goal := compactContractText(update.Goal)
 	overall := compactContractText(update.OverallGoal)
+	overallProvenance := compactContractText(update.OverallGoalProvenance)
 	lastMsg := truncateLines(update.LastUserMessage, 3)
 	vault := compactContractText(update.VaultLink)
 	verification := compactContractText(update.SuccessVerification)
@@ -253,6 +264,10 @@ func applyTurnContractUpdate(st *SessionState, update TurnContractUpdate, now ti
 	// OverallGoal evolves continuously — always take the latest summary.
 	if overall != "" {
 		st.TurnContract.OverallGoal = overall
+		// Provenance is replaced together with the field. An unproven update
+		// deliberately revokes earlier proof instead of inheriting it.
+		st.TurnContract.OverallGoalProvenance = overallProvenance
+		st.TurnContract.OverallGoalUpdatedAt = now
 	}
 	if lastMsg != "" {
 		st.TurnContract.LastUserMessage = lastMsg

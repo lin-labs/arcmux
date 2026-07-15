@@ -635,6 +635,10 @@ func (s *Store) PutSurfaceBinding(binding SurfaceBinding, replace bool) error {
 		}
 		if existing.sameTarget(binding) {
 			binding.CreatedAt = existing.CreatedAt
+			// Source is creation provenance, not target identity. Preserve the
+			// original writer when another owner path idempotently asserts the
+			// same exact binding (for example surface bind followed by mesh open).
+			binding.Source = existing.Source
 		}
 	} else if !errors.Is(err, ErrNotFound) {
 		return err

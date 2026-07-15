@@ -30,6 +30,7 @@ const (
 
 	maxGoalRunes        = 1024
 	maxOverallGoalRunes = 4096
+	maxCurrentWorkRunes = 240
 	maxSourceRunes      = 128
 	maxCWDRunes         = 4096
 )
@@ -122,6 +123,16 @@ type WorkSummary struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+// CurrentWorkSummary is the only work text eligible for the mesh session
+// projection. It is one bounded line derived from the background overall-goal
+// summarizer, with field-level provenance. Raw prompts, transcript-derived
+// asks, history, terminal output, and launch-seeded goals never populate it.
+type CurrentWorkSummary struct {
+	Summary    string    `json:"summary"`
+	Provenance string    `json:"provenance"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
 // HistoryReference names a shared history artifact without exposing its local
 // absolute path. The artifact layer may later resolve the basename under an
 // authorized store.
@@ -135,21 +146,22 @@ type HistoryReference struct {
 // session launch; it is not a claim about the pane's current directory. A
 // later grant filter may omit it for a particular peer.
 type Summary struct {
-	Locator        Locator           `json:"locator"`
-	Name           string            `json:"name,omitempty"`
-	Agent          string            `json:"agent"`
-	Transport      string            `json:"transport,omitempty"`
-	LaunchCWD      string            `json:"launch_cwd,omitempty"`
-	OwnerID        string            `json:"owner_id,omitempty"`
-	State          string            `json:"state"`
-	Health         string            `json:"health,omitempty"`
-	StartedAt      time.Time         `json:"started_at"`
-	LastActivityAt time.Time         `json:"last_activity_at"`
-	IdleSince      *time.Time        `json:"idle_since,omitempty"`
-	WorkingSince   *time.Time        `json:"working_since,omitempty"`
-	Work           *WorkSummary      `json:"work,omitempty"`
-	History        *HistoryReference `json:"history,omitempty"`
-	Freshness      Freshness         `json:"freshness"`
+	Locator        Locator             `json:"locator"`
+	Name           string              `json:"name,omitempty"`
+	Agent          string              `json:"agent"`
+	Transport      string              `json:"transport,omitempty"`
+	LaunchCWD      string              `json:"launch_cwd,omitempty"`
+	OwnerID        string              `json:"owner_id,omitempty"`
+	State          string              `json:"state"`
+	Health         string              `json:"health,omitempty"`
+	StartedAt      time.Time           `json:"started_at"`
+	LastActivityAt time.Time           `json:"last_activity_at"`
+	IdleSince      *time.Time          `json:"idle_since,omitempty"`
+	WorkingSince   *time.Time          `json:"working_since,omitempty"`
+	CurrentWork    *CurrentWorkSummary `json:"current_work,omitempty"`
+	Work           *WorkSummary        `json:"work,omitempty"`
+	History        *HistoryReference   `json:"history,omitempty"`
+	Freshness      Freshness           `json:"freshness"`
 	// Private is trusted local provenance used to redact this projection
 	// before transport. It is never serialized onto the mesh.
 	Private bool `json:"-"`
@@ -225,6 +237,15 @@ func Build(scope ProfileScope, snap session.Snapshot, hookState *hooks.SessionSt
 		if work.Goal != "" || work.OverallGoal != "" || work.Source != "" || !work.UpdatedAt.IsZero() {
 			summary.Work = work
 		}
+		if tc.OverallGoalProvenance == hooks.OverallGoalSummarizerProvenance {
+			current, err := NormalizeCurrentWork(&CurrentWorkSummary{
+				Summary: tc.OverallGoal, Provenance: tc.OverallGoalProvenance,
+				UpdatedAt: tc.OverallGoalUpdatedAt,
+			})
+			if err == nil {
+				summary.CurrentWork = current
+			}
+		}
 		if basename := safeHistoryBasename(tc.VaultLink); basename != "" {
 			summary.History = &HistoryReference{
 				Basename:   basename,
@@ -241,6 +262,28 @@ func Build(scope ProfileScope, snap session.Snapshot, hookState *hooks.SessionSt
 		LastTurnEndAt:      nonZeroTime(hookState.LastTurnEndAt),
 	}
 	return summary, detail, nil
+}
+
+// NormalizeCurrentWork enforces the additive mesh contract on both producer
+// and receiver: one redacted line, a fixed proof source, a bounded size, and a
+// non-zero field timestamp. A nil input remains nil for old JSON producers.
+func NormalizeCurrentWork(value *CurrentWorkSummary) (*CurrentWorkSummary, error) {
+	if value == nil {
+		return nil, nil
+	}
+	if value.Provenance != hooks.OverallGoalSummarizerProvenance {
+		return nil, fmt.Errorf("unsupported current-work provenance %q", value.Provenance)
+	}
+	if value.UpdatedAt.IsZero() {
+		return nil, fmt.Errorf("current-work updated_at is required")
+	}
+	summary := cleanText(strings.Join(strings.Fields(value.Summary), " "), maxCurrentWorkRunes)
+	if strings.TrimSpace(summary) == "" {
+		return nil, fmt.Errorf("current-work summary is required")
+	}
+	return &CurrentWorkSummary{
+		Summary: summary, Provenance: value.Provenance, UpdatedAt: value.UpdatedAt.UTC(),
+	}, nil
 }
 
 // Sort orders summaries by profile scope and then session ID. A duplicated ID

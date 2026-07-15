@@ -312,7 +312,8 @@ except Exception:
   [ -n "$new" ] || return 0
   # Contract-only write (no --event): refreshes overall_goal without perturbing
   # the event stream or counters.
-  "$ARCMUX_BIN" hook --overall-goal "$new" >/dev/null 2>&1 || true
+  "$ARCMUX_BIN" hook --overall-goal "$new" \
+    --overall-goal-provenance hook.overall_goal_summarizer.v1 >/dev/null 2>&1 || true
 }
 if [ "$CANON" = "turn_end" ]; then
   ( arcmux_refresh_overall & ) >/dev/null 2>&1

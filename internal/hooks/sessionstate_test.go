@@ -22,6 +22,9 @@ func TestTurnContractRecording(t *testing.T) {
 	if st.TurnContract == nil || st.TurnContract.OverallGoal != "build the X feature" {
 		t.Fatalf("launch seed missing: %+v", st.TurnContract)
 	}
+	if st.TurnContract.OverallGoalProvenance != "" {
+		t.Fatalf("raw launch prompt gained trusted provenance: %+v", st.TurnContract)
+	}
 
 	// A turn records the gauged goal + raw last message (3-line truncated).
 	rec := TurnContractUpdate{
@@ -45,12 +48,19 @@ func TestTurnContractRecording(t *testing.T) {
 	// The background summarizer refreshes overall_goal WITHOUT moving counters.
 	beforeEvents := st.EventsSeen
 	beforeTurns := st.TurnCount
-	if err := ApplyContractOnly(dir, id, "claude", TurnContractUpdate{OverallGoal: "ship X end to end"}, now.Add(2*time.Minute)); err != nil {
+	if err := ApplyContractOnly(dir, id, "claude", TurnContractUpdate{
+		OverallGoal:           "ship X end to end",
+		OverallGoalProvenance: OverallGoalSummarizerProvenance,
+	}, now.Add(2*time.Minute)); err != nil {
 		t.Fatalf("contract-only: %v", err)
 	}
 	st, _ = ReadSessionState(dir, id)
 	if st.TurnContract.OverallGoal != "ship X end to end" {
 		t.Fatalf("overall goal should evolve: %+v", st.TurnContract)
+	}
+	if st.TurnContract.OverallGoalProvenance != OverallGoalSummarizerProvenance ||
+		!st.TurnContract.OverallGoalUpdatedAt.Equal(now.Add(2*time.Minute)) {
+		t.Fatalf("summarized field provenance missing: %+v", st.TurnContract)
 	}
 	if st.EventsSeen != beforeEvents || st.TurnCount != beforeTurns {
 		t.Fatalf("contract-only refresh must not move counters: events %d->%d turns %d->%d",
@@ -59,6 +69,16 @@ func TestTurnContractRecording(t *testing.T) {
 	// Latest goal untouched by the overall refresh.
 	if st.TurnContract.Goal != "add tests for X" {
 		t.Fatalf("latest goal should be untouched: %+v", st.TurnContract)
+	}
+
+	// Any later unproven replacement revokes the old proof instead of
+	// inheriting it onto raw or caller-supplied text.
+	if err := ApplyContractOnly(dir, id, "claude", TurnContractUpdate{OverallGoal: "raw replacement"}, now.Add(3*time.Minute)); err != nil {
+		t.Fatalf("unproven contract-only: %v", err)
+	}
+	st, _ = ReadSessionState(dir, id)
+	if st.TurnContract.OverallGoalProvenance != "" {
+		t.Fatalf("unproven replacement inherited provenance: %+v", st.TurnContract)
 	}
 }
 

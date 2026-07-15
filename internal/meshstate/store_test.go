@@ -1,6 +1,7 @@
 package meshstate
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -209,6 +210,15 @@ func TestSurfaceBindingRequiresExplicitReplacementAndCanUnbind(t *testing.T) {
 	if err := store.PutSurfaceBinding(binding, false); err != nil {
 		t.Fatalf("idempotent put: %v", err)
 	}
+	assertedByOpen := binding
+	assertedByOpen.Source = "mesh-open"
+	if err := store.PutSurfaceBinding(assertedByOpen, false); err != nil {
+		t.Fatalf("idempotent cross-producer put: %v", err)
+	}
+	preserved, err := store.GetSurfaceBinding(testSurfaceA)
+	if err != nil || preserved.Source != "mission-control" {
+		t.Fatalf("creation provenance changed on idempotent assertion: binding=%+v err=%v", preserved, err)
+	}
 	replacement := binding
 	replacement.BindingID = "binding-b"
 	replacement.Locator = testLocator("s-b")
@@ -301,6 +311,17 @@ func TestRestartPersistenceAndPrivatePermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 	commitInventory(t, store, 1, "s-a")
+	snapshot, err := store.BeginSnapshot("devbox", RootProfileScope, "boot-1", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentWorkMetadata := json.RawMessage(`{"name":"s-a","state":"working","current_work":{"summary":"Ship native remote surfaces","provenance":"hook.overall_goal_summarizer.v1","updated_at":"2026-07-15T16:00:00Z"}}`)
+	if err := snapshot.Upsert(testLocator("s-a"), currentWorkMetadata); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshot.Commit(); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.PutSurfaceBinding(SurfaceBinding{
 		BindingID: "binding-a", LocalDeviceID: "ref", Mux: "cmux",
 		SurfaceID: testSurfaceA, WorkspaceID: testWorkspaceA,
@@ -316,8 +337,13 @@ func TestRestartPersistenceAndPrivatePermissions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reopened.GetRemoteSession(testLocator("s-a")); err != nil {
+	projection, err := reopened.GetRemoteSession(testLocator("s-a"))
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !bytes.Contains(projection.Metadata, []byte(`"current_work"`)) ||
+		!bytes.Contains(projection.Metadata, []byte(`"Ship native remote surfaces"`)) {
+		t.Fatalf("current-work projection did not survive restart: %s", projection.Metadata)
 	}
 	if _, err := reopened.GetSurfaceBinding(testSurfaceA); err != nil {
 		t.Fatal(err)
