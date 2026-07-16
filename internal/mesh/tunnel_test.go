@@ -310,6 +310,64 @@ func TestSSHTunnelOpenSSHEffectiveConfigRetainsLocalForward(t *testing.T) {
 	}
 }
 
+func TestSSHTunnelInspectionUsesProductionPrecedenceForInheritedForwards(t *testing.T) {
+	if _, err := exec.LookPath("ssh"); err != nil {
+		t.Skip("OpenSSH client is not installed")
+	}
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "ssh-config")
+	configText := `Host inherited-local
+  LocalForward 127.0.0.1:19001 127.0.0.1:9001
+Host inherited-remote
+  RemoteForward 127.0.0.1:19002 127.0.0.1:9002
+Host inherited-dynamic
+  DynamicForward 127.0.0.1:19003
+Host clear-then-local
+  ClearAllForwardings yes
+  LocalForward 127.0.0.1:19004 127.0.0.1:9004
+`
+	if err := os.WriteFile(configPath, []byte(configText), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		target       string
+		forwardField string
+	}{
+		{target: "inherited-local", forwardField: "localforward"},
+		{target: "inherited-remote", forwardField: "remoteforward"},
+		{target: "inherited-dynamic", forwardField: "dynamicforward"},
+		{target: "clear-then-local", forwardField: "localforward"},
+	} {
+		t.Run(tc.target, func(t *testing.T) {
+			args := []string{"-G", "-F", configPath}
+			args = append(args, sshTunnelBaseArgs()...)
+			args = append(args, "--", tc.target)
+			output, err := exec.Command("ssh", args...).CombinedOutput()
+			if err != nil {
+				t.Fatalf("ssh -G: %v: %s", err, output)
+			}
+			if !effectiveConfigHasForward(output) {
+				t.Fatalf("production-equivalent inspection missed %s:\n%s", tc.forwardField, output)
+			}
+			foundKind := false
+			for _, line := range strings.Split(strings.ToLower(string(output)), "\n") {
+				fields := strings.Fields(line)
+				if len(fields) > 0 && fields[0] == tc.forwardField {
+					foundKind = true
+					break
+				}
+			}
+			if !foundKind {
+				t.Fatalf("OpenSSH did not expose expected %s:\n%s", tc.forwardField, output)
+			}
+			if tc.target == "clear-then-local" && !strings.Contains(strings.ToLower(string(output)), "clearallforwardings no") {
+				t.Fatalf("production ClearAllForwardings=no did not override alias yes:\n%s", output)
+			}
+		})
+	}
+}
+
 func TestSSHTunnelRejectsInheritedForwardsBeforeStartingTransport(t *testing.T) {
 	dir := t.TempDir()
 	sshPath := filepath.Join(dir, "ssh")

@@ -76,7 +76,7 @@ func rejectInheritedSSHForwards(ctx context.Context, peer Peer) error {
 	// Inspect the user's real alias because it may carry required HostName,
 	// ProxyJump, or IdentityFile semantics. Never surface the effective config:
 	// it can contain private paths and network topology.
-	cmd := exec.CommandContext(inspectCtx, "ssh", "-G", "--", peer.SSHTunnel.Target)
+	cmd := exec.CommandContext(inspectCtx, "ssh", sshTunnelInspectionArgs(peer)...)
 	cmd.Stderr = io.Discard
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -102,6 +102,13 @@ func rejectInheritedSSHForwards(ctx context.Context, peer Peer) error {
 		}
 		return fmt.Errorf("inspect ssh target configuration: %w", err)
 	}
+	if effectiveConfigHasForward(output) {
+		return errors.New("ssh target inherits forwarding directives; refusing managed tunnel")
+	}
+	return nil
+}
+
+func effectiveConfigHasForward(output []byte) bool {
 	for _, line := range strings.Split(string(output), "\n") {
 		fields := strings.Fields(strings.ToLower(line))
 		if len(fields) == 0 {
@@ -109,10 +116,10 @@ func rejectInheritedSSHForwards(ctx context.Context, peer Peer) error {
 		}
 		switch fields[0] {
 		case "localforward", "remoteforward", "dynamicforward":
-			return errors.New("ssh target inherits forwarding directives; refusing managed tunnel")
+			return true
 		}
 	}
-	return nil
+	return false
 }
 
 func sshTunnelArgs(peer Peer) ([]string, error) {
@@ -123,6 +130,19 @@ func sshTunnelArgs(peer Peer) ([]string, error) {
 		return nil, err
 	}
 	tunnel := peer.SSHTunnel
+	args := sshTunnelBaseArgs()
+	args = append(args,
+		"-L", tunnel.LocalAddr+":"+tunnel.RemoteAddr,
+		"--", tunnel.Target,
+	)
+	return args, nil
+}
+
+// sshTunnelBaseArgs is the single source of truth for every production SSH
+// option. Effective-config inspection uses this exact set and omits only the
+// arcmux-owned -L, so config precedence cannot differ between inspection and
+// the forwarding child.
+func sshTunnelBaseArgs() []string {
 	return []string{
 		"-N", "-T",
 		"-o", "BatchMode=yes",
@@ -134,9 +154,13 @@ func sshTunnelArgs(peer Peer) ([]string, error) {
 		"-o", "ControlMaster=no",
 		"-o", "PermitLocalCommand=no",
 		"-o", "StrictHostKeyChecking=yes",
-		"-L", tunnel.LocalAddr + ":" + tunnel.RemoteAddr,
-		"--", tunnel.Target,
-	}, nil
+	}
+}
+
+func sshTunnelInspectionArgs(peer Peer) []string {
+	args := []string{"-G"}
+	args = append(args, sshTunnelBaseArgs()...)
+	return append(args, "--", peer.SSHTunnel.Target)
 }
 
 // DialURL selects the arcmux-owned local forward when configured while keeping
