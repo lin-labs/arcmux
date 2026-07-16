@@ -216,11 +216,14 @@ func cmdMeshStatus(args []string, stdout io.Writer) error {
 	var response struct {
 		Enabled bool `json:"enabled"`
 		Peers   []struct {
-			PeerID      string `json:"peer_id"`
-			State       string `json:"state"`
-			Direction   string `json:"direction"`
-			LastError   string `json:"last_error"`
-			RoundTripMS int64  `json:"round_trip_ms"`
+			PeerID      string     `json:"peer_id"`
+			State       string     `json:"state"`
+			Direction   string     `json:"direction"`
+			ProbeState  string     `json:"probe_state"`
+			Attempts    int        `json:"attempts"`
+			NextRetryAt *time.Time `json:"next_retry_at"`
+			LastError   string     `json:"last_error"`
+			RoundTripMS int64      `json:"round_trip_ms"`
 		} `json:"peers"`
 	}
 	if err := json.Unmarshal(b, &response); err != nil {
@@ -236,6 +239,15 @@ func cmdMeshStatus(args []string, stdout io.Writer) error {
 	}
 	for _, p := range response.Peers {
 		fmt.Fprintf(stdout, "%s\t%s\t%s\trtt=%dms", p.PeerID, p.State, p.Direction, p.RoundTripMS)
+		if p.ProbeState != "" {
+			fmt.Fprintf(stdout, "\tprobe=%s", p.ProbeState)
+		}
+		if p.Attempts > 0 {
+			fmt.Fprintf(stdout, "\tattempt=%d", p.Attempts)
+		}
+		if p.NextRetryAt != nil {
+			fmt.Fprintf(stdout, "\tretry=%s", p.NextRetryAt.UTC().Format(time.RFC3339))
+		}
 		if p.LastError != "" {
 			fmt.Fprintf(stdout, "\terror=%s", p.LastError)
 		}

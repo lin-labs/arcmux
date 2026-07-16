@@ -263,7 +263,7 @@ func TestConfigureTailscalePreservesOccupiedPortAndReusesOwnMapping(t *testing.T
 
 func TestMeshStatusTextDecodesSnakeCaseFields(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"enabled":true,"peers":[{"peer_id":"devbox","state":"disconnected","direction":"outbound","last_error":"offline"}]}`))
+		_, _ = w.Write([]byte(`{"enabled":true,"peers":[{"peer_id":"devbox","state":"disconnected","direction":"outbound","probe_state":"unreachable","attempts":3,"next_retry_at":"2026-07-16T16:30:00Z","last_error":"offline"}]}`))
 	}))
 	defer server.Close()
 	dir := t.TempDir()
@@ -276,7 +276,26 @@ func TestMeshStatusTextDecodesSnakeCaseFields(t *testing.T) {
 	if err := cmdMesh([]string{"status", "--config", cfgPath}, strings.NewReader(""), &out); err != nil {
 		t.Fatal(err)
 	}
-	if got := out.String(); !strings.Contains(got, "devbox") || !strings.Contains(got, "error=offline") {
+	if got := out.String(); !strings.Contains(got, "devbox") || !strings.Contains(got, "probe=unreachable") || !strings.Contains(got, "attempt=3") || !strings.Contains(got, "retry=2026-07-16T16:30:00Z") || !strings.Contains(got, "error=offline") {
 		t.Fatalf("text status lost snake_case fields: %q", got)
+	}
+}
+
+func TestMeshStatusTextAcceptsLegacyPeerWithoutProbeFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"enabled":true,"peers":[{"peer_id":"devbox","state":"connected","direction":"outbound","round_trip_ms":17}]}`))
+	}))
+	defer server.Close()
+	cfgPath := filepath.Join(t.TempDir(), "status.toml")
+	httpAddr := strings.TrimPrefix(server.URL, "http://")
+	if err := os.WriteFile(cfgPath, []byte("[daemon]\nhttp_addr = \""+httpAddr+"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := cmdMesh([]string{"status", "--config", cfgPath}, strings.NewReader(""), &out); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); !strings.Contains(got, "devbox\tconnected\toutbound\trtt=17ms") || strings.Contains(got, "probe=") {
+		t.Fatalf("legacy status compatibility changed: %q", got)
 	}
 }
