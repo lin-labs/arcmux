@@ -52,6 +52,8 @@ func run(args []string) error {
 		return cmdSurface(args[1:], os.Stdout)
 	case "handoff":
 		return cmdHandoff(args[1:], os.Stdin, os.Stdout)
+	case "session":
+		return cmdSession(args[1:], os.Stdout)
 	case "hook-env":
 		return cmdHookEnv(args[1:], os.Stdout)
 	case "hook":
@@ -138,6 +140,7 @@ Usage:
   arcmux mesh artifacts <peer> [--kind kind]              Synchronize and list remote artifact references
   arcmux mesh artifact <peer> <kind> <source-id>          Fetch one live remote artifact reference
   arcmux mesh subscribe <peer> [topics...]                Subscribe to typed session/artifact updates
+  arcmux session self --json                               Print this supervised agent's exact local session locator
   arcmux artifact record --kind K --id ID [metadata]      Record a local artifact reference
   arcmux artifact list [--kind kind]                      List local and synchronized artifact references
   arcmux surface bind <device> <scope> <session-id>       Bind this cmux surface to an exact remote session
@@ -145,6 +148,9 @@ Usage:
   arcmux handoff prepare <peer> <scope> <session> ...     Queue and materialize a remote handoff; never launch it
   arcmux handoff launch <handoff-id> [--wait duration]    Explicitly launch one prepared remote continuation
   arcmux handoff receive <marker>                         Read owner-local target instructions for a launch marker
+  arcmux handoff acknowledge <marker> --phase context-loaded  Confirm exact target context is loaded
+  arcmux handoff verify <handoff-id> [--wait duration]    Reverify exact target acknowledgement across the mesh
+  arcmux handoff retire <handoff-id> [options]            Retire only the immutable verified source session
   arcmux handoff list|show|retry                          Inspect or retry the durable handoff outbox
   arcmux pulse --project <slug> [--interval 10s] [--once] Debug-only: pulse one project (the daemon does this for all projects)
   arcmux version                                          Print version

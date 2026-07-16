@@ -152,6 +152,8 @@ message SessionSummary {
   string started_at = 6;
   string session_name = 7;
   string owner_id = 8;        // C1: echo for attribution
+  string profile_scope = 9;   // exact local scope: root or profile:<name>
+  string history_basename = 10; // canonical hook-bound history basename, if known
 }
 
 // --- ListAgents ---

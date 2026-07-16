@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -49,6 +50,9 @@ func TestReadHandoffGoalFromStdinAndNoFollowFile(t *testing.T) {
 	})
 	if err != nil || string(data) != "original safe goal" {
 		t.Fatalf("path swap changed opened content=%q err=%v", data, err)
+	}
+	if _, err := readHandoffGoal("-", strings.NewReader("first action\nsecond action\n")); err == nil || !strings.Contains(err.Error(), "single line") {
+		t.Fatalf("multiline action goal error = %v", err)
 	}
 }
 
@@ -296,6 +300,72 @@ func TestHandoffReceiveReadsOwnerLocalInstructionsByMarker(t *testing.T) {
 	}
 	if out.String() != string(want) {
 		t.Fatalf("receive output = %q, want %q", out.String(), want)
+	}
+	locator := handoff.TargetLocator{DeviceID: manifest.Target.DeviceID, ProfileScope: "root", SessionID: "target-session"}
+	record, err = store.TransitionTarget(manifest.HandoffID, record.Revision, handoff.TargetAccepted, handoff.Transition{TargetLocator: &locator})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ack bytes.Buffer
+	if err := cmdHandoff([]string{"acknowledge", marker, "--phase", "context-loaded"}, strings.NewReader(""), &ack); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ack.String(), `"context_loaded":true`) || !strings.Contains(ack.String(), `"phase":"context_loaded"`) {
+		t.Fatalf("acknowledgement output = %q", ack.String())
+	}
+	var replay bytes.Buffer
+	if err := cmdHandoff([]string{"acknowledge", marker, "--phase", "context-loaded"}, strings.NewReader(""), &replay); err != nil || !strings.Contains(replay.String(), `"replay":true`) {
+		t.Fatalf("acknowledgement replay output=%q err=%v", replay.String(), err)
+	}
+}
+
+func TestHandoffVerifyWaitsForRemoteContextLoadedAndRetireRoutesOptions(t *testing.T) {
+	verifyCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/mesh/handoffs/verify":
+			verifyCalls++
+			loaded := verifyCalls >= 2
+			state := "pending"
+			if loaded {
+				state = "context_loaded"
+			}
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"handoff_id":"handoff-1","state":"accepted","verification_state":%q,"context_loaded":%t}`+"\n", state, loaded)))
+		case "/mesh/handoffs/retire":
+			var request struct {
+				HandoffID      string `json:"handoff_id"`
+				AfterTurnEnd   bool   `json:"after_turn_end"`
+				TimeoutSeconds int64  `json:"timeout_seconds"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			if request.HandoffID != "handoff-1" || request.AfterTurnEnd || request.TimeoutSeconds != 12 {
+				t.Fatalf("retire request=%+v", request)
+			}
+			_, _ = w.Write([]byte(`{"handoff_id":"handoff-1","state":"accepted","context_loaded":true,"retirement_state":"retired"}` + "\n"))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+	}))
+	defer server.Close()
+	cfg, _ := meshDataTestConfig(t, server.URL)
+	var verified bytes.Buffer
+	if err := cmdHandoffVerifyWithAPITimeout([]string{"handoff-1", "--wait", "2s", "--config", cfg}, &verified, 3*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if verifyCalls != 2 || !strings.Contains(verified.String(), `"context_loaded":true`) {
+		t.Fatalf("verify calls=%d output=%q", verifyCalls, verified.String())
+	}
+	var retired bytes.Buffer
+	if err := cmdHandoff([]string{"retire", "handoff-1", "--timeout", "12s", "--config", cfg}, strings.NewReader(""), &retired); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(retired.String(), `"retirement_state":"retired"`) {
+		t.Fatalf("retire output=%q", retired.String())
+	}
+	if err := cmdHandoffVerifyWithAPITimeout([]string{"handoff-1", "--wait", "4s", "--config", cfg}, &bytes.Buffer{}, 3*time.Second); err == nil || !strings.Contains(err.Error(), "between 0 and") {
+		t.Fatalf("oversized wait error=%v", err)
 	}
 }
 

@@ -12,7 +12,11 @@ import (
 const defaultSocket = "arcmux"
 
 const promptSubmitDelay = 200 * time.Millisecond
-const promptSubmitKey = "C-m"
+
+// "Enter" is intentionally used instead of the nominally equivalent C-m.
+// Full-screen agent TUIs (notably Codex) can bind the named key distinctly;
+// C-m has been observed to leave a complete prompt sitting unsubmitted.
+const promptSubmitKey = "Enter"
 
 type PromptDeliveryStatus string
 

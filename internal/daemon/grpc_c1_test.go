@@ -166,6 +166,33 @@ func injectSession(t *testing.T, d *Daemon, name, ownerID string, state session.
 	return sess
 }
 
+func TestListSessionsBindsProfileScopeAndCanonicalHistory(t *testing.T) {
+	srv, d, _ := newC1TestServer(t)
+	d.cfg.Daemon.ProfileName = "codex"
+	d.cfg.Hooks.SessionStateDir = t.TempDir()
+	sess := injectSession(t, d, "self-catalog", "owner", session.StateIdle)
+	now := time.Now().UTC()
+	state := hooks.SessionState{
+		SessionID: sess.ID, Agent: "claude", CreatedAt: now, UpdatedAt: now,
+		TurnContract: &hooks.TurnContract{VaultLink: "/private/histories/2026-07-15-self.md", UpdatedAt: now},
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hooks.SessionStatePath(d.cfg.Hooks.SessionStateDir, sess.ID), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	response, err := srv.ListSessions(context.Background(), &arcmuxv1.ListSessionsRequest{})
+	if err != nil || len(response.Sessions) != 1 {
+		t.Fatalf("list sessions=%+v err=%v", response, err)
+	}
+	got := response.Sessions[0]
+	if got.GetSessionId() != sess.ID || got.GetProfileScope() != "profile:codex" || got.GetHistoryBasename() != "2026-07-15-self.md" || got.GetCwd() != "/tmp" {
+		t.Fatalf("catalog summary=%+v", got)
+	}
+}
+
 // TestSend_QueuedWhenNotReady drives the C1 routing predicate: a non-idle
 // session forces the queue path. Verifies msg_id is returned, the inbox
 // bucket is created, the body lands in the queue, and the audit row

@@ -989,6 +989,10 @@ func TestHandoffRPCParamsAreStrictAndReadOnlyGrantIsDenied(t *testing.T) {
 	if err := decodeMeshParams(json.RawMessage(`{"handoff_id":"handoff-1","manifest_digest":"abc","extra":true}`), &launchRequest); err == nil {
 		t.Fatal("launch accepted unknown field")
 	}
+	var verifyRequest meshHandoffVerifyRequest
+	if err := decodeMeshParams(json.RawMessage(`{"handoff_id":"handoff-1","manifest_digest":"abc","target_locator":{"device_id":"server","profile_scope":"root","session_id":"target"},"extra":true}`), &verifyRequest); err == nil {
+		t.Fatal("verify accepted unknown field")
+	}
 
 	server := newMeshApplicationTestDaemon(t, "server")
 	client := newMeshApplicationTestDaemon(t, "client")
@@ -1002,6 +1006,7 @@ func TestHandoffRPCParamsAreStrictAndReadOnlyGrantIsDenied(t *testing.T) {
 		{meshMethodHandoffsPrepare, meshHandoffPrepareRequest{}},
 		{meshMethodHandoffsStatus, meshHandoffStatusRequest{HandoffID: "handoff-1"}},
 		{meshMethodHandoffsLaunch, meshHandoffLaunchRequest{HandoffID: "handoff-1", ManifestDigest: strings.Repeat("a", 64)}},
+		{meshMethodHandoffsVerify, meshHandoffVerifyRequest{HandoffID: "handoff-1", ManifestDigest: strings.Repeat("a", 64)}},
 	} {
 		if err := clientManager.Call(context.Background(), "server", call.method, call.params, &meshHandoffStatus{}); !isMeshPermissionDenied(err) {
 			t.Fatalf("%s with read-only grants = %v, want permission_denied", call.method, err)
@@ -1153,6 +1158,9 @@ func TestHandoffLaunchGrantDoesNotAuthorizePrepare(t *testing.T) {
 	}, &meshHandoffStatus{}); !isMeshInvalidRequest(err) {
 		t.Fatalf("launch RPC accepted unknown field: %v", err)
 	}
+	if err := clientManager.Call(context.Background(), "server", meshMethodHandoffsVerify, meshHandoffVerifyRequest{}, &meshHandoffVerification{}); !isMeshInvalidRequest(err) {
+		t.Fatalf("launch grant did not reach verify handler: %v", err)
+	}
 }
 
 func TestHandoffLaunchWaitsForHandshakeAndKeepsSensitiveContextOutOfPrompt(t *testing.T) {
@@ -1246,7 +1254,9 @@ func TestHandoffLaunchWaitsForHandshakeAndKeepsSensitiveContextOutOfPrompt(t *te
 		t.Fatal(err)
 	}
 	var private struct {
-		Lineage handoffLaunchLineage `json:"lineage"`
+		Lineage         handoffLaunchLineage `json:"lineage"`
+		RequiredActions []string             `json:"required_actions"`
+		Acknowledge     string               `json:"acknowledge"`
 	}
 	if err := json.Unmarshal(content, &private); err != nil {
 		t.Fatalf("decode private instructions: %v", err)
@@ -1257,6 +1267,10 @@ func TestHandoffLaunchWaitsForHandshakeAndKeepsSensitiveContextOutOfPrompt(t *te
 	}
 	if private.Lineage != wantLineage {
 		t.Fatalf("private lineage = %+v, want %+v", private.Lineage, wantLineage)
+	}
+	acknowledgeCommand := "arcmux handoff acknowledge " + handoff.LaunchMarker(prepared.Manifest.HandoffID, prepared.Digest) + " --phase context-loaded"
+	if private.Acknowledge != acknowledgeCommand || len(private.RequiredActions) != 4 || !strings.Contains(sentPrompt, acknowledgeCommand) {
+		t.Fatalf("context-loaded contract actions=%v acknowledge=%q prompt=%q", private.RequiredActions, private.Acknowledge, sentPrompt)
 	}
 	received, err := handoff.ReceiveLaunchInstructions(app.launchRendezvousRoot, handoff.LaunchMarker(prepared.Manifest.HandoffID, prepared.Digest))
 	if err != nil || string(received) != string(content) {
@@ -1520,6 +1534,46 @@ func TestHandoffStatusExposesLocatorOnlyAfterAccepted(t *testing.T) {
 	}
 	if status := handoffStatusDTO(accepted); status.TargetLocator == nil || *status.TargetLocator != locator {
 		t.Fatalf("accepted status omitted locator: %+v", status)
+	}
+}
+
+func TestHandoffVerifyRequiresAuthenticatedExactAcceptedTargetAndAcknowledgement(t *testing.T) {
+	app, manifest := newHandoffTestApplication(t, true)
+	prepared := prepareTargetHandoffForLaunch(t, app, manifest)
+	launching, err := app.store.TransitionTarget(manifest.HandoffID, prepared.Revision, handoff.TargetLaunching, handoff.Transition{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	locator := handoff.TargetLocator{DeviceID: manifest.Target.DeviceID, ProfileScope: "root", SessionID: "target-session"}
+	launching, err = app.store.RecordTargetLaunchLocator(manifest.HandoffID, launching.Revision, locator, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := app.store.TransitionTarget(manifest.HandoffID, launching.Revision, handoff.TargetAccepted, handoff.Transition{TargetLocator: &locator})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := meshHandoffVerifyRequest{HandoffID: manifest.HandoffID, ManifestDigest: accepted.Digest, TargetLocator: locator}
+	pending, err := app.verify(context.Background(), arcmuxmesh.Principal{PeerID: manifest.Source.DeviceID}, manifest.Target.DeviceID, request)
+	if err != nil || pending.ContextLoaded || pending.VerificationState != "pending" || pending.Acknowledgement != nil {
+		t.Fatalf("pending verification=%+v err=%v", pending, err)
+	}
+	wrong := request
+	wrong.TargetLocator.SessionID = "wrong-target"
+	if _, err := app.verify(context.Background(), arcmuxmesh.Principal{PeerID: manifest.Source.DeviceID}, manifest.Target.DeviceID, wrong); !isMeshInvalidRequest(err) {
+		t.Fatalf("wrong target verification err=%v", err)
+	}
+	if _, err := app.verify(context.Background(), arcmuxmesh.Principal{PeerID: "other-source"}, manifest.Target.DeviceID, request); !isMeshPermissionDenied(err) {
+		t.Fatalf("wrong source verification err=%v", err)
+	}
+	marker := handoff.LaunchMarker(manifest.HandoffID, accepted.Digest)
+	acknowledged, replay, err := app.store.AcknowledgeTarget(marker, handoff.ContextLoadedPhase, time.Now().UTC())
+	if err != nil || replay || acknowledged.ContextLoaded == nil {
+		t.Fatalf("acknowledged=%+v replay=%t err=%v", acknowledged, replay, err)
+	}
+	verified, err := app.verify(context.Background(), arcmuxmesh.Principal{PeerID: manifest.Source.DeviceID}, manifest.Target.DeviceID, request)
+	if err != nil || !verified.ContextLoaded || verified.VerificationState != "context_loaded" || verified.Acknowledgement == nil || verified.Acknowledgement.TargetLocator != locator {
+		t.Fatalf("verified=%+v err=%v", verified, err)
 	}
 }
 

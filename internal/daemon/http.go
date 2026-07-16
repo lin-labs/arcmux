@@ -60,6 +60,8 @@ func NewHTTPServer(d *Daemon, addr string) *HTTPServer {
 	mux.HandleFunc("/mesh/handoffs", h.meshOperatorOnly(h.handleMeshHandoffs))
 	mux.HandleFunc("/mesh/handoffs/retry", h.meshOperatorOnly(h.handleMeshHandoffRetry))
 	mux.HandleFunc("/mesh/handoffs/launch", h.meshOperatorOnly(h.handleMeshHandoffLaunch))
+	mux.HandleFunc("/mesh/handoffs/verify", h.meshOperatorOnly(h.handleMeshHandoffVerify))
+	mux.HandleFunc("/mesh/handoffs/retire", h.meshOperatorOnly(h.handleMeshHandoffRetire))
 	h.srv = &http.Server{Addr: addr, Handler: otelhttp.NewHandler(h.withAuth(mux), "arcmux-http")}
 	return h
 }
@@ -286,10 +288,11 @@ func (h *HTTPServer) handleSessionNew(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tmuxSession := h.daemon.agentTmuxSessionName("", name, "", id)
+	sessionEnvironment, _ := h.daemon.supervisedSessionEnvironment(id, nil)
 	// Launch the agent as the tmux session's own command (exec, so the agent
 	// is the pane's process) instead of send-keys into a shell — when it exits
 	// the pane closes and the session is destroyed, leaving nothing lingering.
-	target, err := h.daemon.setupTmuxPane(ctx, tmuxSession, name, cwd, nil, "exec "+command)
+	target, err := h.daemon.setupTmuxPane(ctx, tmuxSession, name, cwd, sessionEnvironment, "exec "+command)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{
 			Error: fmt.Sprintf("setup tmux pane: %v", err),
@@ -299,6 +302,7 @@ func (h *HTTPServer) handleSessionNew(w http.ResponseWriter, r *http.Request) {
 
 	sess := session.NewSession(id, name, agent, cwd)
 	sess.SetTransport(profile.TransportTmux)
+	sess.SetEnv(sessionEnvironment)
 	sess.TmuxSessionName = tmuxSession
 	sess.TmuxTarget = target
 	sess.SetCurrentCommand(command)

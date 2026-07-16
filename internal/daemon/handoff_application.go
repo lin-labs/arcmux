@@ -40,6 +40,21 @@ type meshHandoffLaunchRequest struct {
 	ManifestDigest string `json:"manifest_digest"`
 }
 
+type meshHandoffVerifyRequest struct {
+	HandoffID      string                `json:"handoff_id"`
+	ManifestDigest string                `json:"manifest_digest"`
+	TargetLocator  handoff.TargetLocator `json:"target_locator"`
+}
+
+type meshHandoffVerification struct {
+	HandoffID         string                          `json:"handoff_id"`
+	ManifestDigest    string                          `json:"manifest_digest"`
+	TargetLocator     handoff.TargetLocator           `json:"target_locator"`
+	VerificationState string                          `json:"verification_state"`
+	ContextLoaded     bool                            `json:"context_loaded"`
+	Acknowledgement   *handoff.ContextAcknowledgement `json:"context_loaded_ack,omitempty"`
+}
+
 // meshHandoffStatus is the complete handoff response allowlist. In particular,
 // it never includes the manifest, goal, history locator, repository locator,
 // target-local path, or remote URL.
@@ -673,8 +688,10 @@ func handoffLaunchCurrentCommand(record handoff.TargetRecord) string {
 func handoffLaunchPrompt(record handoff.TargetRecord) string {
 	marker := handoffLaunchMarker(record)
 	return handoffLaunchSafePreamble(record) + "\n\n" +
-		"Resume this explicitly authorized handoff. Run `arcmux handoff receive " + marker +
-		"` to read the owner-local instructions before acting; the exact continuation checkout is already active."
+		"Resume this explicitly authorized handoff in order: (1) run `arcmux handoff receive " + marker +
+		"`; (2) validate the exact checkout revision and load the pinned history named by those owner-local instructions; " +
+		"(3) only after the context is loaded, run `arcmux handoff acknowledge " + marker + " --phase context-loaded`. " +
+		"If acknowledgement reports that acceptance is not ready, retry that same command; never infer or substitute another session."
 }
 
 type handoffLaunchLineage struct {
@@ -716,14 +733,20 @@ func publishHandoffLaunchInstructions(privateRoot, handoffID, historyPath string
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
 		return "", errors.New("private handoff directory is unavailable")
 	}
+	manifestDigest, err := manifest.Digest()
+	if err != nil {
+		return "", errors.New("immutable handoff manifest is invalid")
+	}
 	data, err := json.Marshal(struct {
-		Lineage      handoffLaunchLineage `json:"lineage"`
-		Goal         string               `json:"goal"`
-		History      string               `json:"history"`
-		Worktree     string               `json:"worktree"`
-		SourceBranch string               `json:"source_branch"`
-		LocalBranch  string               `json:"local_branch"`
-		ExpectedHead string               `json:"expected_head"`
+		Lineage         handoffLaunchLineage `json:"lineage"`
+		Goal            string               `json:"goal"`
+		History         string               `json:"history"`
+		Worktree        string               `json:"worktree"`
+		SourceBranch    string               `json:"source_branch"`
+		LocalBranch     string               `json:"local_branch"`
+		ExpectedHead    string               `json:"expected_head"`
+		RequiredActions []string             `json:"required_actions"`
+		Acknowledge     string               `json:"acknowledge"`
 	}{
 		Lineage: handoffLaunchLineage{
 			HandoffID: manifest.HandoffID, TraceID: manifest.TraceID, ParentHandoffID: manifest.ParentHandoffID,
@@ -731,6 +754,13 @@ func publishHandoffLaunchInstructions(privateRoot, handoffID, historyPath string
 		},
 		Goal: manifest.Goal.Text, History: canonicalHistory, Worktree: prepared.WorktreePath,
 		SourceBranch: prepared.SourceBranch, LocalBranch: prepared.LocalBranch, ExpectedHead: prepared.Head,
+		RequiredActions: []string{
+			"Treat this owner-local file returned by arcmux handoff receive as the only handoff instruction source.",
+			"Confirm the active checkout matches worktree, local_branch, and expected_head.",
+			"Read and load the pinned history file before continuing the goal.",
+			"Only after checkout and history validation, run the acknowledge command; retry it unchanged if acceptance is not ready.",
+		},
+		Acknowledge: "arcmux handoff acknowledge " + handoff.LaunchMarker(manifest.HandoffID, manifestDigest) + " --phase context-loaded",
 	})
 	if err != nil {
 		return "", errors.New("encode private handoff instructions")
@@ -850,6 +880,39 @@ func (a *handoffApplication) status(_ context.Context, principal arcmuxmesh.Prin
 		return meshHandoffStatus{}, &arcmuxmesh.RPCError{Code: arcmuxmesh.ErrorPermissionDenied, Message: "handoff belongs to a different authenticated peer"}
 	}
 	return handoffStatusDTO(record), nil
+}
+
+// verify answers only for the authenticated source and the exact immutable
+// target identity already accepted by both sides. It exposes bounded proof,
+// never target-local instructions or private content.
+func (a *handoffApplication) verify(_ context.Context, principal arcmuxmesh.Principal, localDeviceID string, request meshHandoffVerifyRequest) (meshHandoffVerification, error) {
+	if request.HandoffID == "" || request.ManifestDigest == "" {
+		return meshHandoffVerification{}, meshInvalidRequest(errors.New("handoff_id and manifest_digest are required"))
+	}
+	record, err := a.store.GetTarget(request.HandoffID)
+	if err != nil {
+		return meshHandoffVerification{}, meshInvalidRequest(errors.New("handoff not found"))
+	}
+	if principal.PeerID == "" || record.Manifest.Source.DeviceID != principal.PeerID {
+		return meshHandoffVerification{}, &arcmuxmesh.RPCError{Code: arcmuxmesh.ErrorPermissionDenied, Message: "handoff belongs to a different authenticated peer"}
+	}
+	if localDeviceID == "" || record.Manifest.Target.DeviceID != localDeviceID {
+		return meshHandoffVerification{}, meshInvalidRequest(errors.New("handoff target does not match this device"))
+	}
+	if record.State != handoff.TargetAccepted || record.TargetLocator == nil || request.ManifestDigest != record.Digest || request.TargetLocator != *record.TargetLocator {
+		return meshHandoffVerification{}, meshInvalidRequest(errors.New("handoff verification identity does not match accepted state"))
+	}
+	response := meshHandoffVerification{
+		HandoffID: record.Manifest.HandoffID, ManifestDigest: record.Digest, TargetLocator: *record.TargetLocator,
+		VerificationState: "pending", ContextLoaded: false,
+	}
+	if record.ContextLoaded != nil {
+		response.VerificationState = "context_loaded"
+		response.ContextLoaded = true
+		ack := *record.ContextLoaded
+		response.Acknowledgement = &ack
+	}
+	return response, nil
 }
 
 func (a *handoffApplication) waitForAssets(record handoff.TargetRecord, message string) (meshHandoffStatus, error) {

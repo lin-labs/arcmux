@@ -666,6 +666,13 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 		}
 	}
 
+	// Every supervised agent receives an unambiguous self locator. Caller
+	// values cannot override these daemon-owned identities. This is the local
+	// authority used by `arcmux session self --json`; it avoids inferring a
+	// session from cwd, pane title, or overlapping IDs in profile daemons.
+	sessionEnvironment, profileScope := d.supervisedSessionEnvironment(id, req.Env)
+	req.Env = sessionEnvironment
+
 	sess := session.NewSession(id, name, req.Agent, req.CWD)
 	sess.SetTransport(prof.Transport)
 	sess.SetEnv(req.Env)
@@ -756,9 +763,11 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 			}
 			sessionEnv := map[string]string{
 				"ARCMUX_SESSION_ID":        id,
+				"ARCMUX_PROFILE_SCOPE":     profileScope,
 				"ARCMUX_HOOK_AGENT":        req.Agent,
 				"ARCMUX_HOOK_OUTPUT_DIR":   d.cfg.Hooks.HookOutputDir,
 				"ARCMUX_SESSION_STATE_DIR": d.cfg.Hooks.SessionStateDir,
+				"ARCMUX_DAEMON_SOCKET":     d.cfg.Daemon.Socket,
 				// Lets the hook's vault-link resolver match this session's cwd
 				// against the history logs' frontmatter.
 				"ARCMUX_SESSION_CWD": req.CWD,
@@ -819,6 +828,22 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 	go d.startAgentLifecycle(id, sess, prof, req.Prompt)
 
 	return sess, true, nil
+}
+
+func (d *Daemon) supervisedSessionEnvironment(id string, supplied map[string]string) (map[string]string, string) {
+	environment := make(map[string]string, len(supplied)+4)
+	for key, value := range supplied {
+		environment[key] = value
+	}
+	profileScope := "root"
+	if d.cfg.Daemon.ProfileName != "" {
+		profileScope = "profile:" + d.cfg.Daemon.ProfileName
+	}
+	environment["ARCMUX_SESSION_ID"] = id
+	environment["ARCMUX_PROFILE_SCOPE"] = profileScope
+	environment["ARCMUX_DAEMON_SOCKET"] = d.cfg.Daemon.Socket
+	environment["ARCMUX_SESSION_STATE_DIR"] = d.cfg.Hooks.SessionStateDir
+	return environment, profileScope
 }
 
 // findNonTerminalByNameOwner returns an existing session that matches the

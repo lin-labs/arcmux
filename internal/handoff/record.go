@@ -63,30 +63,79 @@ type TargetLocator struct {
 	SessionID    string `json:"session_id"`
 }
 
+type AcknowledgementPhase string
+
+const ContextLoadedPhase AcknowledgementPhase = "context_loaded"
+
+// ContextAcknowledgement is the bounded proof returned across the mesh. It
+// contains only identities the source already knows and no target-local
+// instructions, paths, history, goal, or captured content.
+type ContextAcknowledgement struct {
+	Phase          AcknowledgementPhase `json:"phase"`
+	ManifestDigest string               `json:"manifest_digest"`
+	TargetLocator  TargetLocator        `json:"target_locator"`
+	AcknowledgedAt time.Time            `json:"acknowledged_at"`
+}
+
+type RetirementMode string
+
+const (
+	RetirementImmediate    RetirementMode = "immediate"
+	RetirementAfterTurnEnd RetirementMode = "after_turn_end"
+)
+
+type RetirementState string
+
+const (
+	RetirementPending RetirementState = "pending"
+	RetirementRetired RetirementState = "retired"
+)
+
+type TurnObservation struct {
+	TurnCount     int        `json:"turn_count"`
+	LastTurnEndAt *time.Time `json:"last_turn_end_at,omitempty"`
+}
+
+// SourceRetirement durably records the exact-source close authorization.
+// Pending after-turn retirement survives daemon restarts without broadening
+// the immutable source locator carried by the manifest.
+type SourceRetirement struct {
+	Mode                  RetirementMode  `json:"mode"`
+	State                 RetirementState `json:"state"`
+	RequestedAt           time.Time       `json:"requested_at"`
+	TimeoutSeconds        int64           `json:"timeout_seconds"`
+	BaselineTurnCount     int             `json:"baseline_turn_count"`
+	BaselineLastTurnEndAt *time.Time      `json:"baseline_last_turn_end_at,omitempty"`
+	RetiredAt             *time.Time      `json:"retired_at,omitempty"`
+}
+
 type SourceRecord struct {
-	Version       int            `json:"version"`
-	Manifest      Manifest       `json:"manifest"`
-	Digest        string         `json:"digest"`
-	State         SourceState    `json:"state"`
-	Attempts      uint32         `json:"attempts"`
-	NextRetry     *time.Time     `json:"next_retry"`
-	Failure       *Failure       `json:"failure"`
-	TargetLocator *TargetLocator `json:"target_locator"`
-	Revision      uint64         `json:"revision"`
-	Updated       time.Time      `json:"updated"`
+	Version       int                     `json:"version"`
+	Manifest      Manifest                `json:"manifest"`
+	Digest        string                  `json:"digest"`
+	State         SourceState             `json:"state"`
+	Attempts      uint32                  `json:"attempts"`
+	NextRetry     *time.Time              `json:"next_retry"`
+	Failure       *Failure                `json:"failure"`
+	TargetLocator *TargetLocator          `json:"target_locator"`
+	ContextLoaded *ContextAcknowledgement `json:"context_loaded_ack,omitempty"`
+	Retirement    *SourceRetirement       `json:"retirement,omitempty"`
+	Revision      uint64                  `json:"revision"`
+	Updated       time.Time               `json:"updated"`
 }
 
 type TargetRecord struct {
-	Version       int            `json:"version"`
-	Manifest      Manifest       `json:"manifest"`
-	Digest        string         `json:"digest"`
-	State         TargetState    `json:"state"`
-	Attempts      uint32         `json:"attempts"`
-	NextRetry     *time.Time     `json:"next_retry"`
-	Failure       *Failure       `json:"failure"`
-	TargetLocator *TargetLocator `json:"target_locator"`
-	Revision      uint64         `json:"revision"`
-	Updated       time.Time      `json:"updated"`
+	Version       int                     `json:"version"`
+	Manifest      Manifest                `json:"manifest"`
+	Digest        string                  `json:"digest"`
+	State         TargetState             `json:"state"`
+	Attempts      uint32                  `json:"attempts"`
+	NextRetry     *time.Time              `json:"next_retry"`
+	Failure       *Failure                `json:"failure"`
+	TargetLocator *TargetLocator          `json:"target_locator"`
+	ContextLoaded *ContextAcknowledgement `json:"context_loaded_ack,omitempty"`
+	Revision      uint64                  `json:"revision"`
+	Updated       time.Time               `json:"updated"`
 }
 
 // Transition carries local state produced by one state-machine step. At may be
@@ -109,9 +158,28 @@ func (r SourceRecord) validate() error {
 	if !validSourceState(r.State) {
 		return fmt.Errorf("invalid source state %q", r.State)
 	}
-	return validateRecordFields(r.Manifest.Target, string(r.State), r.NextRetry, r.Failure, r.TargetLocator, r.Revision, r.Updated,
+	if err := validateRecordFields(r.Manifest.Target, string(r.State), r.NextRetry, r.Failure, r.TargetLocator, r.Revision, r.Updated,
 		r.State == SourceRetryWait || r.State == SourceLaunchRetryWait,
-		r.State == SourceFailed, r.State == SourceAccepted, r.State == SourceAccepted)
+		r.State == SourceFailed, r.State == SourceAccepted, r.State == SourceAccepted); err != nil {
+		return err
+	}
+	if r.ContextLoaded != nil {
+		if r.State != SourceAccepted || r.TargetLocator == nil {
+			return errors.New("context-loaded source proof requires accepted state")
+		}
+		if err := r.ContextLoaded.validate(r.Digest, *r.TargetLocator); err != nil {
+			return err
+		}
+	}
+	if r.Retirement != nil {
+		if r.State != SourceAccepted || r.ContextLoaded == nil {
+			return errors.New("source retirement requires verified accepted state")
+		}
+		if err := r.Retirement.validate(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r TargetRecord) validate() error {
@@ -124,9 +192,63 @@ func (r TargetRecord) validate() error {
 	if !validTargetState(r.State) {
 		return fmt.Errorf("invalid target state %q", r.State)
 	}
-	return validateRecordFields(r.Manifest.Target, string(r.State), r.NextRetry, r.Failure, r.TargetLocator, r.Revision, r.Updated,
+	if err := validateRecordFields(r.Manifest.Target, string(r.State), r.NextRetry, r.Failure, r.TargetLocator, r.Revision, r.Updated,
 		r.State == TargetWaitingAssets || r.State == TargetLaunchWaitingAssets, r.State == TargetRejected,
-		r.State == TargetLaunching || r.State == TargetLaunchWaitingAssets || r.State == TargetAccepted, r.State == TargetAccepted)
+		r.State == TargetLaunching || r.State == TargetLaunchWaitingAssets || r.State == TargetAccepted, r.State == TargetAccepted); err != nil {
+		return err
+	}
+	if r.ContextLoaded != nil {
+		if r.State != TargetAccepted || r.TargetLocator == nil {
+			return errors.New("context-loaded target proof requires accepted state")
+		}
+		if err := r.ContextLoaded.validate(r.Digest, *r.TargetLocator); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a ContextAcknowledgement) validate(digest string, locator TargetLocator) error {
+	if a.Phase != ContextLoadedPhase {
+		return fmt.Errorf("invalid acknowledgement phase %q", a.Phase)
+	}
+	if a.ManifestDigest != digest || a.TargetLocator != locator {
+		return errors.New("acknowledgement identity does not match accepted handoff")
+	}
+	if a.AcknowledgedAt.IsZero() || a.AcknowledgedAt.Location() != time.UTC {
+		return errors.New("acknowledgement timestamp must be non-zero UTC")
+	}
+	return a.TargetLocator.validate()
+}
+
+func (r SourceRetirement) validate() error {
+	if r.Mode != RetirementImmediate && r.Mode != RetirementAfterTurnEnd {
+		return fmt.Errorf("invalid retirement mode %q", r.Mode)
+	}
+	if r.State != RetirementPending && r.State != RetirementRetired {
+		return fmt.Errorf("invalid retirement state %q", r.State)
+	}
+	if r.RequestedAt.IsZero() || r.RequestedAt.Location() != time.UTC {
+		return errors.New("retirement requested_at must be non-zero UTC")
+	}
+	if r.TimeoutSeconds < 1 || r.TimeoutSeconds > 300 {
+		return errors.New("retirement timeout_seconds must be between 1 and 300")
+	}
+	if r.BaselineTurnCount < 0 {
+		return errors.New("retirement baseline turn count must not be negative")
+	}
+	if r.BaselineLastTurnEndAt != nil && (r.BaselineLastTurnEndAt.IsZero() || r.BaselineLastTurnEndAt.Location() != time.UTC) {
+		return errors.New("retirement baseline turn end must be non-zero UTC")
+	}
+	if r.State == RetirementPending && r.RetiredAt != nil {
+		return errors.New("pending retirement must not have retired_at")
+	}
+	if r.State == RetirementRetired {
+		if r.RetiredAt == nil || r.RetiredAt.IsZero() || r.RetiredAt.Location() != time.UTC || r.RetiredAt.Before(r.RequestedAt) {
+			return errors.New("retired retirement requires a valid retired_at")
+		}
+	}
+	return nil
 }
 
 func validateStoredManifest(manifest Manifest, digest string) error {

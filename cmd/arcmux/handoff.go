@@ -36,13 +36,15 @@ type handoffPrepareInput struct {
 }
 
 type handoffSourceStatus struct {
-	HandoffID string              `json:"handoff_id"`
-	State     handoff.SourceState `json:"state"`
+	HandoffID       string              `json:"handoff_id"`
+	State           handoff.SourceState `json:"state"`
+	ContextLoaded   bool                `json:"context_loaded"`
+	RetirementState string              `json:"retirement_state"`
 }
 
 func cmdHandoff(args []string, stdin io.Reader, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: arcmux handoff prepare|launch|receive|list|show|retry")
+		return errors.New("usage: arcmux handoff prepare|launch|receive|acknowledge|verify|retire|list|show|retry")
 	}
 	switch args[0] {
 	case "prepare":
@@ -57,9 +59,148 @@ func cmdHandoff(args []string, stdin io.Reader, stdout io.Writer) error {
 		return cmdHandoffLaunch(args[1:], stdout)
 	case "receive":
 		return cmdHandoffReceive(args[1:], stdout)
+	case "acknowledge":
+		return cmdHandoffAcknowledge(args[1:], stdout)
+	case "verify":
+		return cmdHandoffVerify(args[1:], stdout)
+	case "retire":
+		return cmdHandoffRetire(args[1:], stdout)
 	default:
 		return fmt.Errorf("unknown handoff subcommand %q", args[0])
 	}
+}
+
+func cmdHandoffVerify(args []string, stdout io.Writer) error {
+	return cmdHandoffVerifyWithAPITimeout(args, stdout, handoffPostRequestTimeout)
+}
+
+func cmdHandoffVerifyWithAPITimeout(args []string, stdout io.Writer, apiTimeout time.Duration) error {
+	cfg, rest, err := meshConfig(args)
+	if err != nil {
+		return err
+	}
+	if len(rest) < 1 {
+		return errors.New("usage: arcmux handoff verify <handoff-id> [--wait duration] [--config path]")
+	}
+	id := rest[0]
+	fs := flag.NewFlagSet("handoff verify", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	wait := fs.Duration("wait", 0, "wait for context-loaded acknowledgement")
+	if err := fs.Parse(rest[1:]); err != nil {
+		return err
+	}
+	if id == "" || fs.NArg() != 0 {
+		return errors.New("usage: arcmux handoff verify <handoff-id> [--wait duration] [--config path]")
+	}
+	if *wait < 0 || *wait > apiTimeout {
+		return fmt.Errorf("--wait must be between 0 and %s", apiTimeout)
+	}
+	deadline := time.Now().Add(*wait)
+	for {
+		response, err := meshAPIBodyWithTimeout(cfg, http.MethodPost, "/mesh/handoffs/verify?id="+url.QueryEscape(id), nil, apiTimeout)
+		if err != nil {
+			return err
+		}
+		var status handoffSourceStatus
+		if err := json.Unmarshal(response, &status); err != nil {
+			return fmt.Errorf("decode handoff verification: %w", err)
+		}
+		var envelope struct {
+			VerificationState string `json:"verification_state"`
+		}
+		_ = json.Unmarshal(response, &envelope)
+		if status.ContextLoaded && envelope.VerificationState == "context_loaded" {
+			_, err = stdout.Write(response)
+			return err
+		}
+		if *wait == 0 || envelope.VerificationState == "mismatch" || time.Now().After(deadline) {
+			_, _ = stdout.Write(response)
+			if envelope.VerificationState == "mismatch" {
+				return fmt.Errorf("handoff %s verification identity mismatch", id)
+			}
+			if *wait > 0 {
+				return fmt.Errorf("timed out waiting for handoff %s context-loaded acknowledgement", id)
+			}
+			return fmt.Errorf("handoff %s context is not loaded", id)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+func cmdHandoffRetire(args []string, stdout io.Writer) error {
+	cfg, rest, err := meshConfig(args)
+	if err != nil {
+		return err
+	}
+	if len(rest) < 1 {
+		return errors.New("usage: arcmux handoff retire <handoff-id> [--after-turn-end] [--timeout duration] [--config path]")
+	}
+	id := rest[0]
+	fs := flag.NewFlagSet("handoff retire", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	afterTurnEnd := fs.Bool("after-turn-end", false, "retire after a newer durable source turn end")
+	timeout := fs.Duration("timeout", 10*time.Second, "graceful source close timeout")
+	if err := fs.Parse(rest[1:]); err != nil {
+		return err
+	}
+	if id == "" || fs.NArg() != 0 {
+		return errors.New("usage: arcmux handoff retire <handoff-id> [--after-turn-end] [--timeout duration] [--config path]")
+	}
+	if *timeout < time.Second || *timeout > 5*time.Minute || *timeout%time.Second != 0 {
+		return errors.New("--timeout must be whole seconds between 1s and 5m")
+	}
+	body, err := json.Marshal(struct {
+		HandoffID      string `json:"handoff_id"`
+		AfterTurnEnd   bool   `json:"after_turn_end"`
+		TimeoutSeconds int64  `json:"timeout_seconds"`
+	}{HandoffID: id, AfterTurnEnd: *afterTurnEnd, TimeoutSeconds: int64(*timeout / time.Second)})
+	if err != nil {
+		return err
+	}
+	response, err := meshAPIBodyWithTimeout(cfg, http.MethodPost, "/mesh/handoffs/retire", body, handoffPostRequestTimeout)
+	if err != nil {
+		return err
+	}
+	var status handoffSourceStatus
+	if err := json.Unmarshal(response, &status); err != nil {
+		return fmt.Errorf("decode handoff retirement: %w", err)
+	}
+	if _, err := stdout.Write(response); err != nil {
+		return err
+	}
+	if !*afterTurnEnd && status.RetirementState != "retired" {
+		return fmt.Errorf("handoff %s source retirement remains pending", id)
+	}
+	return nil
+}
+
+func cmdHandoffAcknowledge(args []string, stdout io.Writer) error {
+	if len(args) < 1 {
+		return errors.New("usage: arcmux handoff acknowledge <marker> --phase context-loaded")
+	}
+	marker := args[0]
+	fs := flag.NewFlagSet("handoff acknowledge", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	phase := fs.String("phase", "", "acknowledgement phase")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if marker == "" || fs.NArg() != 0 || *phase != "context-loaded" {
+		return errors.New("usage: arcmux handoff acknowledge <marker> --phase context-loaded")
+	}
+	_, replay, err := handoff.AcknowledgeLaunchContext(handoff.DefaultLaunchRendezvousRoot(), marker, handoff.ContextLoadedPhase)
+	if err != nil {
+		if errors.Is(err, handoff.ErrTargetNotAccepted) {
+			return errors.New("handoff target is not accepted yet; validate context and retry acknowledgement")
+		}
+		return errors.New("handoff acknowledgement is unavailable")
+	}
+	return json.NewEncoder(stdout).Encode(struct {
+		State         string `json:"state"`
+		Phase         string `json:"phase"`
+		ContextLoaded bool   `json:"context_loaded"`
+		Replay        bool   `json:"replay"`
+	}{State: "acknowledged", Phase: "context_loaded", ContextLoaded: true, Replay: replay})
 }
 
 func cmdHandoffReceive(args []string, stdout io.Writer) error {
@@ -233,6 +374,9 @@ func readHandoffGoal(path string, stdin io.Reader) (string, error) {
 	goal := strings.TrimSpace(string(data))
 	if goal == "" {
 		return "", errors.New("--goal-file is empty")
+	}
+	if strings.ContainsAny(goal, "\r\n") {
+		return "", errors.New("--goal-file action goal must be a single line")
 	}
 	return goal, nil
 }

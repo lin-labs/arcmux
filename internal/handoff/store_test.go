@@ -246,6 +246,123 @@ func TestTargetTransitionsLaunchToAccepted(t *testing.T) {
 	}
 }
 
+func TestTargetContextLoadedAcknowledgementRequiresExactAcceptedMarker(t *testing.T) {
+	store, _ := openTestStore(t)
+	start := time.Date(2026, 7, 15, 2, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return start }
+	manifest := testManifest()
+	received, _, err := store.ReceiveTarget(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := LaunchMarker(manifest.HandoffID, received.Digest)
+	if _, _, err := store.AcknowledgeTarget(marker, ContextLoadedPhase, start.Add(time.Second)); !errors.Is(err, ErrTargetNotAccepted) {
+		t.Fatalf("ack before acceptance error = %v", err)
+	}
+	if _, _, err := store.AcknowledgeTarget(LaunchMarker("wrong-handoff", received.Digest), ContextLoadedPhase, start.Add(time.Second)); !errors.Is(err, ErrAcknowledgementUnavailable) {
+		t.Fatalf("wrong marker error = %v", err)
+	}
+
+	validating, err := store.TransitionTarget(manifest.HandoffID, received.Revision, TargetValidating, Transition{At: start.Add(time.Second)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := store.TransitionTarget(manifest.HandoffID, validating.Revision, TargetPrepared, Transition{At: start.Add(2 * time.Second)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	locator := testTargetLocator()
+	launching, err := store.TransitionTarget(manifest.HandoffID, prepared.Revision, TargetLaunching, Transition{At: start.Add(3 * time.Second), TargetLocator: &locator})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := store.TransitionTarget(manifest.HandoffID, launching.Revision, TargetAccepted, Transition{At: start.Add(4 * time.Second)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	acknowledged, replay, err := store.AcknowledgeTarget(marker, ContextLoadedPhase, start.Add(5*time.Second))
+	if err != nil || replay || acknowledged.ContextLoaded == nil {
+		t.Fatalf("first acknowledgement record=%+v replay=%t err=%v", acknowledged, replay, err)
+	}
+	if acknowledged.ContextLoaded.ManifestDigest != received.Digest || acknowledged.ContextLoaded.TargetLocator != locator {
+		t.Fatalf("acknowledgement proof = %+v", acknowledged.ContextLoaded)
+	}
+	firstRevision := acknowledged.Revision
+	replayed, replay, err := store.AcknowledgeTarget(marker, ContextLoadedPhase, start.Add(6*time.Second))
+	if err != nil || !replay || replayed.Revision != firstRevision || replayed.ContextLoaded == nil || !replayed.ContextLoaded.AcknowledgedAt.Equal(start.Add(5*time.Second)) {
+		t.Fatalf("duplicate acknowledgement record=%+v replay=%t err=%v", replayed, replay, err)
+	}
+	if accepted.Revision+1 != firstRevision {
+		t.Fatalf("ack revision = %d, want %d", firstRevision, accepted.Revision+1)
+	}
+}
+
+func TestSourceVerificationAndRetirementAreExactIdempotentAndRestartSafe(t *testing.T) {
+	store, root := openTestStore(t)
+	start := time.Date(2026, 7, 15, 3, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return start }
+	manifest := testManifest()
+	queued, _, err := store.QueueSource(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparing, _ := store.TransitionSource(manifest.HandoffID, queued.Revision, SourcePreparingRemote, Transition{At: start.Add(time.Second)})
+	prepared, _ := store.TransitionSource(manifest.HandoffID, preparing.Revision, SourceRemotePrepared, Transition{At: start.Add(2 * time.Second)})
+	launching, _ := store.TransitionSource(manifest.HandoffID, prepared.Revision, SourceLaunchingRemote, Transition{At: start.Add(3 * time.Second)})
+	locator := testTargetLocator()
+	accepted, err := store.TransitionSource(manifest.HandoffID, launching.Revision, SourceAccepted, Transition{At: start.Add(4 * time.Second), TargetLocator: &locator})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RequestSourceRetirement(manifest.HandoffID, accepted.Revision, RetirementAfterTurnEnd, 30*time.Second, TurnObservation{}, start.Add(5*time.Second)); !errors.Is(err, ErrContextNotLoaded) {
+		t.Fatalf("retirement before verification error = %v", err)
+	}
+
+	wrong := ContextAcknowledgement{Phase: ContextLoadedPhase, ManifestDigest: accepted.Digest, TargetLocator: locator, AcknowledgedAt: start.Add(5 * time.Second)}
+	wrong.TargetLocator.SessionID = "wrong-target"
+	if _, _, err := store.RecordSourceContextLoaded(manifest.HandoffID, accepted.Revision, wrong, start.Add(5*time.Second)); !errors.Is(err, ErrManifestConflict) {
+		t.Fatalf("mismatched target proof error = %v", err)
+	}
+	proof := ContextAcknowledgement{Phase: ContextLoadedPhase, ManifestDigest: accepted.Digest, TargetLocator: locator, AcknowledgedAt: start.Add(5 * time.Second)}
+	verified, replay, err := store.RecordSourceContextLoaded(manifest.HandoffID, accepted.Revision, proof, start.Add(6*time.Second))
+	if err != nil || replay || verified.ContextLoaded == nil {
+		t.Fatalf("source verification record=%+v replay=%t err=%v", verified, replay, err)
+	}
+	replayed, replay, err := store.RecordSourceContextLoaded(manifest.HandoffID, verified.Revision, proof, start.Add(7*time.Second))
+	if err != nil || !replay || replayed.Revision != verified.Revision {
+		t.Fatalf("source verification replay record=%+v replay=%t err=%v", replayed, replay, err)
+	}
+
+	baselineEnd := start.Add(4 * time.Second)
+	pending, replay, err := store.RequestSourceRetirement(manifest.HandoffID, verified.Revision, RetirementAfterTurnEnd, 30*time.Second, TurnObservation{
+		TurnCount: 4, LastTurnEndAt: &baselineEnd,
+	}, start.Add(8*time.Second))
+	if err != nil || replay || pending.Retirement == nil || pending.Retirement.State != RetirementPending {
+		t.Fatalf("pending retirement record=%+v replay=%t err=%v", pending, replay, err)
+	}
+	reopened, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := reopened.GetSource(manifest.HandoffID)
+	if err != nil || loaded.Retirement == nil || loaded.Retirement.BaselineTurnCount != 4 || loaded.Retirement.BaselineLastTurnEndAt == nil || !loaded.Retirement.BaselineLastTurnEndAt.Equal(baselineEnd) {
+		t.Fatalf("restart-loaded retirement=%+v err=%v", loaded.Retirement, err)
+	}
+	replayed, replay, err = reopened.RequestSourceRetirement(manifest.HandoffID, loaded.Revision, RetirementAfterTurnEnd, 30*time.Second, TurnObservation{}, start.Add(9*time.Second))
+	if err != nil || !replay || replayed.Revision != loaded.Revision {
+		t.Fatalf("retirement replay record=%+v replay=%t err=%v", replayed, replay, err)
+	}
+	retired, replay, err := reopened.CompleteSourceRetirement(manifest.HandoffID, loaded.Revision, start.Add(10*time.Second))
+	if err != nil || replay || retired.Retirement == nil || retired.Retirement.State != RetirementRetired {
+		t.Fatalf("complete retirement record=%+v replay=%t err=%v", retired, replay, err)
+	}
+	replayed, replay, err = reopened.CompleteSourceRetirement(manifest.HandoffID, retired.Revision, start.Add(11*time.Second))
+	if err != nil || !replay || replayed.Revision != retired.Revision {
+		t.Fatalf("complete replay record=%+v replay=%t err=%v", replayed, replay, err)
+	}
+}
+
 func TestTargetLocatorLifecycleIsStateBound(t *testing.T) {
 	store, _ := openTestStore(t)
 	start := time.Date(2026, 7, 15, 1, 30, 0, 0, time.UTC)
