@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -305,6 +307,42 @@ func TestSSHTunnelOpenSSHEffectiveConfigRetainsLocalForward(t *testing.T) {
 	if !strings.Contains(effective, "clearallforwardings no") ||
 		!strings.Contains(effective, "localforward [127.0.0.1]:18443 [127.0.0.1]:7788") {
 		t.Fatalf("OpenSSH effective config lost managed local forward:\n%s", output)
+	}
+}
+
+func TestSSHTunnelRejectsInheritedForwardsBeforeStartingTransport(t *testing.T) {
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "ssh")
+	transportMarker := filepath.Join(dir, "transport-started")
+	script := `#!/bin/sh
+if [ "$1" = "-G" ]; then
+  printf '%s\n' \
+    'hostname devbox.internal' \
+    'localforward 0.0.0.0:9000 127.0.0.1:9000' \
+    'remoteforward 0.0.0.0:9001 127.0.0.1:9001' \
+    'dynamicforward 0.0.0.0:9002'
+  exit 0
+fi
+printf 'started\n' > "$ARCMUX_TEST_TRANSPORT_MARKER"
+exit 0
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("ARCMUX_TEST_TRANSPORT_MARKER", transportMarker)
+	peer := managedTunnelPeer("devbox", "secret-token", "127.0.0.1:18443")
+
+	process, err := launchSSHTunnel(context.Background(), peer)
+	if process != nil || err == nil {
+		t.Fatalf("inherited forwarding config launched transport: process=%v err=%v", process, err)
+	}
+	if !strings.Contains(err.Error(), "inherits forwarding directives") ||
+		strings.Contains(err.Error(), "0.0.0.0") || strings.Contains(err.Error(), peer.Token) {
+		t.Fatalf("forward rejection was unsafe or unhelpful: %v", err)
+	}
+	if _, statErr := os.Stat(transportMarker); !os.IsNotExist(statErr) {
+		t.Fatalf("forwarding SSH child started despite inherited forwards: %v", statErr)
 	}
 }
 

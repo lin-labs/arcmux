@@ -112,7 +112,7 @@ func TestDaemonRestartRecreatesConfiguredManagedTunnel(t *testing.T) {
 	dir := t.TempDir()
 	sshPath := filepath.Join(dir, "ssh")
 	launchLog := filepath.Join(dir, "ssh-launches")
-	if err := os.WriteFile(sshPath, []byte("#!/bin/sh\nprintf 'launch\\n' >> \"$ARCMUX_TEST_SSH_LOG\"\nexec sleep 60\n"), 0o700); err != nil {
+	if err := os.WriteFile(sshPath, []byte("#!/bin/sh\nif [ \"$1\" = \"-G\" ]; then\n  printf 'hostname devbox.internal\\n'\n  exit 0\nfi\nprintf 'launch\\n' >> \"$ARCMUX_TEST_SSH_LOG\"\nexec sleep 60\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))

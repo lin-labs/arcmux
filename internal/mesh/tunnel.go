@@ -25,6 +25,9 @@ type execTunnelProcess struct {
 	stopOnce sync.Once
 }
 
+const sshConfigInspectionTimeout = 5 * time.Second
+const maxSSHEffectiveConfigBytes = 1 << 20
+
 func (p *execTunnelProcess) Done() <-chan error { return p.done }
 
 func (p *execTunnelProcess) Stop() {
@@ -38,6 +41,9 @@ func (p *execTunnelProcess) Stop() {
 func launchSSHTunnel(ctx context.Context, peer Peer) (managedTunnelProcess, error) {
 	args, err := sshTunnelArgs(peer)
 	if err != nil {
+		return nil, err
+	}
+	if err := rejectInheritedSSHForwards(ctx, peer); err != nil {
 		return nil, err
 	}
 	// No shell, inherited stdin, or captured child output: the registry can
@@ -56,6 +62,57 @@ func launchSSHTunnel(ctx context.Context, peer Peer) (managedTunnelProcess, erro
 		close(process.done)
 	}()
 	return process, nil
+}
+
+func rejectInheritedSSHForwards(ctx context.Context, peer Peer) error {
+	if peer.SSHTunnel == nil {
+		return errors.New("ssh tunnel is not configured")
+	}
+	if err := peer.SSHTunnel.Validate(); err != nil {
+		return err
+	}
+	inspectCtx, cancel := context.WithTimeout(ctx, sshConfigInspectionTimeout)
+	defer cancel()
+	// Inspect the user's real alias because it may carry required HostName,
+	// ProxyJump, or IdentityFile semantics. Never surface the effective config:
+	// it can contain private paths and network topology.
+	cmd := exec.CommandContext(inspectCtx, "ssh", "-G", "--", peer.SSHTunnel.Target)
+	cmd.Stderr = io.Discard
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return errors.New("inspect ssh target configuration: open output")
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("inspect ssh target configuration: %w", err)
+	}
+	output, readErr := io.ReadAll(io.LimitReader(stdout, maxSSHEffectiveConfigBytes+1))
+	if len(output) > maxSSHEffectiveConfigBytes {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return errors.New("inspect ssh target configuration: output exceeds safety limit")
+	}
+	if readErr != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return errors.New("inspect ssh target configuration: read output")
+	}
+	if err := cmd.Wait(); err != nil {
+		if inspectCtx.Err() != nil {
+			return fmt.Errorf("inspect ssh target configuration: %w", inspectCtx.Err())
+		}
+		return fmt.Errorf("inspect ssh target configuration: %w", err)
+	}
+	for _, line := range strings.Split(string(output), "\n") {
+		fields := strings.Fields(strings.ToLower(line))
+		if len(fields) == 0 {
+			continue
+		}
+		switch fields[0] {
+		case "localforward", "remoteforward", "dynamicforward":
+			return errors.New("ssh target inherits forwarding directives; refusing managed tunnel")
+		}
+	}
+	return nil
 }
 
 func sshTunnelArgs(peer Peer) ([]string, error) {

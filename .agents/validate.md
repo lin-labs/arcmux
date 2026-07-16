@@ -55,7 +55,9 @@ make start && sleep 1 && make status
   `go test -race ./internal/mesh ./internal/daemon ./cmd/arcmux -run 'Test(ManagedSSHTunnel|SSHTunnel|ManagerStopWaitsForManagedTunnelReaper|EstablishedConnectionCloseReasonRedacts|DaemonRestartRecreatesConfiguredManagedTunnel|MeshTunnel|SanitizePeerError|UpsertPeerPreservesManagedTransport)' -count=10`.
   It must prove each structured SSH local-forward is independently supervised,
   process death and daemon restart recreate it, unreachable hosts use bounded
-  backoff, and neither status nor logs expose peer credentials. Configure the
+  backoff, inherited SSH alias forwarding directives fail closed before the
+  transport process starts, and neither status nor logs expose peer
+  credentials. Configure the
   durable fallback with `arcmux mesh tunnel <peer> --ssh-target <ssh-alias>
   --local 127.0.0.1:<dedicated-port> --remote 127.0.0.1:7788`; remove it with
   `arcmux mesh tunnel <peer> --remove` once a native tailnet URL is reachable.
