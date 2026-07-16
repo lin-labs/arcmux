@@ -21,7 +21,7 @@ this contract.
 | `~/data/mux/sessions/archived/<session_id>.json` | State docs of ended sessions | daemon | anyone |
 | `~/data/mux/hook-output/arcmux-hooks-<session_id>.jsonl` | Raw per-session hook event audit (append-only JSONL) | generic hook script | daemon watcher, anyone |
 | `~/data/mux/hook-output/profiles/<profile>/arcmux-hooks-<session_id>.jsonl` | Profile-scoped raw event audit | generic hook script | profile daemon watcher, anyone |
-| `/tmp/arcmux/<session_id>.env` | Per-session env handoff (0600, ARCMUX_* allowlist) | daemon | `arcmux hook-env` only — never source raw |
+| `/tmp/arcmux/<base64(profile_scope)>--<session_id>.env` | Exact profile/session env handoff (0600, ARCMUX_* allowlist) | daemon | `arcmux hook-env <scope> <id>` only — never source raw |
 
 Config keys: `[hooks] session_state_dir` (default `~/data/mux/sessions`) and
 `[hooks] hook_output_dir` (default `~/data/mux/hook-output`).

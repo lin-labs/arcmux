@@ -359,6 +359,49 @@ func TestProviderAPIKeyFileRequiresPrivateRegularFile(t *testing.T) {
 	}
 }
 
+func TestProviderAPIKeyFileRequiresAbsolutePath(t *testing.T) {
+	for _, key := range []string{
+		"ARCMUX_GOAL_PROVIDER", "ARCMUX_GOAL_BIN", "OPENAI_API_KEY", "OPENAI_API_KEY_FILE",
+		"XAI_API_KEY", "XAI_API_KEY_FILE",
+	} {
+		t.Setenv(key, "")
+	}
+	t.Setenv("ARCMUX_GOAL_PROVIDER", "openai")
+	t.Setenv("OPENAI_API_KEY_FILE", "relative-openai.key")
+	if _, err := resolveGoalSummaryProducer(config.CurrentWorkConfig{}); !errors.Is(err, errGoalSummaryUnavailable) {
+		t.Fatalf("relative environment key-file error=%v", err)
+	}
+}
+
+func TestProviderOverrideCannotReuseDifferentConfiguredProviderCredential(t *testing.T) {
+	for _, key := range []string{
+		"ARCMUX_GOAL_PROVIDER", "ARCMUX_GOAL_BIN", "OPENAI_API_KEY", "OPENAI_API_KEY_FILE",
+		"XAI_API_KEY", "XAI_API_KEY_FILE",
+	} {
+		t.Setenv(key, "")
+	}
+	dir := t.TempDir()
+	openAIPath := filepath.Join(dir, "openai.key")
+	if err := os.WriteFile(openAIPath, []byte("openai-config-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	settings := config.CurrentWorkConfig{Provider: "openai", APIKeyFile: openAIPath}
+	t.Setenv("ARCMUX_GOAL_PROVIDER", "xai")
+	if _, err := resolveGoalSummaryProducer(settings); !errors.Is(err, errGoalSummaryUnavailable) {
+		t.Fatalf("xAI override reused configured OpenAI credential: %v", err)
+	}
+
+	xAIPath := filepath.Join(dir, "xai.key")
+	if err := os.WriteFile(xAIPath, []byte("xai-env-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XAI_API_KEY_FILE", xAIPath)
+	producer, err := resolveGoalSummaryProducer(settings)
+	if err != nil || producer.kind != goalSummaryProducerXAI || producer.apiKey != "xai-env-secret" {
+		t.Fatalf("provider-specific override kind=%q key-present=%v err=%v", producer.kind, producer.apiKey != "", err)
+	}
+}
+
 type uidFileInfo struct {
 	os.FileInfo
 	uid uint32

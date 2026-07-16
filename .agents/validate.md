@@ -64,7 +64,7 @@ make start && sleep 1 && make status
   The command accepts no arbitrary shell text and both endpoints must remain
   loopback-only.
 - Semantic `current_work` gate: run
-  `go test -race ./internal/daemon ./internal/sessionview ./internal/hooks ./internal/config -run 'Test(DaemonOwnsTrustedOverallGoalWrite|SameCWDSessionsUseExactStateAndPrivateSessionIsNeverSummarized|DuplicateSessionIDsAcrossProfileScopedStateDoNotCrossAttribute|GoalSummarySingleFlightAndGlobalConcurrencyBound|ToollessOpenAIProviderUsesBoundedHTTPSRequest|APIGoalProviderDoesNotRedirectCredential|ExplicitLegacyProducerKindPreservesCompatibilityWithoutBasenameInference|ResolveGoalSummaryProducerUsesOnlyExplicitSafeCapabilities|ProviderAPIKeyFileRequiresPrivateRegularFile|ProviderAPIKeyFileRequiresCurrentUIDOwnership|ResolveGoalSummaryProducerUsesPersistentConfigWithoutServiceEnvironment|RefreshOverallGoalRejectsWrappedEmbeddedAndUnsafeOutput|BoundedGoalReadersRejectOversizedStreamingOutput|MeshSessionListAndGetAgreeForRealHookStateFixture|SummarizedOverallGoalRejectsStaleTurnAndAdvancesFreshness|SummarizedOverallGoalRejectsSameTurnContractRevisionChange|BuildCurrentWorkRequiresSummarizerProvenance|NormalizeCurrentWork|CurrentWorkProviderPersistsWithoutServiceEnvironment|CurrentWorkProviderRejectsUnknownOrRelativeCredentialFile|ProfileManager_CreateRemoveRestart)' -count=5`.
+  `go test -race ./internal/daemon ./internal/sessionview ./internal/hooks ./internal/config ./cmd/arcmux -run 'Test(DaemonOwnsTrustedOverallGoalWrite|SameCWDSessionsUseExactStateAndPrivateSessionIsNeverSummarized|DuplicateSessionIDsAcrossProfileScopedStateDoNotCrossAttribute|CreateSessionDuplicateIDsUseProfileScopedHookRendezvous|GoalSummarySingleFlightAndGlobalConcurrencyBound|ToollessOpenAIProviderUsesBoundedHTTPSRequest|APIGoalProviderDoesNotRedirectCredential|ExplicitLegacyProducerKindPreservesCompatibilityWithoutBasenameInference|ResolveGoalSummaryProducerUsesOnlyExplicitSafeCapabilities|ProviderAPIKeyFileRequiresPrivateRegularFile|ProviderAPIKeyFileRequiresAbsolutePath|ProviderOverrideCannotReuseDifferentConfiguredProviderCredential|ProviderAPIKeyFileRequiresCurrentUIDOwnership|ResolveGoalSummaryProducerUsesPersistentConfigWithoutServiceEnvironment|RefreshOverallGoalRejectsWrappedEmbeddedAndUnsafeOutput|BoundedGoalReadersRejectOversizedStreamingOutput|MeshSessionListAndGetAgreeForRealHookStateFixture|SummarizedOverallGoalRejectsStaleTurnAndAdvancesFreshness|SummarizedOverallGoalRejectsSameTurnContractRevisionChange|BuildCurrentWorkRequiresSummarizerProvenance|NormalizeCurrentWork|CurrentWorkProviderPersistsWithoutServiceEnvironment|CurrentWorkProviderRejectsUnknownOrRelativeCredentialFile|ProfileManager_CreateRemoveRestart|SessionEnvFile_ProfileScopeIsPartOfRendezvousKey|SessionEnvFile_RejectsInvalidProfileScope|WriteSessionEnvFile_RejectsPreexistingSymlink|CmdHookEnv_RequiresSessionID|CmdHookEnv_FailSafeOnMissing)' -count=5`.
   Automatic producer selection uses direct, tool-less OpenAI or xAI HTTPS
   calls; select one with `ARCMUX_GOAL_PROVIDER` and provide its conventional
   API-key environment variable or owner-only key file. Managed services use
@@ -78,7 +78,10 @@ make start && sleep 1 && make status
   user/history text; private sessions are skipped.
   Successful completed-turn refreshes are globally bounded to two concurrent
   calls across the root and every profile daemon, with one call per session;
-  duplicate IDs are isolated by profile-scoped state/output directories.
+  duplicate IDs are isolated by profile-scoped state/output directories and
+  by a profile/session-keyed startup rendezvous. Key-file paths must be
+  absolute, exact `0600` owner files; a provider override cannot reuse another
+  provider's configured credential.
   Successful writes stamp `hook.overall_goal_summarizer.v1`, use a full-revision
   CAS, agree across `sessions.list`/`sessions.get`, and never expose raw
   goal/user/history sentinels or credential-like output.
@@ -233,12 +236,14 @@ Gotchas learned:
   The generic hook must no-op when `ARCMUX_SESSION_ID`/`ARCMUX_HOOK_OUTPUT_DIR`
   are unset (safe to register globally).
 - **/tmp/arcmux env handoff is DATA, never sourced**: env reaches the spawned
-  agent via `/tmp/arcmux/<id>.env` (a data file), loaded by
-  `eval "$(<abs-arcmux> hook-env <id>)"`. The loader must `eval` arcmux's OWN
+  agent via `/tmp/arcmux/<base64(profile_scope)>--<id>.env` (a data file), loaded by
+  `eval "$(<abs-arcmux> hook-env <scope> <id>)"`. The loader must `eval` arcmux's OWN
   re-quoted output, NEVER `source` the raw writable file. Verify in code:
   `LoadSessionEnvExports` does `Lstat` symlink-reject + current-uid ownership +
   `0o077` perm mask (dir 0700 / file 0600) + `ARCMUX_` key allowlist + NUL/
   newline reject, and emits POSIX single-quote-escaped (`'\''`) exports.
+  Writes use `O_NOFOLLOW`, and the profile scope is part of both the file key
+  and loader arguments so duplicate root/profile session IDs cannot collide.
   Required test: a malicious value (`'; touch PWNED; '`) round-trips as a
   literal and the marker is never created.
 - **Loader uses an absolute binary path**: PATH is not guaranteed inside the

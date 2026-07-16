@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -323,9 +324,10 @@ func runOverallGoalModel(ctx context.Context, current, goal string) (string, err
 // basename. No agent CLI (Codex/Claude/Grok) is auto-launched with ambient
 // filesystem, environment, or personal-instruction authority.
 func resolveGoalSummaryProducer(settings config.CurrentWorkConfig) (goalSummaryProducer, error) {
+	configuredKind := strings.ToLower(strings.TrimSpace(settings.Provider))
 	kind := strings.ToLower(strings.TrimSpace(os.Getenv("ARCMUX_GOAL_PROVIDER")))
 	if kind == "" {
-		kind = strings.ToLower(strings.TrimSpace(settings.Provider))
+		kind = configuredKind
 	}
 	legacyBin := strings.TrimSpace(os.Getenv("ARCMUX_GOAL_BIN"))
 	if legacyBin == "" {
@@ -348,7 +350,7 @@ func resolveGoalSummaryProducer(settings config.CurrentWorkConfig) (goalSummaryP
 	}
 	switch goalSummaryProducerKind(kind) {
 	case goalSummaryProducerOpenAI:
-		key := providerAPIKey("OPENAI_API_KEY", "OPENAI_API_KEY_FILE", settings.APIKeyFile)
+		key := providerAPIKey("OPENAI_API_KEY", "OPENAI_API_KEY_FILE", configuredProviderKeyFile(configuredKind, kind, settings.APIKeyFile))
 		if key == "" {
 			return goalSummaryProducer{}, errGoalSummaryUnavailable
 		}
@@ -357,7 +359,7 @@ func resolveGoalSummaryProducer(settings config.CurrentWorkConfig) (goalSummaryP
 			apiKey: key, endpoint: openAIGoalEndpoint,
 		}, nil
 	case goalSummaryProducerXAI:
-		key := providerAPIKey("XAI_API_KEY", "XAI_API_KEY_FILE", settings.APIKeyFile)
+		key := providerAPIKey("XAI_API_KEY", "XAI_API_KEY_FILE", configuredProviderKeyFile(configuredKind, kind, settings.APIKeyFile))
 		if key == "" {
 			return goalSummaryProducer{}, errGoalSummaryUnavailable
 		}
@@ -381,6 +383,18 @@ func resolveGoalSummaryProducer(settings config.CurrentWorkConfig) (goalSummaryP
 	}
 }
 
+// configuredProviderKeyFile binds config.toml's unqualified key-file field to
+// the provider declared alongside it. A runtime provider override may select a
+// different API, but it must then supply that provider's own environment key
+// or key-file; a configured OpenAI credential can never flow to xAI or vice
+// versa.
+func configuredProviderKeyFile(configuredKind, selectedKind, path string) string {
+	if configuredKind != selectedKind {
+		return ""
+	}
+	return path
+}
+
 // providerAPIKey supports either the conventional environment variable or an
 // owner-provisioned key file. The latter keeps the credential out of service
 // definitions and `systemctl show Environment`; unsafe/symlinked/oversized
@@ -394,6 +408,9 @@ func providerAPIKey(envName, fileEnvName, configuredFile string) string {
 		path = strings.TrimSpace(configuredFile)
 	}
 	if path == "" {
+		return ""
+	}
+	if !filepath.IsAbs(path) {
 		return ""
 	}
 	pathInfo, err := os.Lstat(path)

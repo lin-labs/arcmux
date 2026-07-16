@@ -88,6 +88,12 @@ type Daemon struct {
 	killTmuxSessionHook     func(context.Context, string) error
 	killTmuxPaneHook        func(context.Context, string) error
 	tmuxExactPaneExistsHook func(context.Context, string) (bool, error)
+	// setupTmuxPaneHook and sessionIDGenerator let tests exercise the complete
+	// production CreateSession path (including hook rendezvous writes) without
+	// launching a real agent pane, and force duplicate IDs across profile
+	// daemons. Production leaves the hook nil and uses generateSessionID.
+	setupTmuxPaneHook  func(context.Context, string, string, string, map[string]string, string) (string, error)
+	sessionIDGenerator func() string
 
 	// projects is the project registry (slug -> repo_cwd + plan_globs) used to
 	// scope sessions to a project (HTTP /sessions?project=) and to mint babysit
@@ -152,6 +158,7 @@ func New(cfg *config.Config, logger *slog.Logger) *Daemon {
 		goalSummaryAttempts: make(map[string]goalSummaryAttempt),
 		goalSummaryActive:   make(map[string]bool),
 		goalSummarySlots:    make(chan struct{}, goalSummaryGlobalLimit),
+		sessionIDGenerator:  generateSessionID,
 	}
 }
 
@@ -673,6 +680,9 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 	}
 
 	id := generateSessionID()
+	if d.sessionIDGenerator != nil {
+		id = d.sessionIDGenerator()
+	}
 	name := req.Name
 	if name == "" {
 		// Full id suffix, matching the HTTP path: id[2:10] is only the first 8
@@ -782,7 +792,7 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 	// Install hooks (one generic, idempotent script) + write the per-session
 	// env file the agent loads at startup. This MUST happen before the tmux
 	// session is created, because the agent is now launched as that session's
-	// own command and runs `arcmux hook-env <id>` immediately — the env file
+	// own command and runs `arcmux hook-env <scope> <id>` immediately — the env file
 	// has to already exist. The env file lives under /tmp/arcmux with
 	// restrictive perms; the loader reads it via `arcmux hook-env` (validated
 	// + re-quoted), never sourcing it raw.
@@ -822,7 +832,7 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 			if exe, err := os.Executable(); err == nil {
 				sessionEnv["ARCMUX_BIN"] = exe
 			}
-			if _, err := hooks.WriteSessionEnvFile(hooks.SessionEnvDir, id, sessionEnv); err != nil {
+			if _, err := hooks.WriteSessionEnvFile(hooks.SessionEnvDir, profileScope, id, sessionEnv); err != nil {
 				if req.private {
 					d.logger.Warn("private session hook environment write failed (non-fatal)", "session_id", id)
 				} else {
@@ -837,7 +847,7 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 	// when the agent exits, tmux closes the pane and destroys the (single-window)
 	// session, so a dead agent never leaves a lingering tmux session behind. The
 	// health monitor observes the vanished pane and marks the session exited.
-	startCommand := d.agentStartCommand(id, req.Agent, prof.StartCommand)
+	startCommand := d.agentStartCommand(profileScope, id, req.Agent, prof.StartCommand)
 
 	// Create a dedicated tmux session for this agent, launching the agent as
 	// its command. Pass caller-supplied env through so ARCMUX_PROJECT /
@@ -916,7 +926,7 @@ func (d *Daemon) findNonTerminalByNameOwner(name, ownerID string, private bool) 
 // agent. For hook-backed agents (claude, codex, grok) it prefixes a fail-safe
 // env loader:
 //
-//	eval "$('<abs-arcmux>' hook-env '<id>')" ; <StartCommand>
+//	eval "$('<abs-arcmux>' hook-env '<scope>' '<id>')" ; <StartCommand>
 //
 // We use the daemon's own absolute binary path (os.Executable) rather than a
 // bare `arcmux`, because PATH is not guaranteed inside the spawned pane. The
@@ -925,7 +935,7 @@ func (d *Daemon) findNonTerminalByNameOwner(name, ownerID string, private bool) 
 // 0, so the eval is a no-op and the agent still launches with no injected env
 // (the generic hook then safely no-ops). For non-hook-backed agents or when
 // AutoInstall is off, the StartCommand is returned unchanged.
-func (d *Daemon) agentStartCommand(id, agent, startCommand string) string {
+func (d *Daemon) agentStartCommand(profileScope, id, agent, startCommand string) string {
 	prof, ok := d.profiles[agent]
 
 	// Render per-session start args (e.g. grok's private leader socket).
@@ -949,8 +959,8 @@ func (d *Daemon) agentStartCommand(id, agent, startCommand string) string {
 	if err != nil || bin == "" {
 		bin = "arcmux" // fall back to PATH resolution
 	}
-	return fmt.Sprintf(`eval "$(%s hook-env %s)" ; exec %s`,
-		shellSingleQuote(bin), shellSingleQuote(id), startCommand)
+	return fmt.Sprintf(`eval "$(%s hook-env %s %s)" ; exec %s`,
+		shellSingleQuote(bin), shellSingleQuote(profileScope), shellSingleQuote(id), startCommand)
 }
 
 // shellSingleQuote wraps s in single quotes, POSIX-escaping embedded quotes,
@@ -1453,6 +1463,9 @@ func (d *Daemon) relayHealthEvents() {
 }
 
 func (d *Daemon) setupTmuxPane(ctx context.Context, tmuxSession, window, cwd string, env map[string]string, command string) (string, error) {
+	if d.setupTmuxPaneHook != nil {
+		return d.setupTmuxPaneHook(ctx, tmuxSession, window, cwd, env, command)
+	}
 	// Create exactly one tmux session per agent. tmux stores environment at
 	// session scope; creating sibling agents as new windows under a shared
 	// session leaves `show-environment -t <session>` pinned to whichever

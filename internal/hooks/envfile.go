@@ -1,6 +1,7 @@
 package hooks
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,7 +12,7 @@ import (
 )
 
 // SessionEnvDir is the world-shared rendezvous directory where the session
-// creator drops a per-session env file and the tmux loader reads it back
+// creator drops a profile/session-scoped env file and the tmux loader reads it back
 // before launching the agent. It lives under /tmp by design (the agent pane
 // shell and the daemon may be different processes), so every access is
 // permission- and ownership-checked — see the safety notes on each function.
@@ -23,13 +24,24 @@ const SessionEnvDir = "/tmp/arcmux"
 const envKeyAllowPrefix = "ARCMUX_"
 
 var (
-	envKeyRe    = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
-	sessionIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+	envKeyRe      = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
+	sessionIDRe   = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+	profileNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}[a-z0-9]$|^[a-z0-9]$`)
 )
 
-// SessionEnvFilePath returns the env file path for a session under dir.
-func SessionEnvFilePath(dir, sessionID string) string {
-	return filepath.Join(dir, sessionID+".env")
+// SessionEnvFilePath returns the env file path for an exact (profile scope,
+// session ID) locator under dir. Session IDs are unique only inside one
+// profile, so scope is part of the rendezvous key rather than metadata in a
+// session-ID-only file. Base64 is a bijective, path-safe scope encoding.
+func SessionEnvFilePath(dir, profileScope, sessionID string) (string, error) {
+	if err := validateProfileScope(profileScope); err != nil {
+		return "", err
+	}
+	if !sessionIDRe.MatchString(sessionID) {
+		return "", fmt.Errorf("invalid session id %q", sessionID)
+	}
+	scopeKey := base64.RawURLEncoding.EncodeToString([]byte(profileScope))
+	return filepath.Join(dir, scopeKey+"--"+sessionID+".env"), nil
 }
 
 // WriteSessionEnvFile writes a per-session env file containing the allowlisted
@@ -40,9 +52,10 @@ func SessionEnvFilePath(dir, sessionID string) string {
 //
 // This is a DATA file, not a shell script — it is never executed. The loader
 // (`arcmux hook-env`) parses and re-quotes it; see LoadSessionEnvExports.
-func WriteSessionEnvFile(dir, sessionID string, env map[string]string) (string, error) {
-	if !sessionIDRe.MatchString(sessionID) {
-		return "", fmt.Errorf("invalid session id %q", sessionID)
+func WriteSessionEnvFile(dir, profileScope, sessionID string, env map[string]string) (string, error) {
+	path, err := SessionEnvFilePath(dir, profileScope, sessionID)
+	if err != nil {
+		return "", err
 	}
 	if err := ensureOwnedDir(dir, 0o700); err != nil {
 		return "", err
@@ -69,13 +82,21 @@ func WriteSessionEnvFile(dir, sessionID string, env map[string]string) (string, 
 		b.WriteByte('\n')
 	}
 
-	path := SessionEnvFilePath(dir, sessionID)
-	// O_TRUNC so a re-create overwrites; 0600 so only the owner can read/write.
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	// O_TRUNC so a re-create overwrites; O_NOFOLLOW makes a pre-planted
+	// symlink fail closed instead of truncating its target; 0600 so only the
+	// owner can read/write.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return "", fmt.Errorf("open session env file: %w", err)
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return "", fmt.Errorf("session env file is not a regular file")
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); !ok || int(st.Uid) != os.Getuid() {
+		return "", fmt.Errorf("session env file is not owned by the current uid")
+	}
 	// Re-assert mode in case a pre-existing file had looser perms.
 	if err := f.Chmod(0o600); err != nil {
 		return "", fmt.Errorf("chmod session env file: %w", err)
@@ -89,7 +110,7 @@ func WriteSessionEnvFile(dir, sessionID string, env map[string]string) (string, 
 // LoadSessionEnvExports validates the rendezvous dir + the session env file and
 // returns shell `export KEY='VALUE'` lines, with every value single-quote
 // escaped by arcmux itself. The caller is expected to `eval "$(arcmux
-// hook-env <id>)"` — i.e. eval ARCMUX's OWN quoted output, NOT source the raw
+// hook-env <scope> <id>)"` — i.e. eval ARCMUX's OWN quoted output, NOT source the raw
 // file. That is the core safety property: a hostile value round-trips as a
 // literal string and cannot inject shell.
 //
@@ -97,14 +118,14 @@ func WriteSessionEnvFile(dir, sessionID string, env map[string]string) (string, 
 //   - dir and file must be real (non-symlink), owned by the current uid,
 //     and have no group/world permission bits (dir 0700, file 0600).
 //   - every line must be KEY=VALUE with an allowlisted ARCMUX_* key.
-func LoadSessionEnvExports(dir, sessionID string) ([]string, error) {
-	if !sessionIDRe.MatchString(sessionID) {
-		return nil, fmt.Errorf("invalid session id %q", sessionID)
+func LoadSessionEnvExports(dir, profileScope, sessionID string) ([]string, error) {
+	path, err := SessionEnvFilePath(dir, profileScope, sessionID)
+	if err != nil {
+		return nil, err
 	}
 	if err := checkOwnedSecure(dir, true); err != nil {
 		return nil, fmt.Errorf("rendezvous dir %q unsafe: %w", dir, err)
 	}
-	path := SessionEnvFilePath(dir, sessionID)
 	if err := checkOwnedSecure(path, false); err != nil {
 		return nil, fmt.Errorf("session env file %q unsafe: %w", path, err)
 	}
@@ -135,6 +156,17 @@ func LoadSessionEnvExports(dir, sessionID string) ([]string, error) {
 		out = append(out, fmt.Sprintf("export %s=%s", key, shellSingleQuote(val)))
 	}
 	return out, nil
+}
+
+func validateProfileScope(profileScope string) error {
+	if profileScope == "root" {
+		return nil
+	}
+	const prefix = "profile:"
+	if strings.HasPrefix(profileScope, prefix) && profileNameRe.MatchString(strings.TrimPrefix(profileScope, prefix)) {
+		return nil
+	}
+	return fmt.Errorf("invalid profile scope %q", profileScope)
 }
 
 // shellSingleQuote wraps s in single quotes, escaping embedded single quotes
