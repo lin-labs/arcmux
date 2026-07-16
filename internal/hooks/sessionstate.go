@@ -66,10 +66,11 @@ type SessionState struct {
 //   - LastUserMessage: the raw last user turn, verbatim (3-line truncated).
 //   - OverallGoal: the entirety of the conversation, CONTINUOUSLY EVOLVING. It
 //     is seeded from the launch prompt and then re-derived each turn by passing
-//     the kept user turns + the current overall goal to a summarizer (xAI grok);
-//     normally one succinct line, or — when the conversation has clearly shifted
-//     gears into separate themes — a short checklist with earlier goals checked
-//     off. It is NOT frozen.
+//     the kept user turns + the current overall goal to a daemon-owned summarizer
+//     (the configured legacy producer, or the local Codex fallback); normally one
+//     succinct line, or — when the conversation has clearly shifted gears into
+//     separate themes — a short checklist with earlier goals checked off. It is
+//     NOT frozen.
 type TurnContract struct {
 	// Goal is the current gauged goal — the agent's latest "Your ask:". Shifts
 	// each turn while still reflecting the objective.

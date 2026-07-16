@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -269,6 +270,79 @@ func TestMeshApplicationSessionsArtifactsAndExplicitEvents(t *testing.T) {
 	serverManager.Stop(stopCtx)
 	stopCancel()
 	waitMeshPeerFreshness(t, clientStore, "server", meshstate.FreshnessStale)
+}
+
+func TestMeshSessionListAndGetAgreeForRealHookStateFixture(t *testing.T) {
+	server := newMeshApplicationTestDaemon(t, "server")
+	now := time.Now().UTC()
+	managed := session.NewSession("s-hook-fixture", "hook fixture", "codex", t.TempDir())
+	managed.SetState(session.StateIdle)
+	server.mu.Lock()
+	server.sessions[managed.Snapshot().ID] = managed
+	server.mu.Unlock()
+
+	fixture := fmt.Sprintf(`{
+  "session_id": "s-hook-fixture",
+  "agent": "codex",
+  "created_at": %q,
+  "updated_at": %q,
+  "last_event": "turn_end",
+  "working": false,
+  "turn_count": 4,
+  "events_seen": 17,
+  "last_prompt_submit_at": %q,
+  "last_turn_end_at": %q,
+  "turn_contract": {
+    "goal": "RAW-GOAL-SENTINEL-1111",
+    "overall_goal": "Connect Mission Control to exact remote semantic state",
+    "overall_goal_provenance": "hook.overall_goal_summarizer.v1",
+    "overall_goal_updated_at": %q,
+    "last_user_message": "RAW-USER-SENTINEL-2222",
+    "vault_link": "/private/RAW-HISTORY-SENTINEL-3333.md",
+    "source": "Stop",
+    "updated_at": %q
+  }
+}`, now.Add(-time.Hour).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
+		now.Add(-time.Minute).Format(time.RFC3339Nano), now.Add(-30*time.Second).Format(time.RFC3339Nano),
+		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+	if err := os.MkdirAll(server.cfg.Hooks.SessionStateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hooks.SessionStatePath(server.cfg.Hooks.SessionStateDir, managed.ID), []byte(fixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	list := server.localMeshSessions()
+	if len(list.Sessions) != 1 || list.Sessions[0].CurrentWork == nil {
+		t.Fatalf("list current_work=%#v", list.Sessions)
+	}
+	locator, err := sessionview.NewLocator(sessionview.RootProfileScope, managed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, ok := server.SessionCatalog().Get(locator)
+	if !ok {
+		t.Fatal("fixture session missing from get")
+	}
+	detail, err = server.meshSafeDetail(detail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Summary.CurrentWork == nil ||
+		detail.Summary.CurrentWork.Summary != list.Sessions[0].CurrentWork.Summary ||
+		!detail.Summary.CurrentWork.UpdatedAt.Equal(list.Sessions[0].CurrentWork.UpdatedAt) {
+		t.Fatalf("list/get mismatch: list=%#v get=%#v", list.Sessions[0].CurrentWork, detail.Summary.CurrentWork)
+	}
+	listJSON, _ := json.Marshal(list)
+	getJSON, _ := json.Marshal(detail)
+	for _, forbidden := range []string{
+		"RAW-GOAL-SENTINEL-1111", "RAW-USER-SENTINEL-2222", "RAW-HISTORY-SENTINEL-3333",
+		`"work"`, `"history"`, `"last_user_message"`, `"turn_contract"`,
+	} {
+		if strings.Contains(string(listJSON), forbidden) || strings.Contains(string(getJSON), forbidden) {
+			t.Fatalf("forbidden hook field %q crossed list/get: list=%s get=%s", forbidden, listJSON, getJSON)
+		}
+	}
 }
 
 func TestMeshPaginatedInventoriesStayBelowTransportBounds(t *testing.T) {

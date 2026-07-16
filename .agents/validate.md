@@ -63,6 +63,17 @@ make start && sleep 1 && make status
   `arcmux mesh tunnel <peer> --remove` once a native tailnet URL is reachable.
   The command accepts no arbitrary shell text and both endpoints must remain
   loopback-only.
+- Semantic `current_work` gate: run
+  `go test -race ./internal/daemon ./internal/sessionview ./internal/hooks -run 'Test(DaemonOwnsTrustedOverallGoalWrite|RunOverallGoalModelFallsBackToCodex|RunOverallGoalModelPreservesExplicitLegacyProducer|RunOverallGoalModelOmitsWhenNoSupportedProducerExists|RefreshOverallGoalRejectsDirectRawOrUnsafeModelOutput|MeshSessionListAndGetAgreeForRealHookStateFixture|SummarizedOverallGoalRejectsStaleTurnAndAdvancesFreshness|BuildCurrentWorkRequiresSummarizerProvenance|NormalizeCurrentWork)' -count=5`.
+  Automatic producer selection is deterministic: an explicit
+  `ARCMUX_GOAL_BIN` keeps its configured semantics; otherwise installed Grok
+  wins and an authenticated local Codex CLI is the fallback. Codex runs
+  ephemeral, in an isolated `0700` directory, with ignored user config/rules
+  and a read-only sandbox. Missing producers and unsafe outputs omit
+  `current_work` with a credential-free warning. A successful completed-turn
+  refresh must stamp `hook.overall_goal_summarizer.v1`, be change-gated until
+  the next turn, agree across `sessions.list`/`sessions.get`, and never expose
+  raw goal/user/history sentinels or credential-like output.
 - Live tailnet rung: on the stable host run
   `arcmux mesh serve ref --device <host> --url ws://<tailscale-host>:7788/v1/mesh --tailscale-port 7788`
   and pipe the JSON over SSH into
