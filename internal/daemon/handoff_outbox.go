@@ -487,13 +487,14 @@ func turnObservation(detail sessionview.Detail) handoff.TurnObservation {
 
 func sourceAfterTurnRetirementReady(record handoff.SourceRecord, detail sessionview.Detail) bool {
 	retirement := record.Retirement
-	if retirement == nil || retirement.Mode != handoff.RetirementAfterTurnEnd || detail.Summary.State != "idle" || detail.Turn == nil || detail.Turn.LastTurnEndAt == nil {
+	if retirement == nil || retirement.Mode != handoff.RetirementAfterTurnEnd || detail.Turn == nil || detail.Turn.LastTurnEndAt == nil {
 		return false
 	}
 	// prompt_submit increments TurnCount before an agent can request deferred
 	// retirement. The matching turn_end therefore carries the same count. An
-	// exact count also prevents a stale pending request from unexpectedly
-	// retiring the source after some later turn.
+	// exact fresh hook turn_end is authoritative even when the daemon's coarse
+	// state still lags as working. Exact count equality prevents a stale pending
+	// request from unexpectedly retiring the source after some later turn.
 	return detail.Turn.TurnCount == retirement.BaselineTurnCount && detail.Turn.LastTurnEndAt.After(retirement.RequestedAt)
 }
 

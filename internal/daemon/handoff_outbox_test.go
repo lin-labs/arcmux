@@ -378,7 +378,9 @@ func TestSourceHandoffAfterTurnRetirementWaitsForNewDurableTurnEnd(t *testing.T)
 		t.Fatalf("pre-turn-end reconciliation closed=%d err=%v", closed, err)
 	}
 	newEnd := requestedAt.Add(2 * time.Second)
-	fixture.detail.Summary.State = "idle"
+	// Hook turn_end is authoritative even when the daemon's coarse state has
+	// not yet caught up and still reports working.
+	fixture.detail.Summary.State = "working"
 	laterTurn := fixture.detail
 	laterTurn.Turn = &sessionview.TurnActivity{TurnCount: 4, LastTurnEndAt: &newEnd}
 	stored, _ := fixture.store.GetSource(accepted.HandoffID)
