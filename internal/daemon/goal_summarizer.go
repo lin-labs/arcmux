@@ -397,7 +397,7 @@ func providerAPIKey(envName, fileEnvName, configuredFile string) string {
 		return ""
 	}
 	pathInfo, err := os.Lstat(path)
-	if err != nil || !pathInfo.Mode().IsRegular() || pathInfo.Mode().Perm()&0o077 != 0 ||
+	if err != nil || !pathInfo.Mode().IsRegular() || pathInfo.Mode().Perm() != 0o600 ||
 		pathInfo.Size() > 8192 || !fileInfoOwnedByCurrentUID(pathInfo) {
 		return ""
 	}
@@ -407,7 +407,7 @@ func providerAPIKey(envName, fileEnvName, configuredFile string) string {
 	}
 	defer file.Close()
 	openInfo, err := file.Stat()
-	if err != nil || !openInfo.Mode().IsRegular() || openInfo.Mode().Perm()&0o077 != 0 ||
+	if err != nil || !openInfo.Mode().IsRegular() || openInfo.Mode().Perm() != 0o600 ||
 		openInfo.Size() > 8192 || !fileInfoOwnedByCurrentUID(openInfo) || !os.SameFile(pathInfo, openInfo) {
 		return ""
 	}

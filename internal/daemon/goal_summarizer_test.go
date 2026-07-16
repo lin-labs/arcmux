@@ -339,6 +339,12 @@ func TestProviderAPIKeyFileRequiresPrivateRegularFile(t *testing.T) {
 	if _, err := resolveGoalSummaryProducer(config.CurrentWorkConfig{}); !errors.Is(err, errGoalSummaryUnavailable) {
 		t.Fatalf("world-readable key file error=%v", err)
 	}
+	if err := os.Chmod(keyPath, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveGoalSummaryProducer(config.CurrentWorkConfig{}); !errors.Is(err, errGoalSummaryUnavailable) {
+		t.Fatalf("non-0600 key file error=%v", err)
+	}
 
 	if err := os.Chmod(keyPath, 0o600); err != nil {
 		t.Fatal(err)
