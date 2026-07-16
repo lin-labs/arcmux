@@ -13,6 +13,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -43,18 +44,21 @@ type Envelope struct {
 }
 
 type Status struct {
-	PeerID       string     `json:"peer_id"`
-	Direction    string     `json:"direction,omitempty"`
-	State        string     `json:"state"`
-	ConnectedAt  *time.Time `json:"connected_at,omitempty"`
-	LastSeen     *time.Time `json:"last_seen,omitempty"`
-	LastSuccess  *time.Time `json:"last_success,omitempty"`
-	LastError    string     `json:"last_error,omitempty"`
-	NextRetryAt  *time.Time `json:"next_retry_at,omitempty"`
-	Attempts     int        `json:"attempts,omitempty"`
-	Protocol     int        `json:"protocol,omitempty"`
-	RoundTripMS  int64      `json:"round_trip_ms,omitempty"`
-	Capabilities []string   `json:"capabilities,omitempty"`
+	PeerID           string     `json:"peer_id"`
+	Direction        string     `json:"direction,omitempty"`
+	State            string     `json:"state"`
+	ConnectedAt      *time.Time `json:"connected_at,omitempty"`
+	LastSeen         *time.Time `json:"last_seen,omitempty"`
+	LastSuccess      *time.Time `json:"last_success,omitempty"`
+	LastError        string     `json:"last_error,omitempty"`
+	NextRetryAt      *time.Time `json:"next_retry_at,omitempty"`
+	Attempts         int        `json:"attempts,omitempty"`
+	ProbeState       string     `json:"probe_state,omitempty"`
+	LastProbeAt      *time.Time `json:"last_probe_at,omitempty"`
+	LastProbeSuccess *time.Time `json:"last_probe_success,omitempty"`
+	Protocol         int        `json:"protocol,omitempty"`
+	RoundTripMS      int64      `json:"round_trip_ms,omitempty"`
+	Capabilities     []string   `json:"capabilities,omitempty"`
 }
 
 type Manager struct {
@@ -73,6 +77,7 @@ type Manager struct {
 	status  map[string]Status
 	gen     atomic.Uint64
 	started bool
+	probe   func(context.Context, Peer) error
 
 	capabilities []string
 	handlersMu   sync.RWMutex
@@ -109,6 +114,7 @@ func New(cfg config.ParsedMeshConfig, registry *Registry, logger *slog.Logger) *
 	}
 	return &Manager{cfg: cfg, registry: registry, logger: logger,
 		peers: map[string]*peerRuntime{}, status: map[string]Status{},
+		probe:        tcpReachabilityProbe,
 		capabilities: append([]string(nil), defaultCapabilities...),
 		handlers:     map[string]registeredMethod{}, eventSubs: map[uint64]*eventSubscriber{}}
 }
@@ -254,16 +260,44 @@ func (m *Manager) connectLoop(peer Peer) {
 		if m.ctx.Err() != nil {
 			return
 		}
-		m.updateStatus(peer.ID, func(s *Status) { s.State = "connecting"; s.Attempts = attempt + 1; s.NextRetryAt = nil })
-		headers := http.Header{"Authorization": []string{"Bearer " + peer.Token}}
-		ctx, cancel := context.WithTimeout(m.ctx, m.cfg.HandshakeTimeout)
-		conn, _, err := websocket.Dial(ctx, peer.URL, &websocket.DialOptions{HTTPHeader: headers, Subprotocols: []string{subprotocol}})
+		m.updateStatus(peer.ID, func(s *Status) {
+			s.State = "connecting"
+			s.ProbeState = "probing"
+			s.Attempts = attempt + 1
+			s.NextRetryAt = nil
+		})
+		probeAt := time.Now()
+		probeCtx, probeCancel := context.WithTimeout(m.ctx, m.reachabilityProbeTimeout())
+		err := m.probe(probeCtx, peer)
+		probeCancel()
+		probeFailed := err != nil
+		if err != nil {
+			m.updateStatus(peer.ID, func(s *Status) {
+				s.ProbeState = "unreachable"
+				s.LastProbeAt = &probeAt
+			})
+			m.setError(peer.ID, sanitizeError(fmt.Errorf("reachability probe: %w", err)))
+		} else {
+			m.updateStatus(peer.ID, func(s *Status) {
+				s.State = "connecting"
+				s.ProbeState = "reachable"
+				s.LastProbeAt = &probeAt
+				s.LastProbeSuccess = &probeAt
+			})
+		}
+
+		var conn *websocket.Conn
 		var negotiated []string
 		if err == nil {
-			if conn.Subprotocol() != subprotocol {
+			headers := http.Header{"Authorization": []string{"Bearer " + peer.Token}}
+			ctx, cancel := context.WithTimeout(m.ctx, m.cfg.HandshakeTimeout)
+			conn, _, err = websocket.Dial(ctx, peer.URL, &websocket.DialOptions{HTTPHeader: headers, Subprotocols: []string{subprotocol}})
+			if err == nil && conn.Subprotocol() != subprotocol {
 				err = errors.New("mesh subprotocol mismatch")
 			}
-			conn.SetReadLimit(m.cfg.MaxMessageBytes)
+			if conn != nil {
+				conn.SetReadLimit(m.cfg.MaxMessageBytes)
+			}
 			localCapabilities := m.capabilitiesSnapshot()
 			if err == nil {
 				err = writeEnvelope(ctx, conn, Envelope{Version: ProtocolVersion, Type: "hello", DeviceID: m.registry.DeviceID, SentAt: time.Now().UTC().Format(time.RFC3339Nano), Capabilities: localCapabilities})
@@ -277,8 +311,8 @@ func (m *Manager) connectLoop(peer Peer) {
 					negotiated = intersectCapabilities(localCapabilities, welcome.Capabilities)
 				}
 			}
+			cancel()
 		}
-		cancel()
 		if err == nil {
 			connectedAt := time.Now()
 			p, activated := m.activate(peer.ID, "outbound", conn, negotiated)
@@ -306,7 +340,8 @@ func (m *Manager) connectLoop(peer Peer) {
 			m.setError(peer.ID, sanitizeError(err))
 		}
 		attempt++
-		delay := fullJitter(attempt, m.cfg.ReconnectMin, m.cfg.ReconnectMax)
+		retryMin, retryMax := m.retryBounds(probeFailed)
+		delay := fullJitter(attempt, retryMin, retryMax)
 		next := time.Now().Add(delay)
 		m.updateStatus(peer.ID, func(s *Status) { s.State = "disconnected"; s.Attempts = attempt; s.NextRetryAt = &next })
 		t := time.NewTimer(delay)
@@ -317,6 +352,63 @@ func (m *Manager) connectLoop(peer Peer) {
 			return
 		}
 	}
+}
+
+const maxReachabilityProbeTimeout = time.Second
+
+// Failed reachability probes use five seconds as their default ceiling even
+// when the general WebSocket reconnect ceiling is higher, so Wi-Fi/Tailscale
+// restoration is noticed promptly. An explicitly higher reconnect minimum
+// remains the operator's floor. Reachable peers that fail the authenticated
+// WebSocket handshake continue to honor the configured reconnect maximum.
+const maxReachabilityProbeRetry = 5 * time.Second
+
+func (m *Manager) reachabilityProbeTimeout() time.Duration {
+	if m.cfg.HandshakeTimeout < maxReachabilityProbeTimeout {
+		return m.cfg.HandshakeTimeout
+	}
+	return maxReachabilityProbeTimeout
+}
+
+func (m *Manager) retryBounds(probeFailed bool) (time.Duration, time.Duration) {
+	if !probeFailed {
+		return m.cfg.ReconnectMin, m.cfg.ReconnectMax
+	}
+	// min(configured max, max(configured min, five-second probe ceiling))
+	max := maxReachabilityProbeRetry
+	if m.cfg.ReconnectMin > max {
+		max = m.cfg.ReconnectMin
+	}
+	if m.cfg.ReconnectMax < max {
+		max = m.cfg.ReconnectMax
+	}
+	return m.cfg.ReconnectMin, max
+}
+
+func tcpReachabilityProbe(ctx context.Context, peer Peer) error {
+	u, err := url.Parse(peer.URL)
+	if err != nil {
+		return fmt.Errorf("parse peer URL: %w", err)
+	}
+	port := u.Port()
+	switch {
+	case port != "":
+	case u.Scheme == "ws":
+		port = "80"
+	case u.Scheme == "wss":
+		port = "443"
+	default:
+		return fmt.Errorf("unsupported peer URL scheme %q", u.Scheme)
+	}
+	if u.Hostname() == "" {
+		return errors.New("peer URL has no host")
+	}
+	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort(u.Hostname(), port))
+	if err != nil {
+		return err
+	}
+	_ = conn.Close()
+	return nil
 }
 
 func fullJitter(attempt int, min, max time.Duration) time.Duration {
@@ -354,7 +446,13 @@ func (m *Manager) activate(peerID, direction string, conn *websocket.Conn, capab
 	}
 	old := m.peers[peerID]
 	m.peers[peerID] = p
-	m.status[peerID] = Status{PeerID: peerID, Direction: direction, State: "connected", ConnectedAt: &now, LastSeen: &now, LastSuccess: &now, Protocol: ProtocolVersion, Capabilities: append([]string(nil), capabilities...)}
+	prior := m.status[peerID]
+	m.status[peerID] = Status{
+		PeerID: peerID, Direction: direction, State: "connected",
+		ConnectedAt: &now, LastSeen: &now, LastSuccess: &now,
+		Protocol: ProtocolVersion, Capabilities: append([]string(nil), capabilities...),
+		ProbeState: prior.ProbeState, LastProbeAt: prior.LastProbeAt, LastProbeSuccess: prior.LastProbeSuccess,
+	}
 	// Register connection goroutines before releasing the lifecycle lock so
 	// Stop cannot begin Wait while an accepted handshake is still activating.
 	m.wg.Add(3)

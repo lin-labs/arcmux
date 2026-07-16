@@ -51,6 +51,21 @@ func waitState(t *testing.T, manager *Manager, peer, state string) Status {
 	return Status{}
 }
 
+func waitProbeState(t *testing.T, manager *Manager, peer, state string) Status {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, s := range manager.Status() {
+			if s.PeerID == peer && s.ProbeState == state {
+				return s
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("peer %s probe never reached %s; status=%+v", peer, state, manager.Status())
+	return Status{}
+}
+
 func TestRegistryAtomicPermissionsAndHashedAccept(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "mesh.json")
 	token, err := NewToken()
@@ -144,6 +159,51 @@ func TestFullJitterBoundsPreventBusyLoop(t *testing.T) {
 	}
 }
 
+func TestReachabilityProbeTimeoutIsLightweightAndBounded(t *testing.T) {
+	cfg := testConfig("127.0.0.1:0")
+	cfg.HandshakeTimeout = 10 * time.Second
+	manager := New(cfg, &Registry{Version: 1, DeviceID: "ref"}, testLogger())
+	if got := manager.reachabilityProbeTimeout(); got != time.Second {
+		t.Fatalf("long handshake timeout produced probe timeout %v, want 1s", got)
+	}
+	cfg.HandshakeTimeout = 250 * time.Millisecond
+	manager = New(cfg, &Registry{Version: 1, DeviceID: "ref"}, testLogger())
+	if got := manager.reachabilityProbeTimeout(); got != 250*time.Millisecond {
+		t.Fatalf("short handshake timeout produced probe timeout %v", got)
+	}
+}
+
+func TestProbeRetryCapPreservesHandshakeReconnectMaximum(t *testing.T) {
+	cfg := testConfig("127.0.0.1:0")
+	cfg.ReconnectMin = 500 * time.Millisecond
+	cfg.ReconnectMax = 30 * time.Second
+	manager := New(cfg, &Registry{Version: 1, DeviceID: "ref"}, testLogger())
+	probeMin, probeMax := manager.retryBounds(true)
+	if probeMin != 500*time.Millisecond || probeMax != 5*time.Second {
+		t.Fatalf("probe retry bounds = [%v,%v], want [500ms,5s]", probeMin, probeMax)
+	}
+	handshakeMin, handshakeMax := manager.retryBounds(false)
+	if handshakeMin != 500*time.Millisecond || handshakeMax != 30*time.Second {
+		t.Fatalf("handshake retry bounds = [%v,%v], want configured [500ms,30s]", handshakeMin, handshakeMax)
+	}
+
+	cfg.ReconnectMin = 20 * time.Millisecond
+	cfg.ReconnectMax = 50 * time.Millisecond
+	manager = New(cfg, &Registry{Version: 1, DeviceID: "ref"}, testLogger())
+	probeMin, probeMax = manager.retryBounds(true)
+	if probeMin != 20*time.Millisecond || probeMax != 50*time.Millisecond {
+		t.Fatalf("probe retry bounds below default ceiling = [%v,%v], want configured [20ms,50ms]", probeMin, probeMax)
+	}
+
+	cfg.ReconnectMin = 10 * time.Second
+	cfg.ReconnectMax = 30 * time.Second
+	manager = New(cfg, &Registry{Version: 1, DeviceID: "ref"}, testLogger())
+	probeMin, probeMax = manager.retryBounds(true)
+	if probeMin != 10*time.Second || probeMax != 10*time.Second {
+		t.Fatalf("probe retry bounds above default ceiling = [%v,%v], want operator floor [10s,10s]", probeMin, probeMax)
+	}
+}
+
 func TestConnectPingAndGracefulShutdown(t *testing.T) {
 	token, _ := NewToken()
 	server := New(testConfig("127.0.0.1:0"), &Registry{Version: 1, DeviceID: "server", Serve: true, Accept: map[string]string{"client": TokenHash(token)}}, testLogger())
@@ -213,6 +273,282 @@ func TestReconnectAfterDelayedStartDropAndRestart(t *testing.T) {
 	client.Stop(stopCtx)
 	server.Stop(stopCtx)
 	stopCancel()
+}
+
+func TestMultipleReachablePeersConnectIndependently(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	newServer := func(id, clientID, token string) *Manager {
+		server := New(testConfig("127.0.0.1:0"), &Registry{
+			Version: 1, DeviceID: id, Serve: true,
+			Accept: map[string]string{clientID: TokenHash(token)},
+		}, testLogger())
+		startManager(t, server, ctx)
+		return server
+	}
+	devboxToken, _ := NewToken()
+	labsToken, _ := NewToken()
+	devbox := newServer("devbox", "ref", devboxToken)
+	labs := newServer("labs", "ref", labsToken)
+	client := New(testConfig("127.0.0.1:0"), &Registry{
+		Version: 1, DeviceID: "ref", Peers: []Peer{
+			{ID: "devbox", URL: "ws://" + devbox.Addr() + meshPath, Token: devboxToken},
+			{ID: "labs", URL: "ws://" + labs.Addr() + meshPath, Token: labsToken},
+		},
+	}, testLogger())
+	startManager(t, client, ctx)
+
+	devboxStatus := waitState(t, client, "devbox", "connected")
+	labsStatus := waitState(t, client, "labs", "connected")
+	if devboxStatus.ProbeState != "reachable" || devboxStatus.LastProbeAt == nil || devboxStatus.LastProbeSuccess == nil {
+		t.Fatalf("devbox probe status not observable: %+v", devboxStatus)
+	}
+	if labsStatus.ProbeState != "reachable" || labsStatus.LastProbeAt == nil || labsStatus.LastProbeSuccess == nil {
+		t.Fatalf("labs probe status not observable: %+v", labsStatus)
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	client.Stop(stopCtx)
+	devbox.Stop(stopCtx)
+	labs.Stop(stopCtx)
+}
+
+func TestProbePhasePreservesCompatibleConnectionState(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client := New(testConfig("127.0.0.1:0"), &Registry{
+		Version: 1, DeviceID: "ref", Peers: []Peer{
+			{ID: "devbox", URL: "ws://127.0.0.1:1" + meshPath, Token: "unused"},
+		},
+	}, testLogger())
+	probeStarted := make(chan struct{})
+	client.probe = func(ctx context.Context, _ Peer) error {
+		close(probeStarted)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	startManager(t, client, ctx)
+	select {
+	case <-probeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("reachability probe did not start")
+	}
+	status := client.Status()[0]
+	if status.State != "connecting" || status.ProbeState != "probing" {
+		t.Fatalf("probe introduced incompatible top-level state: %+v", status)
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	client.Stop(stopCtx)
+}
+
+func TestUnreachablePeerDoesNotDelayReachablePeer(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	token, _ := NewToken()
+	server := New(testConfig("127.0.0.1:0"), &Registry{
+		Version: 1, DeviceID: "devbox", Serve: true,
+		Accept: map[string]string{"ref": TokenHash(token)},
+	}, testLogger())
+	startManager(t, server, ctx)
+
+	closed, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unreachableAddr := closed.Addr().String()
+	closed.Close()
+	client := New(testConfig("127.0.0.1:0"), &Registry{
+		Version: 1, DeviceID: "ref", Peers: []Peer{
+			{ID: "labs", URL: "ws://" + unreachableAddr + meshPath, Token: "unused"},
+			{ID: "devbox", URL: "ws://" + server.Addr() + meshPath, Token: token},
+		},
+	}, testLogger())
+	startManager(t, client, ctx)
+
+	waitState(t, client, "devbox", "connected")
+	unreachable := waitProbeState(t, client, "labs", "unreachable")
+	if unreachable.State != "disconnected" || unreachable.Attempts == 0 || unreachable.NextRetryAt == nil {
+		t.Fatalf("unreachable peer missing independent retry state: %+v", unreachable)
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	client.Stop(stopCtx)
+	server.Stop(stopCtx)
+}
+
+func TestNeitherReachableUsesBoundedProbeBackoff(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	closedAddr := func() string {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		addr := ln.Addr().String()
+		ln.Close()
+		return addr
+	}
+	cfg := testConfig("127.0.0.1:0")
+	cfg.ReconnectMin = 20 * time.Millisecond
+	cfg.ReconnectMax = 80 * time.Millisecond
+	client := New(cfg, &Registry{
+		Version: 1, DeviceID: "ref", Peers: []Peer{
+			{ID: "devbox", URL: "ws://" + closedAddr() + meshPath, Token: "unused-a"},
+			{ID: "labs", URL: "ws://" + closedAddr() + meshPath, Token: "unused-b"},
+		},
+	}, testLogger())
+	startManager(t, client, ctx)
+
+	waitProbeState(t, client, "devbox", "unreachable")
+	waitProbeState(t, client, "labs", "unreachable")
+	time.Sleep(120 * time.Millisecond)
+	for _, peerID := range []string{"devbox", "labs"} {
+		status := waitProbeState(t, client, peerID, "unreachable")
+		if status.ProbeState != "unreachable" || status.Attempts < 2 || status.NextRetryAt == nil {
+			t.Fatalf("peer missing bounded retry state: %+v", status)
+		}
+		if status.Attempts > 20 {
+			t.Fatalf("peer probe busy-looped: %+v", status)
+		}
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	client.Stop(stopCtx)
+}
+
+func TestPeerChurnDoesNotDisturbOtherConnection(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reserveAddr := func() string {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		addr := ln.Addr().String()
+		ln.Close()
+		return addr
+	}
+	devboxAddr, labsAddr := reserveAddr(), reserveAddr()
+	devboxToken, _ := NewToken()
+	labsToken, _ := NewToken()
+	newServer := func(id, addr, token string) *Manager {
+		server := New(testConfig(addr), &Registry{
+			Version: 1, DeviceID: id, Serve: true,
+			Accept: map[string]string{"ref": TokenHash(token)},
+		}, testLogger())
+		startManager(t, server, ctx)
+		return server
+	}
+	devbox := newServer("devbox", devboxAddr, devboxToken)
+	labs := newServer("labs", labsAddr, labsToken)
+	client := New(testConfig("127.0.0.1:0"), &Registry{
+		Version: 1, DeviceID: "ref", Peers: []Peer{
+			{ID: "devbox", URL: "ws://" + devboxAddr + meshPath, Token: devboxToken},
+			{ID: "labs", URL: "ws://" + labsAddr + meshPath, Token: labsToken},
+		},
+	}, testLogger())
+	startManager(t, client, ctx)
+	waitState(t, client, "devbox", "connected")
+	waitState(t, client, "labs", "connected")
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	labs.Stop(stopCtx)
+	stopCancel()
+	waitProbeState(t, client, "labs", "unreachable")
+	if devboxStatus := waitState(t, client, "devbox", "connected"); devboxStatus.ProbeState != "reachable" {
+		t.Fatalf("labs churn disturbed devbox: %+v", devboxStatus)
+	}
+	labs = newServer("labs", labsAddr, labsToken)
+	waitState(t, client, "labs", "connected")
+	if devboxStatus := waitState(t, client, "devbox", "connected"); devboxStatus.State != "connected" {
+		t.Fatalf("labs recovery disturbed devbox: %+v", devboxStatus)
+	}
+
+	stopCtx, stopCancel = context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	client.Stop(stopCtx)
+	devbox.Stop(stopCtx)
+	labs.Stop(stopCtx)
+}
+
+func TestRestoredPeerReconnectsWithinProbeRetryBoundWithoutDisturbingOtherPeer(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reserveAddr := func() string {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		addr := ln.Addr().String()
+		ln.Close()
+		return addr
+	}
+	devboxAddr, labsAddr := reserveAddr(), reserveAddr()
+	devboxToken, _ := NewToken()
+	labsToken, _ := NewToken()
+	newServer := func(id, addr, token string) *Manager {
+		server := New(testConfig(addr), &Registry{
+			Version: 1, DeviceID: id, Serve: true,
+			Accept: map[string]string{"ref": TokenHash(token)},
+		}, testLogger())
+		startManager(t, server, ctx)
+		return server
+	}
+	devbox := newServer("devbox", devboxAddr, devboxToken)
+	cfg := testConfig("127.0.0.1:0")
+	cfg.ReconnectMin = 20 * time.Millisecond
+	cfg.ReconnectMax = 50 * time.Millisecond
+	client := New(cfg, &Registry{
+		Version: 1, DeviceID: "ref", Peers: []Peer{
+			{ID: "labs", URL: "ws://" + labsAddr + meshPath, Token: labsToken},
+			{ID: "devbox", URL: "ws://" + devboxAddr + meshPath, Token: devboxToken},
+		},
+	}, testLogger())
+	startManager(t, client, ctx)
+	devboxBefore := waitState(t, client, "devbox", "connected")
+	if devboxBefore.ConnectedAt == nil {
+		t.Fatalf("devbox missing connected timestamp: %+v", devboxBefore)
+	}
+	waitProbeState(t, client, "labs", "unreachable")
+
+	restoredAt := time.Now()
+	labs := newServer("labs", labsAddr, labsToken)
+	deadline := time.Now().Add(300 * time.Millisecond)
+	var labsStatus Status
+	for time.Now().Before(deadline) {
+		for _, status := range client.Status() {
+			if status.PeerID == "labs" && status.State == "connected" {
+				labsStatus = status
+				break
+			}
+		}
+		if labsStatus.State == "connected" {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if labsStatus.State != "connected" {
+		t.Fatalf("restored labs did not reconnect within 300ms test bound; status=%+v", client.Status())
+	}
+	if elapsed := time.Since(restoredAt); elapsed > 300*time.Millisecond {
+		t.Fatalf("restored labs reconnect took %v", elapsed)
+	}
+	devboxAfter := waitState(t, client, "devbox", "connected")
+	if devboxAfter.ConnectedAt == nil || !devboxAfter.ConnectedAt.Equal(*devboxBefore.ConnectedAt) {
+		t.Fatalf("labs restoration disturbed devbox connection: before=%+v after=%+v", devboxBefore, devboxAfter)
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	client.Stop(stopCtx)
+	devbox.Stop(stopCtx)
+	labs.Stop(stopCtx)
 }
 
 func dialRaw(t *testing.T, addr, token, device string) *websocket.Conn {
