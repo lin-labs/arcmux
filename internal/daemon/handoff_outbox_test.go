@@ -93,7 +93,10 @@ func newSourceOutboxFixture(t *testing.T) *sourceOutboxFixture {
 				VerificationState: "pending",
 			}, nil
 		},
-		closeSource: func(context.Context, handoff.SourceSession, time.Duration) error { return nil },
+		closeSource: func(context.Context, handoff.SourceSession, time.Duration) error {
+			fixture.detail.Summary.State = "exited"
+			return nil
+		},
 		newID: func(_ string) (string, error) {
 			if len(ids) == 0 {
 				return "", errors.New("no id")
@@ -271,6 +274,7 @@ func TestSourceHandoffRetireClosesOnlyImmutableSourceAfterVerification(t *testin
 			t.Fatalf("close timeout=%s", timeout)
 		}
 		closed = append(closed, source)
+		fixture.detail.Summary.State = "exited"
 		return nil
 	}
 	retired, err := fixture.outbox.retire(context.Background(), accepted.HandoffID, handoff.RetirementImmediate, 10*time.Second)
@@ -280,6 +284,58 @@ func TestSourceHandoffRetireClosesOnlyImmutableSourceAfterVerification(t *testin
 	replay, err := fixture.outbox.retire(context.Background(), accepted.HandoffID, handoff.RetirementImmediate, 10*time.Second)
 	if err != nil || replay.RetirementState != "retired" || len(closed) != 1 {
 		t.Fatalf("retire replay=%+v closed=%+v err=%v", replay, closed, err)
+	}
+}
+
+func TestSourceHandoffImmediateRetirementRetriesAfterRestartUntilExactExit(t *testing.T) {
+	fixture := newSourceOutboxFixture(t)
+	prepared, err := fixture.outbox.prepare(context.Background(), sourcePrepareRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := fixture.outbox.launch(context.Background(), prepared.HandoffID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ackAt := time.Now().UTC()
+	fixture.outbox.callVerify = func(_ context.Context, _ string, request meshHandoffVerifyRequest) (meshHandoffVerification, error) {
+		ack := handoff.ContextAcknowledgement{Phase: handoff.ContextLoadedPhase, ManifestDigest: request.ManifestDigest, TargetLocator: request.TargetLocator, AcknowledgedAt: ackAt}
+		return meshHandoffVerification{HandoffID: request.HandoffID, ManifestDigest: request.ManifestDigest, TargetLocator: request.TargetLocator, VerificationState: "context_loaded", ContextLoaded: true, Acknowledgement: &ack}, nil
+	}
+	if _, err := fixture.outbox.verify(context.Background(), accepted.HandoffID); err != nil {
+		t.Fatal(err)
+	}
+
+	closeCalls := 0
+	fixture.outbox.closeSource = func(context.Context, handoff.SourceSession, time.Duration) error {
+		closeCalls++
+		if closeCalls == 2 {
+			fixture.detail.Summary.State = "exited"
+		}
+		return nil
+	}
+	pending, err := fixture.outbox.retire(context.Background(), accepted.HandoffID, handoff.RetirementImmediate, 10*time.Second)
+	if err != nil || pending.RetirementState != "pending" || closeCalls != 1 {
+		t.Fatalf("initial retirement=%+v close_calls=%d err=%v", pending, closeCalls, err)
+	}
+	stored, _ := fixture.store.GetSource(accepted.HandoffID)
+	if stored.Retirement == nil || stored.Retirement.State != handoff.RetirementPending {
+		t.Fatalf("pending retirement was not durable: %+v", stored.Retirement)
+	}
+
+	reopened, err := handoff.Open(fixture.store.Root())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.outbox.store = reopened
+	reconcileAt := time.Now().UTC().Add(time.Second)
+	fixture.outbox.now = func() time.Time { return reconcileAt }
+	if err := fixture.outbox.reconcile(context.Background(), reconcileAt); err != nil {
+		t.Fatal(err)
+	}
+	stored, _ = reopened.GetSource(accepted.HandoffID)
+	if closeCalls != 2 || stored.Retirement == nil || stored.Retirement.State != handoff.RetirementRetired {
+		t.Fatalf("restart retirement=%+v close_calls=%d", stored.Retirement, closeCalls)
 	}
 }
 
@@ -302,13 +358,16 @@ func TestSourceHandoffAfterTurnRetirementWaitsForNewDurableTurnEnd(t *testing.T)
 		t.Fatal(err)
 	}
 	baseline := time.Now().UTC()
-	fixture.detail.Summary.State = "idle"
+	// prompt_submit has already incremented this working turn. The matching
+	// turn_end keeps TurnCount=3 and only advances LastTurnEndAt.
+	fixture.detail.Summary.State = "working"
 	fixture.detail.Turn = &sessionview.TurnActivity{TurnCount: 3, LastTurnEndAt: &baseline}
 	requestedAt := baseline.Add(time.Second)
 	fixture.outbox.now = func() time.Time { return requestedAt }
 	closed := 0
 	fixture.outbox.closeSource = func(context.Context, handoff.SourceSession, time.Duration) error {
 		closed++
+		fixture.detail.Summary.State = "exited"
 		return nil
 	}
 	pending, err := fixture.outbox.retire(context.Background(), accepted.HandoffID, handoff.RetirementAfterTurnEnd, 10*time.Second)
@@ -316,15 +375,22 @@ func TestSourceHandoffAfterTurnRetirementWaitsForNewDurableTurnEnd(t *testing.T)
 		t.Fatalf("pending=%+v closed=%d err=%v", pending, closed, err)
 	}
 	if err := fixture.outbox.reconcile(context.Background(), requestedAt.Add(time.Second)); err != nil || closed != 0 {
-		t.Fatalf("idle-only reconciliation closed=%d err=%v", closed, err)
+		t.Fatalf("pre-turn-end reconciliation closed=%d err=%v", closed, err)
 	}
 	newEnd := requestedAt.Add(2 * time.Second)
-	fixture.detail.Turn = &sessionview.TurnActivity{TurnCount: 4, LastTurnEndAt: &newEnd}
+	fixture.detail.Summary.State = "idle"
+	laterTurn := fixture.detail
+	laterTurn.Turn = &sessionview.TurnActivity{TurnCount: 4, LastTurnEndAt: &newEnd}
+	stored, _ := fixture.store.GetSource(accepted.HandoffID)
+	if sourceAfterTurnRetirementReady(stored, laterTurn) {
+		t.Fatal("a later turn unexpectedly satisfied the stale retirement request")
+	}
+	fixture.detail.Turn = &sessionview.TurnActivity{TurnCount: 3, LastTurnEndAt: &newEnd}
 	fixture.outbox.now = func() time.Time { return newEnd }
 	if err := fixture.outbox.reconcile(context.Background(), newEnd); err != nil || closed != 1 {
 		t.Fatalf("turn-end reconciliation closed=%d err=%v", closed, err)
 	}
-	stored, _ := fixture.store.GetSource(accepted.HandoffID)
+	stored, _ = fixture.store.GetSource(accepted.HandoffID)
 	if stored.Retirement == nil || stored.Retirement.State != handoff.RetirementRetired {
 		t.Fatalf("retirement after reconcile=%+v", stored.Retirement)
 	}

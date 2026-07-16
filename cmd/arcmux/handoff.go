@@ -175,6 +175,10 @@ func cmdHandoffRetire(args []string, stdout io.Writer) error {
 }
 
 func cmdHandoffAcknowledge(args []string, stdout io.Writer) error {
+	return cmdHandoffAcknowledgeWithRuntime(args, stdout, os.Getenv, lookupSessionSelfCatalog, handoff.DefaultLaunchRendezvousRoot())
+}
+
+func cmdHandoffAcknowledgeWithRuntime(args []string, stdout io.Writer, getenv func(string) string, catalog sessionSelfCatalogLookup, rendezvousRoot string) error {
 	if len(args) < 1 {
 		return errors.New("usage: arcmux handoff acknowledge <marker> --phase context-loaded")
 	}
@@ -188,7 +192,13 @@ func cmdHandoffAcknowledge(args []string, stdout io.Writer) error {
 	if marker == "" || fs.NArg() != 0 || *phase != "context-loaded" {
 		return errors.New("usage: arcmux handoff acknowledge <marker> --phase context-loaded")
 	}
-	_, replay, err := handoff.AcknowledgeLaunchContext(handoff.DefaultLaunchRendezvousRoot(), marker, handoff.ContextLoadedPhase)
+	identity, err := resolveSessionSelf(getenv, catalog)
+	if err != nil {
+		return errors.New("handoff acknowledgement requires the exact supervised target session")
+	}
+	_, replay, err := handoff.AcknowledgeLaunchContext(
+		rendezvousRoot, marker, handoff.ContextLoadedPhase, string(identity.ProfileScope), identity.SessionID,
+	)
 	if err != nil {
 		if errors.Is(err, handoff.ErrTargetNotAccepted) {
 			return errors.New("handoff target is not accepted yet; validate context and retry acknowledgement")

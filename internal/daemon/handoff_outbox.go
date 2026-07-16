@@ -490,7 +490,11 @@ func sourceAfterTurnRetirementReady(record handoff.SourceRecord, detail sessionv
 	if retirement == nil || retirement.Mode != handoff.RetirementAfterTurnEnd || detail.Summary.State != "idle" || detail.Turn == nil || detail.Turn.LastTurnEndAt == nil {
 		return false
 	}
-	return detail.Turn.TurnCount > retirement.BaselineTurnCount && detail.Turn.LastTurnEndAt.After(retirement.RequestedAt)
+	// prompt_submit increments TurnCount before an agent can request deferred
+	// retirement. The matching turn_end therefore carries the same count. An
+	// exact count also prevents a stale pending request from unexpectedly
+	// retiring the source after some later turn.
+	return detail.Turn.TurnCount == retirement.BaselineTurnCount && detail.Turn.LastTurnEndAt.After(retirement.RequestedAt)
 }
 
 func (o *sourceHandoffOutbox) retirePending(ctx context.Context, record handoff.SourceRecord) (sourceHandoffDTO, error) {
@@ -516,6 +520,14 @@ func (o *sourceHandoffOutbox) retirePending(ctx context.Context, record handoff.
 	if err := o.closeSource(ctx, record.Manifest.Source, timeout); err != nil {
 		return sourceHandoffRecordDTO(record), nil
 	}
+	closedDetail, ok := o.lookupExactSource(record)
+	if !ok || closedDetail.Summary.State != "exited" {
+		// A close request is not proof. Keep the durable request pending until
+		// the exact catalog entry confirms that supervision observed the source
+		// exit; this prevents a successful-looking tmux command from retiring a
+		// still-live pane.
+		return sourceHandoffRecordDTO(record), nil
+	}
 	completed, _, err := o.store.CompleteSourceRetirement(record.Manifest.HandoffID, record.Revision, sourceTransitionTime(o.now, record.Updated))
 	if err != nil {
 		return sourceHandoffRecordDTO(record), nil
@@ -532,8 +544,9 @@ func (o *sourceHandoffOutbox) attemptContext(ctx context.Context) (context.Conte
 }
 
 // reconcile resumes prepare work, launches that crossed the explicit
-// SourceLaunchingRemote boundary, and durable after-turn retirement. A merely
-// SourceRemotePrepared handoff remains inert across restarts and reconnects.
+// SourceLaunchingRemote boundary, and every durable pending retirement. A
+// merely SourceRemotePrepared handoff remains inert across restarts and
+// reconnects.
 func (o *sourceHandoffOutbox) reconcile(ctx context.Context, at time.Time) error {
 	if o == nil || o.store == nil || o.now == nil {
 		return errors.New("source handoff recovery is unavailable")
@@ -559,7 +572,7 @@ func (o *sourceHandoffOutbox) reconcile(ctx context.Context, at time.Time) error
 				continue
 			}
 		case handoff.SourceAccepted:
-			if candidate.Retirement == nil || candidate.Retirement.State != handoff.RetirementPending || candidate.Retirement.Mode != handoff.RetirementAfterTurnEnd {
+			if candidate.Retirement == nil || candidate.Retirement.State != handoff.RetirementPending {
 				continue
 			}
 		default:

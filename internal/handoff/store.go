@@ -232,7 +232,7 @@ func (s *Store) DueTarget(at time.Time) ([]TargetRecord, error) {
 }
 
 // RunnableSource enumerates source work that may resume after process restart,
-// including explicitly authorized deferred retirement. RemotePrepared is
+// including every explicitly authorized pending retirement. RemotePrepared is
 // intentionally absent: launch authorization must be explicit and must not be
 // inferred from a daemon restart.
 func (s *Store) RunnableSource(at time.Time) ([]SourceRecord, error) {
@@ -253,7 +253,7 @@ func (s *Store) RunnableSource(at time.Time) ([]SourceRecord, error) {
 				out = append(out, record)
 			}
 		case SourceAccepted:
-			if record.Retirement != nil && record.Retirement.State == RetirementPending && record.Retirement.Mode == RetirementAfterTurnEnd {
+			if record.Retirement != nil && record.Retirement.State == RetirementPending {
 				out = append(out, record)
 			}
 		}
@@ -421,11 +421,12 @@ func (s *Store) RecordTargetLaunchLocator(id string, expectedRevision uint64, lo
 	return cloneTargetRecord(record), nil
 }
 
-// AcknowledgeTarget binds an opaque launch marker to the exact accepted target
-// record and persists one idempotent context-loaded acknowledgement. Wrong
-// markers deliberately collapse to an unavailable error.
-func (s *Store) AcknowledgeTarget(marker string, phase AcknowledgementPhase, at time.Time) (TargetRecord, bool, error) {
-	if !validLaunchMarker(marker) || phase != ContextLoadedPhase {
+// AcknowledgeTarget binds an opaque launch marker and the caller's
+// daemon-catalog identity to the exact accepted target record, then persists
+// one idempotent context-loaded acknowledgement. Wrong markers and wrong
+// caller identities deliberately collapse to an unavailable error.
+func (s *Store) AcknowledgeTarget(marker string, phase AcknowledgementPhase, callerProfileScope, callerSessionID string, at time.Time) (TargetRecord, bool, error) {
+	if !validLaunchMarker(marker) || phase != ContextLoadedPhase || callerProfileScope == "" || callerSessionID == "" {
 		return TargetRecord{}, false, ErrAcknowledgementUnavailable
 	}
 	s.mu.Lock()
@@ -444,6 +445,9 @@ func (s *Store) AcknowledgeTarget(marker string, phase AcknowledgementPhase, at 
 		}
 		if record.State != TargetAccepted || record.TargetLocator == nil {
 			return TargetRecord{}, false, ErrTargetNotAccepted
+		}
+		if record.TargetLocator.ProfileScope != callerProfileScope || record.TargetLocator.SessionID != callerSessionID {
+			return TargetRecord{}, false, ErrAcknowledgementUnavailable
 		}
 		if record.ContextLoaded != nil {
 			return cloneTargetRecord(record), true, nil

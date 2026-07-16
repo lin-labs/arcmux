@@ -306,16 +306,28 @@ func TestHandoffReceiveReadsOwnerLocalInstructionsByMarker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	selfEnv := map[string]string{
+		"ARCMUX_SESSION_ID": locator.SessionID, "ARCMUX_PROFILE_SCOPE": locator.ProfileScope,
+		"ARCMUX_DAEMON_SOCKET": "/tmp/arcmux-target.sock",
+	}
+	getenv := func(key string) string { return selfEnv[key] }
+	catalog := func(_ string, id string) (sessionSelfCatalogRecord, error) {
+		return sessionSelfCatalogRecord{ProfileScope: "root", SessionID: id, Agent: "codex", CWD: "/target"}, nil
+	}
 	var ack bytes.Buffer
-	if err := cmdHandoff([]string{"acknowledge", marker, "--phase", "context-loaded"}, strings.NewReader(""), &ack); err != nil {
+	if err := cmdHandoffAcknowledgeWithRuntime([]string{marker, "--phase", "context-loaded"}, &ack, getenv, catalog, handoff.DefaultLaunchRendezvousRoot()); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(ack.String(), `"context_loaded":true`) || !strings.Contains(ack.String(), `"phase":"context_loaded"`) {
 		t.Fatalf("acknowledgement output = %q", ack.String())
 	}
 	var replay bytes.Buffer
-	if err := cmdHandoff([]string{"acknowledge", marker, "--phase", "context-loaded"}, strings.NewReader(""), &replay); err != nil || !strings.Contains(replay.String(), `"replay":true`) {
+	if err := cmdHandoffAcknowledgeWithRuntime([]string{marker, "--phase", "context-loaded"}, &replay, getenv, catalog, handoff.DefaultLaunchRendezvousRoot()); err != nil || !strings.Contains(replay.String(), `"replay":true`) {
 		t.Fatalf("acknowledgement replay output=%q err=%v", replay.String(), err)
+	}
+	selfEnv["ARCMUX_SESSION_ID"] = "wrong-target-session"
+	if err := cmdHandoffAcknowledgeWithRuntime([]string{marker, "--phase", "context-loaded"}, &bytes.Buffer{}, getenv, catalog, handoff.DefaultLaunchRendezvousRoot()); err == nil {
+		t.Fatal("wrong supervised target session replay was accepted")
 	}
 }
 

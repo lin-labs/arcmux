@@ -53,26 +53,34 @@ func cmdSessionWithRuntime(args []string, stdout io.Writer, getenv func(string) 
 	if fs.NArg() != 0 || !*asJSON {
 		return errors.New("usage: arcmux session self --json")
 	}
+	identity, err := resolveSessionSelf(getenv, catalog)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(stdout).Encode(identity)
+}
+
+func resolveSessionSelf(getenv func(string) string, catalog sessionSelfCatalogLookup) (sessionSelfIdentity, error) {
 	scope := sessionview.ProfileScope(getenv("ARCMUX_PROFILE_SCOPE"))
 	id := getenv("ARCMUX_SESSION_ID")
 	if _, err := sessionview.NewLocator(scope, id); err != nil {
-		return errors.New("supervised arcmux session identity is unavailable")
+		return sessionSelfIdentity{}, errors.New("supervised arcmux session identity is unavailable")
 	}
 	socket := getenv("ARCMUX_DAEMON_SOCKET")
 	if socket == "" || !filepath.IsAbs(socket) || filepath.Clean(socket) != socket {
-		return errors.New("supervised arcmux daemon socket is unavailable")
+		return sessionSelfIdentity{}, errors.New("supervised arcmux daemon socket is unavailable")
 	}
 	if catalog == nil {
-		return errors.New("arcmux session catalog lookup is unavailable")
+		return sessionSelfIdentity{}, errors.New("arcmux session catalog lookup is unavailable")
 	}
 	record, err := catalog(socket, id)
 	if err != nil || record.ProfileScope != scope || record.SessionID != id || record.Agent == "" || record.CWD == "" {
-		return errors.New("session identity is not present in the exact arcmux daemon catalog")
+		return sessionSelfIdentity{}, errors.New("session identity is not present in the exact arcmux daemon catalog")
 	}
-	return json.NewEncoder(stdout).Encode(sessionSelfIdentity{
+	return sessionSelfIdentity{
 		ProfileScope: scope, SessionID: id, Agent: record.Agent, CWD: record.CWD,
 		HistoryBasename: record.HistoryBasename, Source: "daemon_catalog",
-	})
+	}, nil
 }
 
 func lookupSessionSelfCatalog(socketPath, sessionID string) (sessionSelfCatalogRecord, error) {

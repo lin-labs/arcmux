@@ -80,6 +80,13 @@ type Daemon struct {
 	// capture shim don't need a live tmux pane. Production code never sets it.
 	captureHook func(ctx context.Context, sessionID string, includeHistory bool) (string, error)
 
+	// tmux termination hooks are test-only seams for proving that Kill keeps
+	// supervision and session state intact when termination fails or the exact
+	// pane remains alive. Production always calls the concrete tmux client.
+	killTmuxSessionHook func(context.Context, string) error
+	killTmuxPaneHook    func(context.Context, string) error
+	tmuxPaneExistsHook  func(context.Context, string) bool
+
 	// projects is the project registry (slug -> repo_cwd + plan_globs) used to
 	// scope sessions to a project (HTTP /sessions?project=) and to mint babysit
 	// call contexts. May be nil/empty when no projects.toml is present.
@@ -1093,7 +1100,43 @@ func (d *Daemon) Kill(ctx context.Context, sessionID string, graceful bool, time
 		return d.killExecSession(ctx, sess, graceful, timeout)
 	}
 
-	// Stop monitor and any active screen recorder.
+	if graceful {
+		// Send Ctrl-C and wait
+		_ = d.tmux.SendKeys(ctx, snap.TmuxTarget, "C-c")
+		waitCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		_ = d.tmux.WaitIdle(waitCtx, snap.TmuxTarget, timeout, 1*time.Second)
+	}
+
+	var killErr error
+	if snap.TmuxSessionName != "" {
+		if d.killTmuxSessionHook != nil {
+			killErr = d.killTmuxSessionHook(ctx, snap.TmuxSessionName)
+		} else {
+			killErr = d.tmux.KillSession(ctx, snap.TmuxSessionName)
+		}
+	} else if d.killTmuxPaneHook != nil {
+		killErr = d.killTmuxPaneHook(ctx, snap.TmuxTarget)
+	} else {
+		killErr = d.tmux.KillPane(ctx, snap.TmuxTarget)
+	}
+	if killErr != nil {
+		return fmt.Errorf("terminate exact tmux session: %w", killErr)
+	}
+	if snap.TmuxTarget == "" {
+		return errors.New("exact tmux pane target is unavailable")
+	}
+	var paneExists bool
+	if d.tmuxPaneExistsHook != nil {
+		paneExists = d.tmuxPaneExistsHook(ctx, snap.TmuxTarget)
+	} else {
+		paneExists = d.tmux.PaneExists(ctx, snap.TmuxTarget)
+	}
+	if paneExists {
+		return fmt.Errorf("exact tmux pane %s is still alive after termination", snap.TmuxTarget)
+	}
+
+	// Only tear down supervision after exact termination has been confirmed.
 	d.mu.Lock()
 	if cancel, ok := d.monitors[sessionID]; ok {
 		cancel()
@@ -1105,23 +1148,7 @@ func (d *Daemon) Kill(ctx context.Context, sessionID string, graceful bool, time
 	}
 	d.mu.Unlock()
 
-	if graceful {
-		// Send Ctrl-C and wait
-		_ = d.tmux.SendKeys(ctx, snap.TmuxTarget, "C-c")
-		waitCtx, cancel := context.WithTimeout(ctx, timeout)
-		defer cancel()
-		_ = d.tmux.WaitIdle(waitCtx, snap.TmuxTarget, timeout, 1*time.Second)
-	}
-
-	if snap.TmuxSessionName != "" {
-		if err := d.tmux.KillSession(ctx, snap.TmuxSessionName); err != nil {
-			d.logger.Warn("kill tmux session failed", "session", snap.TmuxSessionName, "error", err)
-		}
-	} else if err := d.tmux.KillPane(ctx, snap.TmuxTarget); err != nil {
-		d.logger.Warn("kill pane failed", "error", err)
-	}
-
-	// Stop pipe-pane and cleanup
+	// Stop pipe-pane and cleanup.
 	d.tmux.PipePaneStop(ctx, snap.TmuxTarget)
 	d.watcher.Unwatch(sessionID)
 	d.hooks.Cleanup(sessionID)

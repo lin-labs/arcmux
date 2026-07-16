@@ -1567,7 +1567,7 @@ func TestHandoffVerifyRequiresAuthenticatedExactAcceptedTargetAndAcknowledgement
 		t.Fatalf("wrong source verification err=%v", err)
 	}
 	marker := handoff.LaunchMarker(manifest.HandoffID, accepted.Digest)
-	acknowledged, replay, err := app.store.AcknowledgeTarget(marker, handoff.ContextLoadedPhase, time.Now().UTC())
+	acknowledged, replay, err := app.store.AcknowledgeTarget(marker, handoff.ContextLoadedPhase, locator.ProfileScope, locator.SessionID, time.Now().UTC())
 	if err != nil || replay || acknowledged.ContextLoaded == nil {
 		t.Fatalf("acknowledged=%+v replay=%t err=%v", acknowledged, replay, err)
 	}

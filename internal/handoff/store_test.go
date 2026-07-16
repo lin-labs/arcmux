@@ -256,10 +256,10 @@ func TestTargetContextLoadedAcknowledgementRequiresExactAcceptedMarker(t *testin
 		t.Fatal(err)
 	}
 	marker := LaunchMarker(manifest.HandoffID, received.Digest)
-	if _, _, err := store.AcknowledgeTarget(marker, ContextLoadedPhase, start.Add(time.Second)); !errors.Is(err, ErrTargetNotAccepted) {
+	if _, _, err := store.AcknowledgeTarget(marker, ContextLoadedPhase, "root", "target-session", start.Add(time.Second)); !errors.Is(err, ErrTargetNotAccepted) {
 		t.Fatalf("ack before acceptance error = %v", err)
 	}
-	if _, _, err := store.AcknowledgeTarget(LaunchMarker("wrong-handoff", received.Digest), ContextLoadedPhase, start.Add(time.Second)); !errors.Is(err, ErrAcknowledgementUnavailable) {
+	if _, _, err := store.AcknowledgeTarget(LaunchMarker("wrong-handoff", received.Digest), ContextLoadedPhase, "root", "target-session", start.Add(time.Second)); !errors.Is(err, ErrAcknowledgementUnavailable) {
 		t.Fatalf("wrong marker error = %v", err)
 	}
 
@@ -281,7 +281,14 @@ func TestTargetContextLoadedAcknowledgementRequiresExactAcceptedMarker(t *testin
 		t.Fatal(err)
 	}
 
-	acknowledged, replay, err := store.AcknowledgeTarget(marker, ContextLoadedPhase, start.Add(5*time.Second))
+	if _, _, err := store.AcknowledgeTarget(marker, ContextLoadedPhase, locator.ProfileScope, "wrong-target-session", start.Add(5*time.Second)); !errors.Is(err, ErrAcknowledgementUnavailable) {
+		t.Fatalf("wrong target session error = %v", err)
+	}
+	if _, _, err := store.AcknowledgeTarget(marker, ContextLoadedPhase, "profile:wrong", locator.SessionID, start.Add(5*time.Second)); !errors.Is(err, ErrAcknowledgementUnavailable) {
+		t.Fatalf("wrong target profile error = %v", err)
+	}
+
+	acknowledged, replay, err := store.AcknowledgeTarget(marker, ContextLoadedPhase, locator.ProfileScope, locator.SessionID, start.Add(5*time.Second))
 	if err != nil || replay || acknowledged.ContextLoaded == nil {
 		t.Fatalf("first acknowledgement record=%+v replay=%t err=%v", acknowledged, replay, err)
 	}
@@ -289,7 +296,10 @@ func TestTargetContextLoadedAcknowledgementRequiresExactAcceptedMarker(t *testin
 		t.Fatalf("acknowledgement proof = %+v", acknowledged.ContextLoaded)
 	}
 	firstRevision := acknowledged.Revision
-	replayed, replay, err := store.AcknowledgeTarget(marker, ContextLoadedPhase, start.Add(6*time.Second))
+	if _, _, err := store.AcknowledgeTarget(marker, ContextLoadedPhase, locator.ProfileScope, "wrong-target-session", start.Add(6*time.Second)); !errors.Is(err, ErrAcknowledgementUnavailable) {
+		t.Fatalf("wrong target replay error = %v", err)
+	}
+	replayed, replay, err := store.AcknowledgeTarget(marker, ContextLoadedPhase, locator.ProfileScope, locator.SessionID, start.Add(6*time.Second))
 	if err != nil || !replay || replayed.Revision != firstRevision || replayed.ContextLoaded == nil || !replayed.ContextLoaded.AcknowledgedAt.Equal(start.Add(5*time.Second)) {
 		t.Fatalf("duplicate acknowledgement record=%+v replay=%t err=%v", replayed, replay, err)
 	}

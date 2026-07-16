@@ -91,14 +91,15 @@ func ReceiveLaunchInstructions(rendezvousRoot, marker string) ([]byte, error) {
 }
 
 // AcknowledgeLaunchContext resolves only owner-local protocol state, then
-// persists a marker-bound acknowledgement. It returns no launch instructions
-// or other private content.
-func AcknowledgeLaunchContext(rendezvousRoot, marker string, phase AcknowledgementPhase) (ContextAcknowledgement, bool, error) {
+// persists an acknowledgement bound to both the marker and the caller's
+// authoritative daemon-catalog identity. It returns no launch instructions or
+// other private content.
+func AcknowledgeLaunchContext(rendezvousRoot, marker string, phase AcknowledgementPhase, callerProfileScope, callerSessionID string) (ContextAcknowledgement, bool, error) {
 	store, err := launchRendezvousStore(rendezvousRoot, marker)
 	if err != nil {
 		return ContextAcknowledgement{}, false, ErrAcknowledgementUnavailable
 	}
-	record, replay, err := store.AcknowledgeTarget(marker, phase, time.Time{})
+	record, replay, err := store.AcknowledgeTarget(marker, phase, callerProfileScope, callerSessionID, time.Time{})
 	if err != nil || record.ContextLoaded == nil {
 		return ContextAcknowledgement{}, false, err
 	}
