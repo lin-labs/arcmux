@@ -44,11 +44,11 @@ func TestKillKeepsSupervisionLiveUntilExactTmuxTerminationIsConfirmed(t *testing
 			monitorCanceled := false
 			d.monitors[managed.ID] = func() { monitorCanceled = true }
 			d.killTmuxSessionHook = test.kill
-			d.tmuxPaneExistsHook = func(_ context.Context, target string) bool {
+			d.tmuxExactPaneExistsHook = func(_ context.Context, target string) (bool, error) {
 				if target != managed.TmuxTarget {
 					t.Fatalf("verified pane=%q, want %q", target, managed.TmuxTarget)
 				}
-				return test.paneExists
+				return test.paneExists, nil
 			}
 
 			err := d.Kill(context.Background(), managed.ID, false, time.Second)
@@ -78,11 +78,11 @@ func TestKillCompletesWhenTerminationCommandFailsAfterExactPaneVanished(t *testi
 	d.killTmuxSessionHook = func(context.Context, string) error {
 		return errors.New("can't find session: arcmux-source")
 	}
-	d.tmuxPaneExistsHook = func(_ context.Context, target string) bool {
+	d.tmuxExactPaneExistsHook = func(_ context.Context, target string) (bool, error) {
 		if target != managed.TmuxTarget {
 			t.Fatalf("verified pane=%q, want %q", target, managed.TmuxTarget)
 		}
-		return false
+		return false, nil
 	}
 
 	if err := d.Kill(context.Background(), managed.ID, false, time.Second); err != nil {
@@ -93,5 +93,34 @@ func TestKillCompletesWhenTerminationCommandFailsAfterExactPaneVanished(t *testi
 	}
 	if _, ok := d.monitors[managed.ID]; ok || !monitorCanceled {
 		t.Fatalf("successful kill kept supervision: present=%t canceled=%t", ok, monitorCanceled)
+	}
+}
+
+func TestKillKeepsSupervisionWhenExactPaneProbeFails(t *testing.T) {
+	d := newCatalogTestDaemon(t, "")
+	managed := session.NewSession("source-session", "source", "codex", "/repo")
+	managed.SetTransport(profile.TransportTmux)
+	managed.SetState(session.StateWorking)
+	managed.TmuxSessionName = "arcmux-source"
+	managed.TmuxTarget = "%17"
+	d.sessions[managed.ID] = managed
+	monitorCanceled := false
+	d.monitors[managed.ID] = func() { monitorCanceled = true }
+	d.killTmuxSessionHook = func(context.Context, string) error {
+		return errors.New("can't find session: arcmux-source")
+	}
+	d.tmuxExactPaneExistsHook = func(context.Context, string) (bool, error) {
+		return false, errors.New("tmux liveness query unavailable")
+	}
+
+	err := d.Kill(context.Background(), managed.ID, false, time.Second)
+	if err == nil || !strings.Contains(err.Error(), "tmux liveness query unavailable") {
+		t.Fatalf("Kill error=%v, want liveness query failure", err)
+	}
+	if managed.Snapshot().State != session.StateWorking {
+		t.Fatalf("probe failure changed session state to %s", managed.Snapshot().State)
+	}
+	if _, ok := d.monitors[managed.ID]; !ok || monitorCanceled {
+		t.Fatalf("probe failure tore down supervision: present=%t canceled=%t", ok, monitorCanceled)
 	}
 }

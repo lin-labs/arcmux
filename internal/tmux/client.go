@@ -319,6 +319,26 @@ func (c *Client) PaneExists(ctx context.Context, target string) bool {
 	return err == nil
 }
 
+// ExactPaneExists checks a stable %pane_id without collapsing tmux query
+// failures into absence. A false result is returned only after list-panes
+// succeeds and proves that the exact pane id is not present.
+func (c *Client) ExactPaneExists(ctx context.Context, paneID string) (bool, error) {
+	paneID = strings.TrimSpace(paneID)
+	if !strings.HasPrefix(paneID, "%") {
+		return false, fmt.Errorf("exact tmux pane id is invalid: %q", paneID)
+	}
+	out, err := c.run(ctx, "list-panes", "-a", "-F", "#{pane_id}")
+	if err != nil {
+		return false, fmt.Errorf("list exact tmux panes: %w", err)
+	}
+	for _, listed := range strings.Split(out, "\n") {
+		if strings.TrimSpace(listed) == paneID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // KillPane terminates a pane.
 func (c *Client) KillPane(ctx context.Context, target string) error {
 	_, err := c.run(ctx, "kill-pane", "-t", target)

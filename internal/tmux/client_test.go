@@ -266,6 +266,35 @@ func TestIntegration_NewWindowCanonical_TargetShape(t *testing.T) {
 	}
 }
 
+func TestIntegration_ExactPaneExistsDistinguishesAbsenceFromProbeFailure(t *testing.T) {
+	if !tmuxAvailable() {
+		t.Skip("tmux not available")
+	}
+	ctx := context.Background()
+	socket := fmt.Sprintf("arcmux-exact-pane-%d", time.Now().UnixNano())
+	c := NewClient(socket)
+	sessionName := fmt.Sprintf("arcmux-exact-pane-session-%d", time.Now().UnixNano())
+	paneID, err := c.NewSessionWithEnvPaneID(ctx, sessionName, "win", "", nil, "")
+	if err != nil {
+		t.Fatalf("NewSessionWithEnvPaneID: %v", err)
+	}
+	t.Cleanup(func() { _ = c.KillSession(context.Background(), sessionName) })
+
+	exists, err := c.ExactPaneExists(ctx, paneID)
+	if err != nil || !exists {
+		t.Fatalf("live exact pane: exists=%t err=%v", exists, err)
+	}
+	exists, err = c.ExactPaneExists(ctx, "%999999999")
+	if err != nil || exists {
+		t.Fatalf("absent exact pane: exists=%t err=%v", exists, err)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if exists, err = c.ExactPaneExists(canceled, paneID); err == nil || exists {
+		t.Fatalf("failed exact-pane query: exists=%t err=%v", exists, err)
+	}
+}
+
 func TestIntegration_SessionLifecycle(t *testing.T) {
 	if !tmuxAvailable() {
 		t.Skip("tmux not available")

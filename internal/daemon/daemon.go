@@ -81,11 +81,12 @@ type Daemon struct {
 	captureHook func(ctx context.Context, sessionID string, includeHistory bool) (string, error)
 
 	// tmux termination hooks are test-only seams for proving that Kill keeps
-	// supervision and session state intact when termination fails or the exact
-	// pane remains alive. Production always calls the concrete tmux client.
-	killTmuxSessionHook func(context.Context, string) error
-	killTmuxPaneHook    func(context.Context, string) error
-	tmuxPaneExistsHook  func(context.Context, string) bool
+	// supervision and session state intact when termination or the exact-pane
+	// liveness query fails, or when the exact pane remains alive. Production
+	// always calls the concrete tmux client.
+	killTmuxSessionHook     func(context.Context, string) error
+	killTmuxPaneHook        func(context.Context, string) error
+	tmuxExactPaneExistsHook func(context.Context, string) (bool, error)
 
 	// projects is the project registry (slug -> repo_cwd + plan_globs) used to
 	// scope sessions to a project (HTTP /sessions?project=) and to mint babysit
@@ -1124,10 +1125,14 @@ func (d *Daemon) Kill(ctx context.Context, sessionID string, graceful bool, time
 		killErr = d.tmux.KillPane(ctx, snap.TmuxTarget)
 	}
 	var paneExists bool
-	if d.tmuxPaneExistsHook != nil {
-		paneExists = d.tmuxPaneExistsHook(ctx, snap.TmuxTarget)
+	var paneProbeErr error
+	if d.tmuxExactPaneExistsHook != nil {
+		paneExists, paneProbeErr = d.tmuxExactPaneExistsHook(ctx, snap.TmuxTarget)
 	} else {
-		paneExists = d.tmux.PaneExists(ctx, snap.TmuxTarget)
+		paneExists, paneProbeErr = d.tmux.ExactPaneExists(ctx, snap.TmuxTarget)
+	}
+	if paneProbeErr != nil {
+		return fmt.Errorf("verify exact tmux pane after termination: %w", paneProbeErr)
 	}
 	if paneExists {
 		if killErr != nil {
