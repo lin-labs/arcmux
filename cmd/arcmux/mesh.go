@@ -30,7 +30,7 @@ type meshInvite struct {
 
 func cmdMesh(args []string, stdin io.Reader, stdout io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: arcmux mesh status|ping|serve|join|grant|revoke")
+		return fmt.Errorf("usage: arcmux mesh status|ping|serve|join|grant|revoke|tunnel")
 	}
 	switch args[0] {
 	case "status":
@@ -45,6 +45,8 @@ func cmdMesh(args []string, stdin io.Reader, stdout io.Writer) error {
 		return cmdMeshGrant(args[1:], stdout)
 	case "revoke":
 		return cmdMeshRevoke(args[1:], stdout)
+	case "tunnel":
+		return cmdMeshTunnel(args[1:], stdout)
 	case "sessions":
 		return cmdMeshSessions(args[1:], stdout)
 	case "session":
@@ -60,6 +62,78 @@ func cmdMesh(args []string, stdin io.Reader, stdout io.Writer) error {
 	default:
 		return fmt.Errorf("unknown mesh subcommand %q", args[0])
 	}
+}
+
+func cmdMeshTunnel(args []string, stdout io.Writer) error {
+	cfg, rest, err := meshConfig(args)
+	if err != nil {
+		return err
+	}
+	if len(rest) == 0 || strings.HasPrefix(rest[0], "-") {
+		return errors.New("usage: arcmux mesh tunnel <peer> --ssh-target <host-or-alias> --local <loopback:port> --remote <loopback:port> | --remove")
+	}
+	peerID := rest[0]
+	fs := flag.NewFlagSet("mesh tunnel", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	sshTarget := fs.String("ssh-target", "", "SSH host or config alias")
+	localAddr := fs.String("local", "", "local loopback endpoint")
+	remoteAddr := fs.String("remote", "", "remote loopback endpoint")
+	remove := fs.Bool("remove", false, "remove the managed tunnel and use the paired URL directly")
+	if err := fs.Parse(rest[1:]); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("usage: arcmux mesh tunnel <peer> --ssh-target <host-or-alias> --local <loopback:port> --remote <loopback:port> | --remove")
+	}
+	if *remove {
+		if *sshTarget != "" || *localAddr != "" || *remoteAddr != "" {
+			return errors.New("--remove cannot be combined with tunnel endpoint flags")
+		}
+	} else if *sshTarget == "" || *localAddr == "" || *remoteAddr == "" {
+		return errors.New("--ssh-target, --local, and --remote are required")
+	}
+	parsed, err := cfg.Mesh.Parse()
+	if err != nil {
+		return err
+	}
+	registry, err := mesh.LoadRegistry(parsed.RegistryPath)
+	if err != nil {
+		return err
+	}
+	peerIndex := -1
+	for i := range registry.Peers {
+		if registry.Peers[i].ID == peerID {
+			peerIndex = i
+			break
+		}
+	}
+	if peerIndex < 0 {
+		return fmt.Errorf("outbound mesh peer %q is not paired", peerID)
+	}
+	if *remove {
+		registry.Peers[peerIndex].SSHTunnel = nil
+	} else {
+		registry.Peers[peerIndex].SSHTunnel = &mesh.SSHTunnel{
+			Target: *sshTarget, LocalAddr: *localAddr, RemoteAddr: *remoteAddr,
+		}
+	}
+	if err := mesh.SaveRegistry(parsed.RegistryPath, registry); err != nil {
+		return err
+	}
+	reloaded, err := reloadMesh(cfg)
+	if err != nil {
+		return err
+	}
+	state := "saved for next daemon start"
+	if reloaded {
+		state = "running daemon reloaded"
+	}
+	action := "configured"
+	if *remove {
+		action = "removed"
+	}
+	_, err = fmt.Fprintf(stdout, "managed SSH tunnel %s for %s; %s\n", action, peerID, state)
+	return err
 }
 
 var meshReadScopes = []string{
@@ -216,14 +290,19 @@ func cmdMeshStatus(args []string, stdout io.Writer) error {
 	var response struct {
 		Enabled bool `json:"enabled"`
 		Peers   []struct {
-			PeerID      string     `json:"peer_id"`
-			State       string     `json:"state"`
-			Direction   string     `json:"direction"`
-			ProbeState  string     `json:"probe_state"`
-			Attempts    int        `json:"attempts"`
-			NextRetryAt *time.Time `json:"next_retry_at"`
-			LastError   string     `json:"last_error"`
-			RoundTripMS int64      `json:"round_trip_ms"`
+			PeerID               string     `json:"peer_id"`
+			State                string     `json:"state"`
+			Direction            string     `json:"direction"`
+			ProbeState           string     `json:"probe_state"`
+			Attempts             int        `json:"attempts"`
+			NextRetryAt          *time.Time `json:"next_retry_at"`
+			LastError            string     `json:"last_error"`
+			RoundTripMS          int64      `json:"round_trip_ms"`
+			TransportKind        string     `json:"transport_kind"`
+			TransportState       string     `json:"transport_state"`
+			TransportAttempts    int        `json:"transport_attempts"`
+			TransportLastError   string     `json:"transport_last_error"`
+			TransportNextRetryAt *time.Time `json:"transport_next_retry_at"`
 		} `json:"peers"`
 	}
 	if err := json.Unmarshal(b, &response); err != nil {
@@ -250,6 +329,18 @@ func cmdMeshStatus(args []string, stdout io.Writer) error {
 		}
 		if p.LastError != "" {
 			fmt.Fprintf(stdout, "\terror=%s", p.LastError)
+		}
+		if p.TransportKind != "" {
+			fmt.Fprintf(stdout, "\ttransport=%s/%s", p.TransportKind, p.TransportState)
+		}
+		if p.TransportAttempts > 0 {
+			fmt.Fprintf(stdout, "\ttransport_attempt=%d", p.TransportAttempts)
+		}
+		if p.TransportNextRetryAt != nil {
+			fmt.Fprintf(stdout, "\ttransport_retry=%s", p.TransportNextRetryAt.UTC().Format(time.RFC3339))
+		}
+		if p.TransportLastError != "" {
+			fmt.Fprintf(stdout, "\ttransport_error=%s", p.TransportLastError)
 		}
 		fmt.Fprintln(stdout)
 	}

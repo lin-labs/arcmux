@@ -52,21 +52,26 @@ type Envelope struct {
 }
 
 type Status struct {
-	PeerID           string     `json:"peer_id"`
-	Direction        string     `json:"direction,omitempty"`
-	State            string     `json:"state"`
-	ConnectedAt      *time.Time `json:"connected_at,omitempty"`
-	LastSeen         *time.Time `json:"last_seen,omitempty"`
-	LastSuccess      *time.Time `json:"last_success,omitempty"`
-	LastError        string     `json:"last_error,omitempty"`
-	NextRetryAt      *time.Time `json:"next_retry_at,omitempty"`
-	Attempts         int        `json:"attempts,omitempty"`
-	ProbeState       string     `json:"probe_state,omitempty"`
-	LastProbeAt      *time.Time `json:"last_probe_at,omitempty"`
-	LastProbeSuccess *time.Time `json:"last_probe_success,omitempty"`
-	Protocol         int        `json:"protocol,omitempty"`
-	RoundTripMS      int64      `json:"round_trip_ms,omitempty"`
-	Capabilities     []string   `json:"capabilities,omitempty"`
+	PeerID               string     `json:"peer_id"`
+	Direction            string     `json:"direction,omitempty"`
+	State                string     `json:"state"`
+	ConnectedAt          *time.Time `json:"connected_at,omitempty"`
+	LastSeen             *time.Time `json:"last_seen,omitempty"`
+	LastSuccess          *time.Time `json:"last_success,omitempty"`
+	LastError            string     `json:"last_error,omitempty"`
+	NextRetryAt          *time.Time `json:"next_retry_at,omitempty"`
+	Attempts             int        `json:"attempts,omitempty"`
+	ProbeState           string     `json:"probe_state,omitempty"`
+	LastProbeAt          *time.Time `json:"last_probe_at,omitempty"`
+	LastProbeSuccess     *time.Time `json:"last_probe_success,omitempty"`
+	Protocol             int        `json:"protocol,omitempty"`
+	RoundTripMS          int64      `json:"round_trip_ms,omitempty"`
+	Capabilities         []string   `json:"capabilities,omitempty"`
+	TransportKind        string     `json:"transport_kind,omitempty"`
+	TransportState       string     `json:"transport_state,omitempty"`
+	TransportAttempts    int        `json:"transport_attempts,omitempty"`
+	TransportLastError   string     `json:"transport_last_error,omitempty"`
+	TransportNextRetryAt *time.Time `json:"transport_next_retry_at,omitempty"`
 }
 
 type Manager struct {
@@ -80,13 +85,15 @@ type Manager struct {
 	ln     net.Listener
 	wg     sync.WaitGroup
 
-	mu         sync.RWMutex
-	peers      map[string]*peerRuntime
-	status     map[string]Status
-	gen        atomic.Uint64
-	started    bool
-	probe      func(context.Context, Peer) error
-	retryDelay func(int, time.Duration, time.Duration) time.Duration
+	mu               sync.RWMutex
+	peers            map[string]*peerRuntime
+	status           map[string]Status
+	gen              atomic.Uint64
+	started          bool
+	probe            func(context.Context, Peer) error
+	retryDelay       func(int, time.Duration, time.Duration) time.Duration
+	tunnelLauncher   tunnelLauncher
+	tunnelRetryDelay func(int, time.Duration, time.Duration) time.Duration
 
 	capabilities []string
 	handlersMu   sync.RWMutex
@@ -124,6 +131,7 @@ func New(cfg config.ParsedMeshConfig, registry *Registry, logger *slog.Logger) *
 	return &Manager{cfg: cfg, registry: registry, logger: logger,
 		peers: map[string]*peerRuntime{}, status: map[string]Status{},
 		probe: tcpReachabilityProbe, retryDelay: fullJitter,
+		tunnelLauncher: launchSSHTunnel, tunnelRetryDelay: fullJitter,
 		capabilities: append([]string(nil), defaultCapabilities...),
 		handlers:     map[string]registeredMethod{}, eventSubs: map[uint64]*eventSubscriber{}}
 }
@@ -137,7 +145,12 @@ func (m *Manager) Start(parent context.Context) error {
 	m.started = true
 	m.ctx, m.cancel = context.WithCancel(parent)
 	for _, peer := range m.registry.Peers {
-		m.status[peer.ID] = Status{PeerID: peer.ID, Direction: "outbound", State: "disconnected"}
+		status := Status{PeerID: peer.ID, Direction: "outbound", State: "disconnected"}
+		if peer.SSHTunnel != nil {
+			status.TransportKind = "ssh"
+			status.TransportState = "configured"
+		}
+		m.status[peer.ID] = status
 	}
 	for peerID := range m.registry.Accept {
 		m.status[peerID] = Status{PeerID: peerID, Direction: "inbound", State: "disconnected"}
@@ -152,6 +165,14 @@ func (m *Manager) Start(parent context.Context) error {
 			m.mu.Unlock()
 			return err
 		}
+	}
+	for _, p := range m.registry.Peers {
+		if p.SSHTunnel == nil {
+			continue
+		}
+		peer := p
+		m.wg.Add(1)
+		go func() { defer m.wg.Done(); m.superviseTunnel(peer) }()
 	}
 	for _, p := range m.registry.Peers {
 		peer := p
@@ -286,7 +307,7 @@ func (m *Manager) connectLoop(peer Peer) {
 				s.ProbeState = "unreachable"
 				s.LastProbeAt = &probeAt
 			})
-			m.setError(peer.ID, sanitizeError(fmt.Errorf("reachability probe: %w", err)))
+			m.setError(peer.ID, sanitizePeerError(peer, fmt.Errorf("reachability probe: %w", err)))
 		} else {
 			m.updateStatus(peer.ID, func(s *Status) {
 				s.State = "connecting"
@@ -301,7 +322,7 @@ func (m *Manager) connectLoop(peer Peer) {
 		if err == nil {
 			headers := http.Header{"Authorization": []string{"Bearer " + peer.Token}}
 			ctx, cancel := context.WithTimeout(m.ctx, m.cfg.HandshakeTimeout)
-			conn, _, err = websocket.Dial(ctx, peer.URL, &websocket.DialOptions{HTTPHeader: headers, Subprotocols: []string{subprotocol}})
+			conn, _, err = websocket.Dial(ctx, peer.DialURL(), &websocket.DialOptions{HTTPHeader: headers, Subprotocols: []string{subprotocol}})
 			if err == nil && conn.Subprotocol() != subprotocol {
 				err = errors.New("mesh subprotocol mismatch")
 			}
@@ -348,7 +369,7 @@ func (m *Manager) connectLoop(peer Peer) {
 			if conn != nil {
 				_ = conn.Close(websocket.StatusPolicyViolation, "handshake failed")
 			}
-			m.setError(peer.ID, sanitizeError(err))
+			m.setError(peer.ID, sanitizePeerError(peer, err))
 		}
 		attempt++
 		retryMin, retryMax := m.retryBounds(retryCause)
@@ -398,7 +419,7 @@ func (m *Manager) retryBounds(cause retryCause) (time.Duration, time.Duration) {
 }
 
 func tcpReachabilityProbe(ctx context.Context, peer Peer) error {
-	u, err := url.Parse(peer.URL)
+	u, err := url.Parse(peer.DialURL())
 	if err != nil {
 		return fmt.Errorf("parse peer URL: %w", err)
 	}
@@ -464,6 +485,9 @@ func (m *Manager) activate(peerID, direction string, conn *websocket.Conn, capab
 		ConnectedAt: &now, LastSeen: &now, LastSuccess: &now,
 		Protocol: ProtocolVersion, Capabilities: append([]string(nil), capabilities...),
 		ProbeState: prior.ProbeState, LastProbeAt: prior.LastProbeAt, LastProbeSuccess: prior.LastProbeSuccess,
+		TransportKind: prior.TransportKind, TransportState: prior.TransportState,
+		TransportAttempts: prior.TransportAttempts, TransportLastError: prior.TransportLastError,
+		TransportNextRetryAt: prior.TransportNextRetryAt,
 	}
 	// Register connection goroutines before releasing the lifecycle lock so
 	// Stop cannot begin Wait while an accepted handshake is still activating.

@@ -299,3 +299,67 @@ func TestMeshStatusTextAcceptsLegacyPeerWithoutProbeFields(t *testing.T) {
 		t.Fatalf("legacy status compatibility changed: %q", got)
 	}
 }
+
+func TestMeshTunnelConfigureAndRemovePreservesPeerCredential(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := meshTestConfig(t, dir, "ref")
+	registryPath := filepath.Join(dir, "ref-mesh.json")
+	registry := &mesh.Registry{
+		Version: mesh.RegistryVersion, DeviceID: "ref", Peers: []mesh.Peer{
+			{ID: "devbox", URL: "ws://devbox.example:7788/v1/mesh", Token: "mesh-secret"},
+		},
+	}
+	if err := mesh.SaveRegistry(registryPath, registry); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := cmdMesh([]string{
+		"tunnel", "devbox", "--ssh-target", "devbox", "--local", "127.0.0.1:18443",
+		"--remote", "127.0.0.1:7788", "--config", cfgPath,
+	}, strings.NewReader(""), &out); err != nil {
+		t.Fatalf("configure tunnel: %v", err)
+	}
+	if strings.Contains(out.String(), "mesh-secret") {
+		t.Fatalf("tunnel output exposed credential: %q", out.String())
+	}
+	updated, err := mesh.LoadRegistry(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.Peers) != 1 || updated.Peers[0].SSHTunnel == nil {
+		t.Fatalf("tunnel not persisted: %+v", updated.Peers)
+	}
+	if updated.Peers[0].Token != "mesh-secret" || updated.Peers[0].URL != registry.Peers[0].URL {
+		t.Fatalf("tunnel update changed paired identity: %+v", updated.Peers[0])
+	}
+
+	if err := cmdMesh([]string{"tunnel", "devbox", "--remove", "--config", cfgPath}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("remove tunnel: %v", err)
+	}
+	updated, err = mesh.LoadRegistry(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Peers[0].SSHTunnel != nil || updated.Peers[0].Token != "mesh-secret" {
+		t.Fatalf("remove changed more than transport: %+v", updated.Peers[0])
+	}
+}
+
+func TestMeshStatusTextShowsManagedTransportWithoutSecrets(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"enabled":true,"peers":[{"peer_id":"devbox","state":"disconnected","direction":"outbound","transport_kind":"ssh","transport_state":"backoff","transport_attempts":4,"transport_last_error":"exit status 255"}]}`))
+	}))
+	defer server.Close()
+	cfgPath := filepath.Join(t.TempDir(), "status.toml")
+	httpAddr := strings.TrimPrefix(server.URL, "http://")
+	if err := os.WriteFile(cfgPath, []byte("[daemon]\nhttp_addr = \""+httpAddr+"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := cmdMesh([]string{"status", "--config", cfgPath}, strings.NewReader(""), &out); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); !strings.Contains(got, "transport=ssh/backoff") || !strings.Contains(got, "transport_attempt=4") || !strings.Contains(got, "transport_error=exit status 255") {
+		t.Fatalf("managed transport status omitted: %q", got)
+	}
+}

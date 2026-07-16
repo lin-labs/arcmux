@@ -134,6 +134,7 @@ Usage:
   arcmux mesh join <invite-file|->                        Join from a 0600 file or stdin
   arcmux mesh grant <peer> [scopes...]                    Grant explicit application scopes (default: safe reads)
   arcmux mesh revoke <peer>                               Return a peer to transport-only access
+  arcmux mesh tunnel <peer> [options]                    Supervise a structured SSH local-forward fallback
   arcmux mesh sessions <peer> [--profile scope]           Synchronize and list safe remote sessions
   arcmux mesh session <peer> <scope> <session-id>         Show one safe remote session projection
   arcmux mesh bind <peer> <scope> <session-id>            Validate and bind this cmux surface to one cached remote session

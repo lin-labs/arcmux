@@ -51,6 +51,16 @@ make start && sleep 1 && make status
   ceiling. A short-lived established link that drops at a high attempt count
   must use the same prompt poll ceiling as a failed probe, while another
   connected peer retains its exact `connected_at` value.
+- Managed endpoint gate: run
+  `go test -race ./internal/mesh ./internal/daemon ./cmd/arcmux -run 'Test(ManagedSSHTunnel|SSHTunnel|DaemonRestartRecreatesConfiguredManagedTunnel|MeshTunnel|SanitizePeerError|UpsertPeerPreservesManagedTransport)' -count=10`.
+  It must prove each structured SSH local-forward is independently supervised,
+  process death and daemon restart recreate it, unreachable hosts use bounded
+  backoff, and neither status nor logs expose peer credentials. Configure the
+  durable fallback with `arcmux mesh tunnel <peer> --ssh-target <ssh-alias>
+  --local 127.0.0.1:<dedicated-port> --remote 127.0.0.1:7788`; remove it with
+  `arcmux mesh tunnel <peer> --remove` once a native tailnet URL is reachable.
+  The command accepts no arbitrary shell text and both endpoints must remain
+  loopback-only.
 - Live tailnet rung: on the stable host run
   `arcmux mesh serve ref --device <host> --url ws://<tailscale-host>:7788/v1/mesh --tailscale-port 7788`
   and pipe the JSON over SSH into

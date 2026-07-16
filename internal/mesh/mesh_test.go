@@ -104,6 +104,29 @@ func TestRegistryRejectsBidirectionalPeerInV1(t *testing.T) {
 	}
 }
 
+func TestRegistryValidatesStructuredSSHTunnelEndpoints(t *testing.T) {
+	valid := &Registry{Version: RegistryVersion, DeviceID: "ref", Peers: []Peer{
+		managedTunnelPeer("devbox", "token", "127.0.0.1:18443"),
+	}}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid SSH tunnel rejected: %v", err)
+	}
+	for name, mutate := range map[string]func(*SSHTunnel){
+		"non-loopback local":  func(tunnel *SSHTunnel) { tunnel.LocalAddr = "0.0.0.0:18443" },
+		"non-loopback remote": func(tunnel *SSHTunnel) { tunnel.RemoteAddr = "10.0.0.2:7788" },
+		"unsafe target":       func(tunnel *SSHTunnel) { tunnel.Target = "devbox; touch /tmp/pwned" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			peer := managedTunnelPeer("devbox", "token", "127.0.0.1:18443")
+			mutate(peer.SSHTunnel)
+			registry := &Registry{Version: RegistryVersion, DeviceID: "ref", Peers: []Peer{peer}}
+			if err := registry.Validate(); err == nil {
+				t.Fatalf("unsafe tunnel accepted: %+v", peer.SSHTunnel)
+			}
+		})
+	}
+}
+
 func TestRegistryRejectsDuplicateAcceptedCredentialWithoutExposingIt(t *testing.T) {
 	credential := TokenHash("same-secret-credential")
 	r := &Registry{

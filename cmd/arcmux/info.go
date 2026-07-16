@@ -26,6 +26,7 @@ import (
 
 	arcmuxv1 "github.com/lin-labs/arcmux/gen/arcmux/v1"
 	"github.com/lin-labs/arcmux/internal/config"
+	"github.com/lin-labs/arcmux/internal/mesh"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -34,6 +35,7 @@ import (
 // the struct also drives the human-readable layout (info.go renders one
 // "key: value" line per field, in declaration order, when --json is off).
 type daemonInfo struct {
+	DeviceID     string `json:"device_id"`
 	SocketPath   string `json:"socket_path"`
 	HTTPAddr     string `json:"http_addr"`
 	DataRoot     string `json:"data_root"`
@@ -73,6 +75,7 @@ func cmdInfo(args []string, stdout io.Writer) error {
 	}
 
 	info := daemonInfo{
+		DeviceID:   configuredMeshDeviceID(cfg),
 		SocketPath: cfg.Daemon.Socket,
 		HTTPAddr:   cfg.Daemon.HTTPAddr,
 		DataRoot:   cfg.Pulse.DataRoot,
@@ -131,6 +134,7 @@ func renderInfo(w io.Writer, info daemonInfo) error {
 		val string
 	}{
 		{"version", info.Version},
+		{"device id", info.DeviceID},
 		{"state", state},
 		{"socket", info.SocketPath},
 		{"http addr", info.HTTPAddr},
@@ -151,6 +155,23 @@ func renderInfo(w io.Writer, info daemonInfo) error {
 		fmt.Fprintf(w, "%-*s  %s\n", width, l.key, l.val)
 	}
 	return nil
+}
+
+// configuredMeshDeviceID reads the owner-only machine registry that is also
+// authoritative for daemon mesh reloads. It intentionally does not infer an
+// identity from a surface binding or peer: first-ever supervised dispatch must
+// work before either exists. Info remains best-effort if mesh is unconfigured
+// or its local registry needs repair.
+func configuredMeshDeviceID(cfg *config.Config) string {
+	parsed, err := cfg.Mesh.Parse()
+	if err != nil {
+		return ""
+	}
+	registry, err := mesh.LoadRegistry(parsed.RegistryPath)
+	if err != nil {
+		return ""
+	}
+	return registry.DeviceID
 }
 
 // pgrepArcmux returns the PID of a running `arcmux` daemon, or 0 if none.

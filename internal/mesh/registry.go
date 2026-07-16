@@ -7,15 +7,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 )
 
 const RegistryVersion = 1
 
 var safeID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+var safeSSHTarget = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@-]{0,254}$`)
 
 // Registry is machine-local mesh identity and pairing state. Tokens must never
 // be serialized through status APIs or logs.
@@ -32,9 +35,20 @@ type Registry struct {
 }
 
 type Peer struct {
-	ID    string `json:"id"`
-	URL   string `json:"url"`
-	Token string `json:"token"`
+	ID        string     `json:"id"`
+	URL       string     `json:"url"`
+	Token     string     `json:"token"`
+	SSHTunnel *SSHTunnel `json:"ssh_tunnel,omitempty"`
+}
+
+// SSHTunnel is the deliberately narrow fallback transport for peer endpoints
+// that cannot be routed directly across tailnets. It is structured rather than
+// an arbitrary command so registry content never becomes a shell execution
+// surface. Both forwarded endpoints stay loopback-only.
+type SSHTunnel struct {
+	Target     string `json:"target"`
+	LocalAddr  string `json:"local_addr"`
+	RemoteAddr string `json:"remote_addr"`
 }
 
 func LoadRegistry(path string) (*Registry, error) {
@@ -103,6 +117,11 @@ func (r *Registry) Validate() error {
 		if _, inbound := r.Accept[p.ID]; inbound {
 			return fmt.Errorf("mesh peer %q cannot be both inbound and outbound in protocol v1", p.ID)
 		}
+		if p.SSHTunnel != nil {
+			if err := p.SSHTunnel.Validate(); err != nil {
+				return fmt.Errorf("mesh peer %q ssh tunnel: %w", p.ID, err)
+			}
+		}
 		seen[p.ID] = true
 	}
 	for id, grants := range r.Grants {
@@ -119,6 +138,36 @@ func (r *Registry) Validate() error {
 			}
 			seenScopes[scope] = true
 		}
+	}
+	return nil
+}
+
+// Validate enforces a non-shell SSH target and loopback-only forward endpoints.
+func (t SSHTunnel) Validate() error {
+	if !safeSSHTarget.MatchString(t.Target) {
+		return errors.New("target must be a host or SSH config alias without shell characters")
+	}
+	if err := validateLoopbackEndpoint(t.LocalAddr); err != nil {
+		return fmt.Errorf("local_addr: %w", err)
+	}
+	if err := validateLoopbackEndpoint(t.RemoteAddr); err != nil {
+		return fmt.Errorf("remote_addr: %w", err)
+	}
+	return nil
+}
+
+func validateLoopbackEndpoint(addr string) error {
+	host, portText, err := net.SplitHostPort(addr)
+	if err != nil {
+		return err
+	}
+	ip := net.ParseIP(host)
+	if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+		return fmt.Errorf("must be loopback, got %q", host)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("port must be between 1 and 65535")
 	}
 	return nil
 }
@@ -181,6 +230,12 @@ func TokenHash(token string) string {
 func (r *Registry) UpsertPeer(peer Peer) {
 	for i := range r.Peers {
 		if r.Peers[i].ID == peer.ID {
+			// Pairing refreshes rotate identity material, not the local transport
+			// policy. Preserve an existing managed forward unless the caller
+			// explicitly supplied a replacement.
+			if peer.SSHTunnel == nil {
+				peer.SSHTunnel = r.Peers[i].SSHTunnel
+			}
 			r.Peers[i] = peer
 			return
 		}
