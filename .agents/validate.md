@@ -75,6 +75,11 @@ make start && sleep 1 && make status
   disposable sessions after capturing the evidence.
 - `make deploy` to labs followed by an SSH-side `make status` and a curl from
   the lab box, confirming the released binary boots in its real environment.
+  When releasing from a linked worktree on labs, export
+  `GOFLAGS=-buildvcs=false`: that host has a broken `$HOME/.git` marker and Go's
+  VCS stamping otherwise searches the parent home instead of the linked
+  worktree, failing before installation. The source commit must still be
+  verified with `git rev-parse HEAD` before `make release`.
 
 (If a concrete `/healthz` endpoint exists, update this section with the curl
 command and expected response.)
