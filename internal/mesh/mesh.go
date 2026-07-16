@@ -119,6 +119,7 @@ type peerRuntime struct {
 	rpcPending   map[string]chan callResult
 	inflight     map[string]context.CancelFunc
 	capabilities map[string]struct{}
+	redactions   []string
 	eventMu      sync.Mutex
 	eventDirty   bool
 	eventGapSent bool
@@ -202,11 +203,11 @@ func (m *Manager) startListener() error {
 	return nil
 }
 
-func (m *Manager) Stop(ctx context.Context) {
+func (m *Manager) Stop(ctx context.Context) error {
 	m.mu.Lock()
 	if !m.started {
 		m.mu.Unlock()
-		return
+		return m.waitStopped(ctx)
 	}
 	m.started = false
 	if m.cancel != nil {
@@ -223,11 +224,17 @@ func (m *Manager) Stop(ctx context.Context) {
 	if m.server != nil {
 		_ = m.server.Shutdown(ctx)
 	}
+	return m.waitStopped(ctx)
+}
+
+func (m *Manager) waitStopped(ctx context.Context) error {
 	done := make(chan struct{})
 	go func() { m.wg.Wait(); close(done) }()
 	select {
 	case <-done:
+		return nil
 	case <-ctx.Done():
+		return fmt.Errorf("stop mesh manager: %w", ctx.Err())
 	}
 }
 
@@ -239,7 +246,7 @@ func (m *Manager) Addr() string {
 }
 
 func (m *Manager) handleUpgrade(w http.ResponseWriter, r *http.Request) {
-	peerID, ok := m.authorize(r.Header.Get("Authorization"))
+	peerID, presentedCredential, ok := m.authorize(r.Header.Get("Authorization"))
 	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -267,21 +274,21 @@ func (m *Manager) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 		_ = conn.Close(websocket.StatusInternalError, "handshake write failed")
 		return
 	}
-	m.activate(peerID, "inbound", conn, negotiated)
+	m.activate(peerID, "inbound", conn, negotiated, presentedCredential, TokenHash(presentedCredential))
 }
 
-func (m *Manager) authorize(header string) (string, bool) {
+func (m *Manager) authorize(header string) (string, string, bool) {
 	const prefix = "Bearer "
 	if !strings.HasPrefix(header, prefix) {
-		return "", false
+		return "", "", false
 	}
 	got := header[len(prefix):]
 	for id, token := range m.registry.Accept {
 		if subtle.ConstantTimeCompare([]byte(TokenHash(got)), []byte(token)) == 1 {
-			return id, true
+			return id, got, true
 		}
 	}
-	return "", false
+	return "", "", false
 }
 
 func (m *Manager) connectLoop(peer Peer) {
@@ -346,7 +353,7 @@ func (m *Manager) connectLoop(peer Peer) {
 		}
 		if err == nil {
 			connectedAt := time.Now()
-			p, activated := m.activate(peer.ID, "outbound", conn, negotiated)
+			p, activated := m.activate(peer.ID, "outbound", conn, negotiated, peer.Token, TokenHash(peer.Token))
 			if !activated {
 				return
 			}
@@ -461,7 +468,7 @@ func fullJitter(attempt int, min, max time.Duration) time.Duration {
 	return floor + time.Duration(rand.Int64N(int64(cap-floor)+1))
 }
 
-func (m *Manager) activate(peerID, direction string, conn *websocket.Conn, capabilities []string) (*peerRuntime, bool) {
+func (m *Manager) activate(peerID, direction string, conn *websocket.Conn, capabilities []string, redactions ...string) (*peerRuntime, bool) {
 	capSet := make(map[string]struct{}, len(capabilities))
 	for _, capability := range capabilities {
 		capSet[capability] = struct{}{}
@@ -469,7 +476,8 @@ func (m *Manager) activate(peerID, direction string, conn *websocket.Conn, capab
 	p := &peerRuntime{generation: m.gen.Add(1), peerID: peerID, direction: direction, conn: conn,
 		send: make(chan Envelope, m.cfg.WriterQueue), app: make(chan Envelope, m.cfg.WriterQueue),
 		events: make(chan Envelope, m.cfg.WriterQueue), done: make(chan struct{}), pending: map[string]chan time.Duration{},
-		rpcPending: map[string]chan callResult{}, inflight: map[string]context.CancelFunc{}, capabilities: capSet}
+		rpcPending: map[string]chan callResult{}, inflight: map[string]context.CancelFunc{}, capabilities: capSet,
+		redactions: append([]string(nil), redactions...)}
 	now := time.Now()
 	m.mu.Lock()
 	if !m.started {
@@ -705,7 +713,7 @@ func (m *Manager) disconnect(p *peerRuntime, err error) {
 		} else {
 			s.State = "disconnected"
 		}
-		s.LastError = sanitizeError(err)
+		s.LastError = sanitizeSecretsError(err, p.redactions...)
 		m.status[p.peerID] = s
 	}
 	m.mu.Unlock()

@@ -1122,25 +1122,35 @@ func (d *Daemon) currentMeshManager() (*arcmuxmesh.Manager, error) {
 	return manager, nil
 }
 
-func (d *Daemon) detachMeshTransport() {
-	d.meshMu.Lock()
+func (d *Daemon) detachMeshTransport() error {
+	d.meshMu.RLock()
 	manager := d.mesh
-	d.mesh = nil
 	app := d.meshApp
-	d.meshMu.Unlock()
+	d.meshMu.RUnlock()
 	if app != nil {
 		app.stopRuntime()
 	}
 	if manager != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		manager.Stop(ctx)
+		err := manager.Stop(ctx)
 		cancel()
+		if err != nil {
+			return err
+		}
 	}
+	d.meshMu.Lock()
+	if d.mesh == manager {
+		d.mesh = nil
+	}
+	d.meshMu.Unlock()
+	return nil
 }
 
 func (d *Daemon) stopMeshTransport() {
 	d.meshReloadMu.Lock()
-	d.detachMeshTransport()
+	if err := d.detachMeshTransport(); err != nil {
+		d.logger.Warn("mesh transport did not stop cleanly", "error", err)
+	}
 	d.meshReloadMu.Unlock()
 }
 

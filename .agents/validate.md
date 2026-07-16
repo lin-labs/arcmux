@@ -52,7 +52,7 @@ make start && sleep 1 && make status
   must use the same prompt poll ceiling as a failed probe, while another
   connected peer retains its exact `connected_at` value.
 - Managed endpoint gate: run
-  `go test -race ./internal/mesh ./internal/daemon ./cmd/arcmux -run 'Test(ManagedSSHTunnel|SSHTunnel|DaemonRestartRecreatesConfiguredManagedTunnel|MeshTunnel|SanitizePeerError|UpsertPeerPreservesManagedTransport)' -count=10`.
+  `go test -race ./internal/mesh ./internal/daemon ./cmd/arcmux -run 'Test(ManagedSSHTunnel|SSHTunnel|ManagerStopWaitsForManagedTunnelReaper|EstablishedConnectionCloseReasonRedacts|DaemonRestartRecreatesConfiguredManagedTunnel|MeshTunnel|SanitizePeerError|UpsertPeerPreservesManagedTransport)' -count=10`.
   It must prove each structured SSH local-forward is independently supervised,
   process death and daemon restart recreate it, unreachable hosts use bounded
   backoff, and neither status nor logs expose peer credentials. Configure the

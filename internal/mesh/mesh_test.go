@@ -321,6 +321,118 @@ func TestHighAttemptShortLivedConnectionDropUsesPromptRetryWithoutDisturbingPeer
 	devbox.Stop(stopCtx)
 }
 
+func TestEstablishedConnectionCloseReasonRedactsOutboundCredential(t *testing.T) {
+	const token = "outbound-mesh-secret"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: []string{"*"}, Subprotocols: []string{subprotocol}})
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+		defer cancel()
+		if _, err := readEnvelope(ctx, conn); err != nil {
+			return
+		}
+		if err := writeEnvelope(ctx, conn, Envelope{Version: ProtocolVersion, Type: "welcome", DeviceID: "devbox"}); err != nil {
+			return
+		}
+		_ = conn.Close(websocket.StatusPolicyViolation, "credential="+token)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client := New(testConfig("127.0.0.1:0"), &Registry{
+		Version: RegistryVersion, DeviceID: "ref", Peers: []Peer{{
+			ID: "devbox", URL: "ws" + strings.TrimPrefix(server.URL, "http") + meshPath, Token: token,
+		}},
+	}, testLogger())
+	client.retryDelay = func(int, time.Duration, time.Duration) time.Duration { return time.Hour }
+	startManager(t, client, ctx)
+
+	deadline := time.Now().Add(3 * time.Second)
+	var status Status
+	for time.Now().Before(deadline) {
+		for _, candidate := range client.Status() {
+			if candidate.PeerID == "devbox" && candidate.LastError != "" {
+				status = candidate
+				break
+			}
+		}
+		if status.LastError != "" {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if status.LastError == "" {
+		t.Fatalf("credential-bearing close reason not observed: %+v", client.Status())
+	}
+	if strings.Contains(status.LastError, token) || !strings.Contains(status.LastError, "[REDACTED]") {
+		t.Fatalf("established connection error exposed credential: %+v", status)
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	if err := client.Stop(stopCtx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEstablishedConnectionCloseReasonRedactsInboundCredential(t *testing.T) {
+	const token = "inbound-mesh-secret"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server := New(testConfig("127.0.0.1:0"), &Registry{
+		Version: RegistryVersion, DeviceID: "devbox", Serve: true,
+		Accept: map[string]string{"ref": TokenHash(token)},
+	}, testLogger())
+	startManager(t, server, ctx)
+	client := New(testConfig("127.0.0.1:0"), &Registry{
+		Version: RegistryVersion, DeviceID: "ref", Peers: []Peer{{
+			ID: "devbox", URL: "ws://" + server.Addr() + meshPath, Token: token,
+		}},
+	}, testLogger())
+	startManager(t, client, ctx)
+	waitState(t, client, "devbox", "connected")
+	waitState(t, server, "ref", "connected")
+
+	client.mu.RLock()
+	connection := client.peers["devbox"]
+	client.mu.RUnlock()
+	if connection == nil {
+		t.Fatal("client connection disappeared before close-reason test")
+	}
+	_ = connection.conn.Close(websocket.StatusPolicyViolation, "credential="+token)
+
+	deadline := time.Now().Add(3 * time.Second)
+	var status Status
+	for time.Now().Before(deadline) {
+		for _, candidate := range server.Status() {
+			if candidate.PeerID == "ref" && candidate.LastError != "" {
+				status = candidate
+				break
+			}
+		}
+		if status.LastError != "" {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if status.LastError == "" || strings.Contains(status.LastError, token) || !strings.Contains(status.LastError, "[REDACTED]") {
+		t.Fatalf("inbound established error did not redact presented credential: %+v", status)
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	if err := client.Stop(stopCtx); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.Stop(stopCtx); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestConnectPingAndGracefulShutdown(t *testing.T) {
 	token, _ := NewToken()
 	server := New(testConfig("127.0.0.1:0"), &Registry{Version: 1, DeviceID: "server", Serve: true, Accept: map[string]string{"client": TokenHash(token)}}, testLogger())

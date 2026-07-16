@@ -73,7 +73,7 @@ func sshTunnelArgs(peer Peer) ([]string, error) {
 		"-o", "ServerAliveInterval=5",
 		"-o", "ServerAliveCountMax=3",
 		"-o", "ConnectTimeout=5",
-		"-o", "ClearAllForwardings=yes",
+		"-o", "ClearAllForwardings=no",
 		"-o", "ControlMaster=no",
 		"-o", "PermitLocalCommand=no",
 		"-o", "StrictHostKeyChecking=yes",
@@ -115,6 +115,10 @@ func (m *Manager) superviseTunnel(peer Peer) {
 			case err = <-process.Done():
 			case <-m.ctx.Done():
 				process.Stop()
+				// Reap the exact child before this supervisor exits. Manager.Stop's
+				// caller-owned deadline bounds this wait and ReloadMesh refuses to
+				// start a replacement manager if the old transport did not drain.
+				<-process.Done()
 				return
 			}
 			if m.ctx.Err() != nil {
@@ -152,15 +156,20 @@ func (m *Manager) superviseTunnel(peer Peer) {
 }
 
 func sanitizePeerError(peer Peer, err error) string {
+	return sanitizeSecretsError(err, peer.Token, TokenHash(peer.Token))
+}
+
+func sanitizeSecretsError(err error, secrets ...string) string {
 	if err == nil {
 		return ""
 	}
 	// Redact before applying the public status length bound. Truncating first
 	// could retain only a prefix of a token and thereby evade exact replacement.
 	safe := err.Error()
-	if peer.Token != "" {
-		safe = strings.ReplaceAll(safe, peer.Token, "[REDACTED]")
-		safe = strings.ReplaceAll(safe, TokenHash(peer.Token), "[REDACTED]")
+	for _, secret := range secrets {
+		if secret != "" {
+			safe = strings.ReplaceAll(safe, secret, "[REDACTED]")
+		}
 	}
 	if len(safe) > 240 {
 		safe = safe[:240]

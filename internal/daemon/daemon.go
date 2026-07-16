@@ -478,15 +478,16 @@ func (d *Daemon) ReloadMesh() error {
 		return err
 	}
 	if !meshCfg.Enabled {
-		d.detachMeshTransport()
-		return nil
+		return d.detachMeshTransport()
 	}
 	registry, err := arcmuxmesh.LoadRegistry(meshCfg.RegistryPath)
 	if err != nil {
 		return err
 	}
+	if err := d.detachMeshTransport(); err != nil {
+		return fmt.Errorf("stop prior mesh transport: %w", err)
+	}
 	d.setMeshDeviceID(registry.DeviceID)
-	d.detachMeshTransport()
 	if registry.DeviceID == "" || (!registry.Serve && len(registry.Peers) == 0) {
 		return nil
 	}

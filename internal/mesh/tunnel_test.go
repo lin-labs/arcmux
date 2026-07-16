@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,6 +18,24 @@ type fakeTunnelProcess struct {
 	done     chan error
 	stopOnce sync.Once
 	stopped  chan struct{}
+}
+
+type delayedStopTunnelProcess struct {
+	done  chan error
+	delay time.Duration
+	once  sync.Once
+}
+
+func (p *delayedStopTunnelProcess) Done() <-chan error { return p.done }
+
+func (p *delayedStopTunnelProcess) Stop() {
+	p.once.Do(func() {
+		go func() {
+			time.Sleep(p.delay)
+			p.done <- context.Canceled
+			close(p.done)
+		}()
+	})
 }
 
 func newFakeTunnelProcess() *fakeTunnelProcess {
@@ -252,7 +271,7 @@ func TestSSHTunnelUsesStructuredFixedArgumentsAndLoopbackDialURL(t *testing.T) {
 	joined := strings.Join(args, " ")
 	for _, want := range []string{
 		"-N", "-T", "BatchMode=yes", "ExitOnForwardFailure=yes",
-		"127.0.0.1:18443:127.0.0.1:7788", "devbox",
+		"ClearAllForwardings=no", "127.0.0.1:18443:127.0.0.1:7788", "devbox",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("ssh args %q missing %q", joined, want)
@@ -263,6 +282,64 @@ func TestSSHTunnelUsesStructuredFixedArgumentsAndLoopbackDialURL(t *testing.T) {
 	}
 	if got := peer.DialURL(); got != "ws://127.0.0.1:18443/v1/mesh" {
 		t.Fatalf("managed tunnel dial URL=%q", got)
+	}
+}
+
+func TestSSHTunnelOpenSSHEffectiveConfigRetainsLocalForward(t *testing.T) {
+	if _, err := exec.LookPath("ssh"); err != nil {
+		t.Skip("OpenSSH client is not installed")
+	}
+	peer := managedTunnelPeer("devbox", "token", "127.0.0.1:18443")
+	args, err := sshTunnelArgs(peer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Ignore user SSH config so Match/Include rules cannot influence this
+	// contract check. `ssh -G` prints effective configuration without dialing.
+	effectiveArgs := append([]string{"-G", "-F", "/dev/null"}, args...)
+	output, err := exec.Command("ssh", effectiveArgs...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ssh -G: %v: %s", err, output)
+	}
+	effective := strings.ToLower(string(output))
+	if !strings.Contains(effective, "clearallforwardings no") ||
+		!strings.Contains(effective, "localforward [127.0.0.1]:18443 [127.0.0.1]:7788") {
+		t.Fatalf("OpenSSH effective config lost managed local forward:\n%s", output)
+	}
+}
+
+func TestManagerStopWaitsForManagedTunnelReaper(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	peer := managedTunnelPeer("devbox", "token", "127.0.0.1:18443")
+	manager := New(testConfig("127.0.0.1:0"), &Registry{
+		Version: RegistryVersion, DeviceID: "ref", Peers: []Peer{peer},
+	}, testLogger())
+	manager.probe = func(context.Context, Peer) error { return errors.New("offline") }
+	process := &delayedStopTunnelProcess{done: make(chan error, 1), delay: 75 * time.Millisecond}
+	manager.tunnelLauncher = func(context.Context, Peer) (managedTunnelProcess, error) {
+		return process, nil
+	}
+	startManager(t, manager, ctx)
+	waitTransportState(t, manager, "devbox", "running")
+
+	started := time.Now()
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	err := manager.Stop(stopCtx)
+	stopCancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed < process.delay {
+		t.Fatalf("Manager.Stop returned after %s before delayed reaper %s", elapsed, process.delay)
+	}
+	select {
+	case _, ok := <-process.Done():
+		if ok {
+			t.Fatal("reaper result remained unread")
+		}
+	default:
+		t.Fatal("managed tunnel Done channel was not joined")
 	}
 }
 
