@@ -14,12 +14,12 @@ import (
 )
 
 const (
-	sourceHistoryPrefix     = ".arcmux-handoff-sha256-"
+	sourceHistoryPrefix     = "arcmux-handoff-sha256-"
 	sourceHistoryTempPrefix = ".arcmux-handoff-tmp-"
-	// A non-Markdown suffix keeps Mission Control's recursive history
-	// discovery from mistaking this retained transport snapshot for a live
-	// canonical conversation log.
-	sourceHistorySuffix    = ".snapshot"
+	// History synchronization transports Markdown files only. Mission Control
+	// excludes this distinctive content-addressed prefix from canonical session
+	// discovery; the file still remains private and immutable.
+	sourceHistorySuffix    = ".md"
 	sourceHistoryTempTries = 8
 )
 
@@ -30,7 +30,7 @@ type sourceHistoryPublishHooks struct {
 }
 
 // PublishSourceHistory copies one exact, verified session-history version to
-// a content-addressed hidden file in the configured synced history root. The
+// a content-addressed Markdown file in the configured synced history root. The
 // returned reference names only that immutable publication, so later turns may
 // safely keep appending to or rewriting the human-readable session log.
 //

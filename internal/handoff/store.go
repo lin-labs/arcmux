@@ -14,10 +14,13 @@ import (
 )
 
 var (
-	ErrNotFound          = errors.New("handoff record not found")
-	ErrManifestConflict  = errors.New("handoff manifest conflict")
-	ErrCASConflict       = errors.New("handoff record revision conflict")
-	ErrIllegalTransition = errors.New("illegal handoff state transition")
+	ErrNotFound                   = errors.New("handoff record not found")
+	ErrManifestConflict           = errors.New("handoff manifest conflict")
+	ErrCASConflict                = errors.New("handoff record revision conflict")
+	ErrIllegalTransition          = errors.New("illegal handoff state transition")
+	ErrAcknowledgementUnavailable = errors.New("handoff acknowledgement is unavailable")
+	ErrTargetNotAccepted          = errors.New("handoff target is not accepted")
+	ErrContextNotLoaded           = errors.New("handoff context is not loaded")
 )
 
 // Store persists source and target handoff records beneath a caller-owned
@@ -228,9 +231,10 @@ func (s *Store) DueTarget(at time.Time) ([]TargetRecord, error) {
 	return out, nil
 }
 
-// RunnableSource enumerates source work that may resume after process restart.
-// RemotePrepared is intentionally absent: launch authorization must be
-// explicit and must not be inferred from a daemon restart.
+// RunnableSource enumerates source work that may resume after process restart,
+// including every explicitly authorized pending retirement. RemotePrepared is
+// intentionally absent: launch authorization must be explicit and must not be
+// inferred from a daemon restart.
 func (s *Store) RunnableSource(at time.Time) ([]SourceRecord, error) {
 	if at.IsZero() {
 		return nil, errors.New("runnable time is required")
@@ -246,6 +250,10 @@ func (s *Store) RunnableSource(at time.Time) ([]SourceRecord, error) {
 			out = append(out, record)
 		case SourceRetryWait, SourceLaunchRetryWait:
 			if record.NextRetry != nil && !record.NextRetry.After(at) {
+				out = append(out, record)
+			}
+		case SourceAccepted:
+			if record.Retirement != nil && record.Retirement.State == RetirementPending {
 				out = append(out, record)
 			}
 		}
@@ -411,6 +419,190 @@ func (s *Store) RecordTargetLaunchLocator(id string, expectedRevision uint64, lo
 		return TargetRecord{}, err
 	}
 	return cloneTargetRecord(record), nil
+}
+
+// AcknowledgeTarget binds an opaque launch marker and the caller's
+// daemon-catalog identity to the exact accepted target record, then persists
+// one idempotent context-loaded acknowledgement. Wrong markers and wrong
+// caller identities deliberately collapse to an unavailable error.
+func (s *Store) AcknowledgeTarget(marker string, phase AcknowledgementPhase, callerProfileScope, callerSessionID string, at time.Time) (TargetRecord, bool, error) {
+	if !validLaunchMarker(marker) || phase != ContextLoadedPhase || callerProfileScope == "" || callerSessionID == "" {
+		return TargetRecord{}, false, ErrAcknowledgementUnavailable
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	files, err := s.recordFiles("target")
+	if err != nil {
+		return TargetRecord{}, false, ErrAcknowledgementUnavailable
+	}
+	for _, file := range files {
+		var record TargetRecord
+		if err := readJSONFile(file, &record); err != nil || record.validatePath(file, s, "target") != nil {
+			return TargetRecord{}, false, ErrAcknowledgementUnavailable
+		}
+		if LaunchMarker(record.Manifest.HandoffID, record.Digest) != marker {
+			continue
+		}
+		if record.State != TargetAccepted || record.TargetLocator == nil {
+			return TargetRecord{}, false, ErrTargetNotAccepted
+		}
+		if record.TargetLocator.ProfileScope != callerProfileScope || record.TargetLocator.SessionID != callerSessionID {
+			return TargetRecord{}, false, ErrAcknowledgementUnavailable
+		}
+		if record.ContextLoaded != nil {
+			return cloneTargetRecord(record), true, nil
+		}
+		if at.IsZero() {
+			at = s.now().UTC()
+		}
+		if at.Location() != time.UTC || at.Before(record.Updated) {
+			return TargetRecord{}, false, errors.New("acknowledgement time must be UTC and not precede the record")
+		}
+		record.ContextLoaded = &ContextAcknowledgement{
+			Phase: phase, ManifestDigest: record.Digest, TargetLocator: *record.TargetLocator, AcknowledgedAt: at,
+		}
+		record.Revision++
+		record.Updated = at
+		if err := record.validate(); err != nil {
+			return TargetRecord{}, false, err
+		}
+		if err := writeJSONFile(s.root, file, record); err != nil {
+			return TargetRecord{}, false, err
+		}
+		return cloneTargetRecord(record), false, nil
+	}
+	return TargetRecord{}, false, ErrAcknowledgementUnavailable
+}
+
+// RecordSourceContextLoaded persists an authenticated exact-target proof. A
+// replay of the same proof succeeds without another revision; any digest or
+// locator mismatch leaves source state unchanged.
+func (s *Store) RecordSourceContextLoaded(id string, expectedRevision uint64, acknowledgement ContextAcknowledgement, at time.Time) (SourceRecord, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, err := s.getSourceLocked(id)
+	if err != nil {
+		return SourceRecord{}, false, err
+	}
+	if record.State != SourceAccepted || record.TargetLocator == nil {
+		return SourceRecord{}, false, ErrTargetNotAccepted
+	}
+	if err := acknowledgement.validate(record.Digest, *record.TargetLocator); err != nil {
+		return SourceRecord{}, false, ErrManifestConflict
+	}
+	if record.ContextLoaded != nil {
+		if *record.ContextLoaded != acknowledgement {
+			return SourceRecord{}, false, ErrManifestConflict
+		}
+		return cloneSourceRecord(record), true, nil
+	}
+	if record.Revision != expectedRevision {
+		return SourceRecord{}, false, ErrCASConflict
+	}
+	if at.IsZero() {
+		at = s.now().UTC()
+	}
+	if at.Location() != time.UTC || at.Before(record.Updated) {
+		return SourceRecord{}, false, errors.New("verification time must be UTC and not precede the record")
+	}
+	record.ContextLoaded = cloneAcknowledgement(&acknowledgement)
+	record.Revision++
+	record.Updated = at
+	if err := record.validate(); err != nil {
+		return SourceRecord{}, false, err
+	}
+	file, _ := s.recordPath("source", id)
+	if err := writeJSONFile(s.root, file, record); err != nil {
+		return SourceRecord{}, false, err
+	}
+	return cloneSourceRecord(record), false, nil
+}
+
+func (s *Store) RequestSourceRetirement(id string, expectedRevision uint64, mode RetirementMode, timeout time.Duration, baseline TurnObservation, at time.Time) (SourceRecord, bool, error) {
+	if mode != RetirementImmediate && mode != RetirementAfterTurnEnd {
+		return SourceRecord{}, false, errors.New("invalid source retirement mode")
+	}
+	if timeout < time.Second || timeout > 5*time.Minute || timeout%time.Second != 0 {
+		return SourceRecord{}, false, errors.New("retirement timeout must be whole seconds between 1s and 5m")
+	}
+	if baseline.TurnCount < 0 || (baseline.LastTurnEndAt != nil && (baseline.LastTurnEndAt.IsZero() || baseline.LastTurnEndAt.Location() != time.UTC)) {
+		return SourceRecord{}, false, errors.New("invalid source turn observation")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, err := s.getSourceLocked(id)
+	if err != nil {
+		return SourceRecord{}, false, err
+	}
+	if record.State != SourceAccepted || record.ContextLoaded == nil {
+		return SourceRecord{}, false, ErrContextNotLoaded
+	}
+	if record.Retirement != nil {
+		if record.Retirement.Mode != mode || record.Retirement.TimeoutSeconds != int64(timeout/time.Second) {
+			return SourceRecord{}, false, ErrManifestConflict
+		}
+		return cloneSourceRecord(record), true, nil
+	}
+	if record.Revision != expectedRevision {
+		return SourceRecord{}, false, ErrCASConflict
+	}
+	if at.IsZero() {
+		at = s.now().UTC()
+	}
+	if at.Location() != time.UTC || at.Before(record.Updated) {
+		return SourceRecord{}, false, errors.New("retirement time must be UTC and not precede the record")
+	}
+	record.Retirement = &SourceRetirement{
+		Mode: mode, State: RetirementPending, RequestedAt: at, TimeoutSeconds: int64(timeout / time.Second),
+		BaselineTurnCount: baseline.TurnCount, BaselineLastTurnEndAt: cloneTimePtr(baseline.LastTurnEndAt),
+	}
+	record.Revision++
+	record.Updated = at
+	if err := record.validate(); err != nil {
+		return SourceRecord{}, false, err
+	}
+	file, _ := s.recordPath("source", id)
+	if err := writeJSONFile(s.root, file, record); err != nil {
+		return SourceRecord{}, false, err
+	}
+	return cloneSourceRecord(record), false, nil
+}
+
+func (s *Store) CompleteSourceRetirement(id string, expectedRevision uint64, at time.Time) (SourceRecord, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, err := s.getSourceLocked(id)
+	if err != nil {
+		return SourceRecord{}, false, err
+	}
+	if record.Retirement == nil {
+		return SourceRecord{}, false, ErrContextNotLoaded
+	}
+	if record.Retirement.State == RetirementRetired {
+		return cloneSourceRecord(record), true, nil
+	}
+	if record.Revision != expectedRevision {
+		return SourceRecord{}, false, ErrCASConflict
+	}
+	if at.IsZero() {
+		at = s.now().UTC()
+	}
+	if at.Location() != time.UTC || at.Before(record.Updated) || at.Before(record.Retirement.RequestedAt) {
+		return SourceRecord{}, false, errors.New("retired time must be UTC and not precede the record")
+	}
+	retiredAt := at
+	record.Retirement.State = RetirementRetired
+	record.Retirement.RetiredAt = &retiredAt
+	record.Revision++
+	record.Updated = at
+	if err := record.validate(); err != nil {
+		return SourceRecord{}, false, err
+	}
+	file, _ := s.recordPath("source", id)
+	if err := writeJSONFile(s.root, file, record); err != nil {
+		return SourceRecord{}, false, err
+	}
+	return cloneSourceRecord(record), false, nil
 }
 
 func applyTransition(nextRetry **time.Time, failure **Failure, locator **TargetLocator, transition Transition, retry, terminalFailure, locatorAllowed bool) error {
@@ -744,6 +936,8 @@ func cloneSourceRecord(record SourceRecord) SourceRecord {
 	record.NextRetry = cloneTimePtr(record.NextRetry)
 	record.Failure = cloneFailure(record.Failure)
 	record.TargetLocator = cloneLocator(record.TargetLocator)
+	record.ContextLoaded = cloneAcknowledgement(record.ContextLoaded)
+	record.Retirement = cloneRetirement(record.Retirement)
 	return record
 }
 
@@ -752,6 +946,7 @@ func cloneTargetRecord(record TargetRecord) TargetRecord {
 	record.NextRetry = cloneTimePtr(record.NextRetry)
 	record.Failure = cloneFailure(record.Failure)
 	record.TargetLocator = cloneLocator(record.TargetLocator)
+	record.ContextLoaded = cloneAcknowledgement(record.ContextLoaded)
 	return record
 }
 
@@ -776,5 +971,23 @@ func cloneLocator(value *TargetLocator) *TargetLocator {
 		return nil
 	}
 	clone := *value
+	return &clone
+}
+
+func cloneAcknowledgement(value *ContextAcknowledgement) *ContextAcknowledgement {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	return &clone
+}
+
+func cloneRetirement(value *SourceRetirement) *SourceRetirement {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	clone.BaselineLastTurnEndAt = cloneTimePtr(value.BaselineLastTurnEndAt)
+	clone.RetiredAt = cloneTimePtr(value.RetiredAt)
 	return &clone
 }

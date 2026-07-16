@@ -249,13 +249,7 @@ func Build(scope ProfileScope, snap session.Snapshot, hookState *hooks.SessionSt
 				summary.CurrentWork = current
 			}
 		}
-		if basename := safeHistoryBasename(tc.VaultLink); basename != "" {
-			summary.History = &HistoryReference{
-				Basename:   basename,
-				Provenance: "hook.turn_contract.vault_link",
-				UpdatedAt:  tc.UpdatedAt,
-			}
-		}
+		summary.History = CanonicalHistoryReference(hookState)
 	}
 	detail.Summary = summary
 	detail.Turn = &TurnActivity{
@@ -265,6 +259,22 @@ func Build(scope ProfileScope, snap session.Snapshot, hookState *hooks.SessionSt
 		LastTurnEndAt:      nonZeroTime(hookState.LastTurnEndAt),
 	}
 	return summary, detail, nil
+}
+
+// CanonicalHistoryReference returns the safe basename bound by the daemon's
+// hook turn contract. It never returns the original absolute path or wikilink.
+func CanonicalHistoryReference(hookState *hooks.SessionState) *HistoryReference {
+	if hookState == nil || hookState.TurnContract == nil {
+		return nil
+	}
+	contract := hookState.TurnContract
+	basename := safeHistoryBasename(contract.VaultLink)
+	if basename == "" {
+		return nil
+	}
+	return &HistoryReference{
+		Basename: basename, Provenance: "hook.turn_contract.vault_link", UpdatedAt: contract.UpdatedAt,
+	}
 }
 
 // NormalizeCurrentWork enforces the additive mesh contract on both producer

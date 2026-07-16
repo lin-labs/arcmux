@@ -50,13 +50,13 @@ func TestEnvFlags_Empty(t *testing.T) {
 	}
 }
 
-func TestPromptDeliveryPlan_UsesLiteralBodyThenRawCarriageReturn(t *testing.T) {
+func TestPromptDeliveryPlan_UsesLiteralBodyThenNamedEnter(t *testing.T) {
 	plan := newPromptDeliveryPlan("hello Enter C-m")
 
 	if want := []string{"-l", "hello Enter C-m"}; !reflect.DeepEqual(plan.bodyKeys, want) {
 		t.Fatalf("body keys = %v, want %v", plan.bodyKeys, want)
 	}
-	if want := []string{"C-m"}; !reflect.DeepEqual(plan.submitKeys, want) {
+	if want := []string{"Enter"}; !reflect.DeepEqual(plan.submitKeys, want) {
 		t.Fatalf("submit keys = %v, want %v", plan.submitKeys, want)
 	}
 	if plan.wait != promptSubmitDelay {
@@ -70,7 +70,7 @@ func TestPromptDeliveryResult_TypedOnlyUntilSubmitSucceeds(t *testing.T) {
 		BodySent:  true,
 		Submitted: false,
 		BodyMode:  "literal",
-		SubmitKey: "C-m",
+		SubmitKey: "Enter",
 		Wait:      promptSubmitDelay,
 	}
 
@@ -263,6 +263,35 @@ func TestIntegration_NewWindowCanonical_TargetShape(t *testing.T) {
 	}
 	if !c.PaneExists(ctx, target) {
 		t.Errorf("pane %q should exist", target)
+	}
+}
+
+func TestIntegration_ExactPaneExistsDistinguishesAbsenceFromProbeFailure(t *testing.T) {
+	if !tmuxAvailable() {
+		t.Skip("tmux not available")
+	}
+	ctx := context.Background()
+	socket := fmt.Sprintf("arcmux-exact-pane-%d", time.Now().UnixNano())
+	c := NewClient(socket)
+	sessionName := fmt.Sprintf("arcmux-exact-pane-session-%d", time.Now().UnixNano())
+	paneID, err := c.NewSessionWithEnvPaneID(ctx, sessionName, "win", "", nil, "")
+	if err != nil {
+		t.Fatalf("NewSessionWithEnvPaneID: %v", err)
+	}
+	t.Cleanup(func() { _ = c.KillSession(context.Background(), sessionName) })
+
+	exists, err := c.ExactPaneExists(ctx, paneID)
+	if err != nil || !exists {
+		t.Fatalf("live exact pane: exists=%t err=%v", exists, err)
+	}
+	exists, err = c.ExactPaneExists(ctx, "%999999999")
+	if err != nil || exists {
+		t.Fatalf("absent exact pane: exists=%t err=%v", exists, err)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if exists, err = c.ExactPaneExists(canceled, paneID); err == nil || exists {
+		t.Fatalf("failed exact-pane query: exists=%t err=%v", exists, err)
 	}
 }
 

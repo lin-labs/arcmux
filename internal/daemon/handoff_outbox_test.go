@@ -76,7 +76,7 @@ func newSourceOutboxFixture(t *testing.T) *sourceOutboxFixture {
 				t.Fatalf("history inspection root=%q basename=%q conversation=%q", root, basename, conversation)
 			}
 			return handoff.HistoryRef{
-				ArtifactID: "history-" + strings.Repeat("c", 64), Basename: ".arcmux-handoff-sha256-" + strings.Repeat("c", 64) + ".snapshot",
+				ArtifactID: "history-" + strings.Repeat("c", 64), Basename: "arcmux-handoff-sha256-" + strings.Repeat("c", 64) + ".md",
 				SHA256: strings.Repeat("c", 64), SizeBytes: 128, ConversationID: conversation,
 			}, nil
 		},
@@ -86,6 +86,16 @@ func newSourceOutboxFixture(t *testing.T) *sourceOutboxFixture {
 		},
 		callLaunch: func(ctx context.Context, peer string, request meshHandoffLaunchRequest) (meshHandoffStatus, error) {
 			return fixture.launchRemote(ctx, peer, request)
+		},
+		callVerify: func(_ context.Context, _ string, request meshHandoffVerifyRequest) (meshHandoffVerification, error) {
+			return meshHandoffVerification{
+				HandoffID: request.HandoffID, ManifestDigest: request.ManifestDigest, TargetLocator: request.TargetLocator,
+				VerificationState: "pending",
+			}, nil
+		},
+		closeSource: func(context.Context, handoff.SourceSession, time.Duration) error {
+			fixture.detail.Summary.State = "exited"
+			return nil
 		},
 		newID: func(_ string) (string, error) {
 			if len(ids) == 0 {
@@ -136,7 +146,7 @@ func TestSourceHandoffPrepareDerivesImmutableManifestAndPrepares(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dto.State != handoff.SourceRemotePrepared || dto.Attempts != 1 || dto.TargetDevice != "devbox" || dto.Project != "demo" {
+	if dto.State != handoff.SourceRemotePrepared || dto.Attempts != 1 || dto.TargetDevice != "devbox" || dto.TargetProfile != "codex" || dto.Project != "demo" {
 		t.Fatalf("dto = %#v", dto)
 	}
 	manifest := fixture.manifest
@@ -144,7 +154,7 @@ func TestSourceHandoffPrepareDerivesImmutableManifestAndPrepares(t *testing.T) {
 		manifest.Source.SessionID != "session-1" || fixture.inspectedCWD != "/actual/source/worktree" {
 		t.Fatalf("source derivation manifest=%#v cwd=%q", manifest, fixture.inspectedCWD)
 	}
-	if manifest.Goal.Provenance != "explicit_operator" || !strings.HasPrefix(manifest.History.Basename, ".arcmux-handoff-sha256-") || manifest.Artifacts == nil || len(manifest.Artifacts) != 0 {
+	if manifest.Goal.Provenance != "explicit_operator" || !strings.HasPrefix(manifest.History.Basename, "arcmux-handoff-sha256-") || manifest.Artifacts == nil || len(manifest.Artifacts) != 0 {
 		t.Fatalf("derived manifest = %#v", manifest)
 	}
 	if manifest.Validation.RepositoryRevision != manifest.Repository.SourceHead || manifest.Validation.CompletedAt == nil {
@@ -177,6 +187,220 @@ func TestSourceHandoffLaunchIsExplicitAndPersistsAcceptedLocator(t *testing.T) {
 	replay, err := fixture.outbox.launch(context.Background(), prepared.HandoffID)
 	if err != nil || replay.TargetLocator == nil || *replay.TargetLocator != *accepted.TargetLocator || launchCalls.Load() != 1 {
 		t.Fatalf("replay=%+v launch_calls=%d err=%v", replay, launchCalls.Load(), err)
+	}
+}
+
+func TestSourceHandoffVerifyRequiresExactRemoteAcknowledgementAndKeepsSource(t *testing.T) {
+	fixture := newSourceOutboxFixture(t)
+	prepared, err := fixture.outbox.prepare(context.Background(), sourcePrepareRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := fixture.outbox.launch(context.Background(), prepared.HandoffID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := 0
+	fixture.outbox.closeSource = func(context.Context, handoff.SourceSession, time.Duration) error {
+		closed++
+		return nil
+	}
+	fixture.outbox.callVerify = func(context.Context, string, meshHandoffVerifyRequest) (meshHandoffVerification, error) {
+		return meshHandoffVerification{}, errors.New("offline")
+	}
+	offline, err := fixture.outbox.verify(context.Background(), accepted.HandoffID)
+	if err != nil || offline.VerificationState != "unavailable" || offline.ContextLoaded || closed != 0 {
+		t.Fatalf("offline verification=%+v closed=%d err=%v", offline, closed, err)
+	}
+	stored, _ := fixture.store.GetSource(accepted.HandoffID)
+	if stored.ContextLoaded != nil || stored.Retirement != nil {
+		t.Fatalf("offline verification mutated source: %+v", stored)
+	}
+
+	fixture.outbox.callVerify = func(_ context.Context, _ string, request meshHandoffVerifyRequest) (meshHandoffVerification, error) {
+		wrong := request.TargetLocator
+		wrong.SessionID = "wrong-target"
+		return meshHandoffVerification{HandoffID: request.HandoffID, ManifestDigest: request.ManifestDigest, TargetLocator: wrong, VerificationState: "context_loaded", ContextLoaded: true}, nil
+	}
+	mismatch, err := fixture.outbox.verify(context.Background(), accepted.HandoffID)
+	if err != nil || mismatch.VerificationState != "mismatch" || mismatch.ContextLoaded || closed != 0 {
+		t.Fatalf("mismatch verification=%+v closed=%d err=%v", mismatch, closed, err)
+	}
+
+	ackAt := time.Now().UTC()
+	fixture.outbox.callVerify = func(_ context.Context, _ string, request meshHandoffVerifyRequest) (meshHandoffVerification, error) {
+		ack := handoff.ContextAcknowledgement{
+			Phase: handoff.ContextLoadedPhase, ManifestDigest: request.ManifestDigest, TargetLocator: request.TargetLocator, AcknowledgedAt: ackAt,
+		}
+		return meshHandoffVerification{
+			HandoffID: request.HandoffID, ManifestDigest: request.ManifestDigest, TargetLocator: request.TargetLocator,
+			VerificationState: "context_loaded", ContextLoaded: true, Acknowledgement: &ack,
+		}, nil
+	}
+	verified, err := fixture.outbox.verify(context.Background(), accepted.HandoffID)
+	if err != nil || !verified.ContextLoaded || verified.VerificationState != "context_loaded" || closed != 0 {
+		t.Fatalf("verified=%+v closed=%d err=%v", verified, closed, err)
+	}
+	stored, _ = fixture.store.GetSource(accepted.HandoffID)
+	if stored.ContextLoaded == nil || stored.ContextLoaded.TargetLocator != *accepted.TargetLocator {
+		t.Fatalf("stored proof = %+v", stored.ContextLoaded)
+	}
+}
+
+func TestSourceHandoffRetireClosesOnlyImmutableSourceAfterVerification(t *testing.T) {
+	fixture := newSourceOutboxFixture(t)
+	prepared, err := fixture.outbox.prepare(context.Background(), sourcePrepareRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := fixture.outbox.launch(context.Background(), prepared.HandoffID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.outbox.retire(context.Background(), accepted.HandoffID, handoff.RetirementImmediate, 10*time.Second); sourceHandoffErrorKindOf(err) != sourceHandoffConflict {
+		t.Fatalf("retire before ack err=%v", err)
+	}
+	ackAt := time.Now().UTC()
+	fixture.outbox.callVerify = func(_ context.Context, _ string, request meshHandoffVerifyRequest) (meshHandoffVerification, error) {
+		ack := handoff.ContextAcknowledgement{Phase: handoff.ContextLoadedPhase, ManifestDigest: request.ManifestDigest, TargetLocator: request.TargetLocator, AcknowledgedAt: ackAt}
+		return meshHandoffVerification{HandoffID: request.HandoffID, ManifestDigest: request.ManifestDigest, TargetLocator: request.TargetLocator, VerificationState: "context_loaded", ContextLoaded: true, Acknowledgement: &ack}, nil
+	}
+	if _, err := fixture.outbox.verify(context.Background(), accepted.HandoffID); err != nil {
+		t.Fatal(err)
+	}
+	var closed []handoff.SourceSession
+	fixture.outbox.closeSource = func(_ context.Context, source handoff.SourceSession, timeout time.Duration) error {
+		if timeout != 10*time.Second {
+			t.Fatalf("close timeout=%s", timeout)
+		}
+		closed = append(closed, source)
+		fixture.detail.Summary.State = "exited"
+		return nil
+	}
+	retired, err := fixture.outbox.retire(context.Background(), accepted.HandoffID, handoff.RetirementImmediate, 10*time.Second)
+	if err != nil || retired.RetirementState != "retired" || len(closed) != 1 || closed[0] != fixture.manifest.Source {
+		t.Fatalf("retired=%+v closed=%+v err=%v", retired, closed, err)
+	}
+	replay, err := fixture.outbox.retire(context.Background(), accepted.HandoffID, handoff.RetirementImmediate, 10*time.Second)
+	if err != nil || replay.RetirementState != "retired" || len(closed) != 1 {
+		t.Fatalf("retire replay=%+v closed=%+v err=%v", replay, closed, err)
+	}
+}
+
+func TestSourceHandoffImmediateRetirementRetriesAfterRestartUntilExactExit(t *testing.T) {
+	fixture := newSourceOutboxFixture(t)
+	prepared, err := fixture.outbox.prepare(context.Background(), sourcePrepareRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := fixture.outbox.launch(context.Background(), prepared.HandoffID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ackAt := time.Now().UTC()
+	fixture.outbox.callVerify = func(_ context.Context, _ string, request meshHandoffVerifyRequest) (meshHandoffVerification, error) {
+		ack := handoff.ContextAcknowledgement{Phase: handoff.ContextLoadedPhase, ManifestDigest: request.ManifestDigest, TargetLocator: request.TargetLocator, AcknowledgedAt: ackAt}
+		return meshHandoffVerification{HandoffID: request.HandoffID, ManifestDigest: request.ManifestDigest, TargetLocator: request.TargetLocator, VerificationState: "context_loaded", ContextLoaded: true, Acknowledgement: &ack}, nil
+	}
+	if _, err := fixture.outbox.verify(context.Background(), accepted.HandoffID); err != nil {
+		t.Fatal(err)
+	}
+
+	closeCalls := 0
+	fixture.outbox.closeSource = func(context.Context, handoff.SourceSession, time.Duration) error {
+		closeCalls++
+		if closeCalls == 2 {
+			fixture.detail.Summary.State = "exited"
+		}
+		return nil
+	}
+	pending, err := fixture.outbox.retire(context.Background(), accepted.HandoffID, handoff.RetirementImmediate, 10*time.Second)
+	if err != nil || pending.RetirementState != "pending" || closeCalls != 1 {
+		t.Fatalf("initial retirement=%+v close_calls=%d err=%v", pending, closeCalls, err)
+	}
+	stored, _ := fixture.store.GetSource(accepted.HandoffID)
+	if stored.Retirement == nil || stored.Retirement.State != handoff.RetirementPending {
+		t.Fatalf("pending retirement was not durable: %+v", stored.Retirement)
+	}
+
+	reopened, err := handoff.Open(fixture.store.Root())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.outbox.store = reopened
+	reconcileAt := time.Now().UTC().Add(time.Second)
+	fixture.outbox.now = func() time.Time { return reconcileAt }
+	if err := fixture.outbox.reconcile(context.Background(), reconcileAt); err != nil {
+		t.Fatal(err)
+	}
+	stored, _ = reopened.GetSource(accepted.HandoffID)
+	if closeCalls != 2 || stored.Retirement == nil || stored.Retirement.State != handoff.RetirementRetired {
+		t.Fatalf("restart retirement=%+v close_calls=%d", stored.Retirement, closeCalls)
+	}
+	if err := fixture.outbox.reconcile(context.Background(), reconcileAt.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if closeCalls != 2 {
+		t.Fatalf("retired source was closed again: close_calls=%d", closeCalls)
+	}
+}
+
+func TestSourceHandoffAfterTurnRetirementWaitsForNewDurableTurnEnd(t *testing.T) {
+	fixture := newSourceOutboxFixture(t)
+	prepared, err := fixture.outbox.prepare(context.Background(), sourcePrepareRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := fixture.outbox.launch(context.Background(), prepared.HandoffID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ackAt := time.Now().UTC()
+	fixture.outbox.callVerify = func(_ context.Context, _ string, request meshHandoffVerifyRequest) (meshHandoffVerification, error) {
+		ack := handoff.ContextAcknowledgement{Phase: handoff.ContextLoadedPhase, ManifestDigest: request.ManifestDigest, TargetLocator: request.TargetLocator, AcknowledgedAt: ackAt}
+		return meshHandoffVerification{HandoffID: request.HandoffID, ManifestDigest: request.ManifestDigest, TargetLocator: request.TargetLocator, VerificationState: "context_loaded", ContextLoaded: true, Acknowledgement: &ack}, nil
+	}
+	if _, err := fixture.outbox.verify(context.Background(), accepted.HandoffID); err != nil {
+		t.Fatal(err)
+	}
+	baseline := time.Now().UTC()
+	// prompt_submit has already incremented this working turn. The matching
+	// turn_end keeps TurnCount=3 and only advances LastTurnEndAt.
+	fixture.detail.Summary.State = "working"
+	fixture.detail.Turn = &sessionview.TurnActivity{TurnCount: 3, LastTurnEndAt: &baseline}
+	requestedAt := baseline.Add(time.Second)
+	fixture.outbox.now = func() time.Time { return requestedAt }
+	closed := 0
+	fixture.outbox.closeSource = func(context.Context, handoff.SourceSession, time.Duration) error {
+		closed++
+		fixture.detail.Summary.State = "exited"
+		return nil
+	}
+	pending, err := fixture.outbox.retire(context.Background(), accepted.HandoffID, handoff.RetirementAfterTurnEnd, 10*time.Second)
+	if err != nil || pending.RetirementState != "pending" || closed != 0 {
+		t.Fatalf("pending=%+v closed=%d err=%v", pending, closed, err)
+	}
+	if err := fixture.outbox.reconcile(context.Background(), requestedAt.Add(time.Second)); err != nil || closed != 0 {
+		t.Fatalf("pre-turn-end reconciliation closed=%d err=%v", closed, err)
+	}
+	newEnd := requestedAt.Add(2 * time.Second)
+	// Hook turn_end is authoritative even when the daemon's coarse state has
+	// not yet caught up and still reports working.
+	fixture.detail.Summary.State = "working"
+	laterTurn := fixture.detail
+	laterTurn.Turn = &sessionview.TurnActivity{TurnCount: 4, LastTurnEndAt: &newEnd}
+	stored, _ := fixture.store.GetSource(accepted.HandoffID)
+	if sourceAfterTurnRetirementReady(stored, laterTurn) {
+		t.Fatal("a later turn unexpectedly satisfied the stale retirement request")
+	}
+	fixture.detail.Turn = &sessionview.TurnActivity{TurnCount: 3, LastTurnEndAt: &newEnd}
+	fixture.outbox.now = func() time.Time { return newEnd }
+	if err := fixture.outbox.reconcile(context.Background(), newEnd); err != nil || closed != 1 {
+		t.Fatalf("turn-end reconciliation closed=%d err=%v", closed, err)
+	}
+	stored, _ = fixture.store.GetSource(accepted.HandoffID)
+	if stored.Retirement == nil || stored.Retirement.State != handoff.RetirementRetired {
+		t.Fatalf("retirement after reconcile=%+v", stored.Retirement)
 	}
 }
 
@@ -326,7 +550,7 @@ func TestSourceHandoffPreparePublishesHistoryBeforeQueueAndSurvivesLaterTurns(t 
 	}
 	fixture.outbox.publishHistory = handoff.PublishSourceHistory
 	fixture.remote = func(_ context.Context, _ string, request meshHandoffPrepareRequest) (meshHandoffStatus, error) {
-		if request.Manifest.History.Basename == "session-history.md" || !strings.HasPrefix(request.Manifest.History.Basename, ".arcmux-handoff-sha256-") {
+		if request.Manifest.History.Basename == "session-history.md" || !strings.HasPrefix(request.Manifest.History.Basename, "arcmux-handoff-sha256-") {
 			t.Fatalf("remote received mutable history ref: %#v", request.Manifest.History)
 		}
 		if _, err := os.Lstat(filepath.Join(fixture.outbox.historyRoot, request.Manifest.History.Basename)); err != nil {

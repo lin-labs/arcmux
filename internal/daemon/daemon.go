@@ -80,6 +80,14 @@ type Daemon struct {
 	// capture shim don't need a live tmux pane. Production code never sets it.
 	captureHook func(ctx context.Context, sessionID string, includeHistory bool) (string, error)
 
+	// tmux termination hooks are test-only seams for proving that Kill keeps
+	// supervision and session state intact when termination or the exact-pane
+	// liveness query fails, or when the exact pane remains alive. Production
+	// always calls the concrete tmux client.
+	killTmuxSessionHook     func(context.Context, string) error
+	killTmuxPaneHook        func(context.Context, string) error
+	tmuxExactPaneExistsHook func(context.Context, string) (bool, error)
+
 	// projects is the project registry (slug -> repo_cwd + plan_globs) used to
 	// scope sessions to a project (HTTP /sessions?project=) and to mint babysit
 	// call contexts. May be nil/empty when no projects.toml is present.
@@ -666,6 +674,13 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 		}
 	}
 
+	// Every supervised agent receives an unambiguous self locator. Caller
+	// values cannot override these daemon-owned identities. This is the local
+	// authority used by `arcmux session self --json`; it avoids inferring a
+	// session from cwd, pane title, or overlapping IDs in profile daemons.
+	sessionEnvironment, profileScope := d.supervisedSessionEnvironment(id, req.Env)
+	req.Env = sessionEnvironment
+
 	sess := session.NewSession(id, name, req.Agent, req.CWD)
 	sess.SetTransport(prof.Transport)
 	sess.SetEnv(req.Env)
@@ -756,9 +771,11 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 			}
 			sessionEnv := map[string]string{
 				"ARCMUX_SESSION_ID":        id,
+				"ARCMUX_PROFILE_SCOPE":     profileScope,
 				"ARCMUX_HOOK_AGENT":        req.Agent,
 				"ARCMUX_HOOK_OUTPUT_DIR":   d.cfg.Hooks.HookOutputDir,
 				"ARCMUX_SESSION_STATE_DIR": d.cfg.Hooks.SessionStateDir,
+				"ARCMUX_DAEMON_SOCKET":     d.cfg.Daemon.Socket,
 				// Lets the hook's vault-link resolver match this session's cwd
 				// against the history logs' frontmatter.
 				"ARCMUX_SESSION_CWD": req.CWD,
@@ -819,6 +836,22 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 	go d.startAgentLifecycle(id, sess, prof, req.Prompt)
 
 	return sess, true, nil
+}
+
+func (d *Daemon) supervisedSessionEnvironment(id string, supplied map[string]string) (map[string]string, string) {
+	environment := make(map[string]string, len(supplied)+4)
+	for key, value := range supplied {
+		environment[key] = value
+	}
+	profileScope := "root"
+	if d.cfg.Daemon.ProfileName != "" {
+		profileScope = "profile:" + d.cfg.Daemon.ProfileName
+	}
+	environment["ARCMUX_SESSION_ID"] = id
+	environment["ARCMUX_PROFILE_SCOPE"] = profileScope
+	environment["ARCMUX_DAEMON_SOCKET"] = d.cfg.Daemon.Socket
+	environment["ARCMUX_SESSION_STATE_DIR"] = d.cfg.Hooks.SessionStateDir
+	return environment, profileScope
 }
 
 // findNonTerminalByNameOwner returns an existing session that matches the
@@ -1068,7 +1101,54 @@ func (d *Daemon) Kill(ctx context.Context, sessionID string, graceful bool, time
 		return d.killExecSession(ctx, sess, graceful, timeout)
 	}
 
-	// Stop monitor and any active screen recorder.
+	if graceful {
+		// Send Ctrl-C and wait
+		_ = d.tmux.SendKeys(ctx, snap.TmuxTarget, "C-c")
+		waitCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		_ = d.tmux.WaitIdle(waitCtx, snap.TmuxTarget, timeout, 1*time.Second)
+	}
+
+	if snap.TmuxTarget == "" {
+		return errors.New("exact tmux pane target is unavailable")
+	}
+	var killErr error
+	if snap.TmuxSessionName != "" {
+		if d.killTmuxSessionHook != nil {
+			killErr = d.killTmuxSessionHook(ctx, snap.TmuxSessionName)
+		} else {
+			killErr = d.tmux.KillSession(ctx, snap.TmuxSessionName)
+		}
+	} else if d.killTmuxPaneHook != nil {
+		killErr = d.killTmuxPaneHook(ctx, snap.TmuxTarget)
+	} else {
+		killErr = d.tmux.KillPane(ctx, snap.TmuxTarget)
+	}
+	var paneExists bool
+	var paneProbeErr error
+	if d.tmuxExactPaneExistsHook != nil {
+		paneExists, paneProbeErr = d.tmuxExactPaneExistsHook(ctx, snap.TmuxTarget)
+	} else {
+		paneExists, paneProbeErr = d.tmux.ExactPaneExists(ctx, snap.TmuxTarget)
+	}
+	if paneProbeErr != nil {
+		return fmt.Errorf("verify exact tmux pane after termination: %w", paneProbeErr)
+	}
+	if paneExists {
+		if killErr != nil {
+			return fmt.Errorf("terminate exact tmux session: %w", killErr)
+		}
+		return fmt.Errorf("exact tmux pane %s is still alive after termination", snap.TmuxTarget)
+	}
+	if killErr != nil {
+		d.logger.Warn("tmux termination command failed after exact pane exited",
+			"session_id", sessionID,
+			"tmux_target", snap.TmuxTarget,
+			"error", killErr,
+		)
+	}
+
+	// Only tear down supervision after exact termination has been confirmed.
 	d.mu.Lock()
 	if cancel, ok := d.monitors[sessionID]; ok {
 		cancel()
@@ -1080,23 +1160,7 @@ func (d *Daemon) Kill(ctx context.Context, sessionID string, graceful bool, time
 	}
 	d.mu.Unlock()
 
-	if graceful {
-		// Send Ctrl-C and wait
-		_ = d.tmux.SendKeys(ctx, snap.TmuxTarget, "C-c")
-		waitCtx, cancel := context.WithTimeout(ctx, timeout)
-		defer cancel()
-		_ = d.tmux.WaitIdle(waitCtx, snap.TmuxTarget, timeout, 1*time.Second)
-	}
-
-	if snap.TmuxSessionName != "" {
-		if err := d.tmux.KillSession(ctx, snap.TmuxSessionName); err != nil {
-			d.logger.Warn("kill tmux session failed", "session", snap.TmuxSessionName, "error", err)
-		}
-	} else if err := d.tmux.KillPane(ctx, snap.TmuxTarget); err != nil {
-		d.logger.Warn("kill pane failed", "error", err)
-	}
-
-	// Stop pipe-pane and cleanup
+	// Stop pipe-pane and cleanup.
 	d.tmux.PipePaneStop(ctx, snap.TmuxTarget)
 	d.watcher.Unwatch(sessionID)
 	d.hooks.Cleanup(sessionID)

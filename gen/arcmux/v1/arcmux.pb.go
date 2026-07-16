@@ -903,17 +903,19 @@ func (x *ListSessionsResponse) GetSessions() []*SessionSummary {
 }
 
 type SessionSummary struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
-	Agent         string                 `protobuf:"bytes,2,opt,name=agent,proto3" json:"agent,omitempty"`
-	Cwd           string                 `protobuf:"bytes,3,opt,name=cwd,proto3" json:"cwd,omitempty"`
-	State         string                 `protobuf:"bytes,4,opt,name=state,proto3" json:"state,omitempty"`
-	TmuxTarget    string                 `protobuf:"bytes,5,opt,name=tmux_target,json=tmuxTarget,proto3" json:"tmux_target,omitempty"`
-	StartedAt     string                 `protobuf:"bytes,6,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
-	SessionName   string                 `protobuf:"bytes,7,opt,name=session_name,json=sessionName,proto3" json:"session_name,omitempty"`
-	OwnerId       string                 `protobuf:"bytes,8,opt,name=owner_id,json=ownerId,proto3" json:"owner_id,omitempty"` // C1: echo for attribution
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	SessionId       string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	Agent           string                 `protobuf:"bytes,2,opt,name=agent,proto3" json:"agent,omitempty"`
+	Cwd             string                 `protobuf:"bytes,3,opt,name=cwd,proto3" json:"cwd,omitempty"`
+	State           string                 `protobuf:"bytes,4,opt,name=state,proto3" json:"state,omitempty"`
+	TmuxTarget      string                 `protobuf:"bytes,5,opt,name=tmux_target,json=tmuxTarget,proto3" json:"tmux_target,omitempty"`
+	StartedAt       string                 `protobuf:"bytes,6,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
+	SessionName     string                 `protobuf:"bytes,7,opt,name=session_name,json=sessionName,proto3" json:"session_name,omitempty"`
+	OwnerId         string                 `protobuf:"bytes,8,opt,name=owner_id,json=ownerId,proto3" json:"owner_id,omitempty"`                          // C1: echo for attribution
+	ProfileScope    string                 `protobuf:"bytes,9,opt,name=profile_scope,json=profileScope,proto3" json:"profile_scope,omitempty"`           // exact local scope: root or profile:<name>
+	HistoryBasename string                 `protobuf:"bytes,10,opt,name=history_basename,json=historyBasename,proto3" json:"history_basename,omitempty"` // canonical hook-bound history basename, if known
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *SessionSummary) Reset() {
@@ -998,6 +1000,20 @@ func (x *SessionSummary) GetSessionName() string {
 func (x *SessionSummary) GetOwnerId() string {
 	if x != nil {
 		return x.OwnerId
+	}
+	return ""
+}
+
+func (x *SessionSummary) GetProfileScope() string {
+	if x != nil {
+		return x.ProfileScope
+	}
+	return ""
+}
+
+func (x *SessionSummary) GetHistoryBasename() string {
+	if x != nil {
+		return x.HistoryBasename
 	}
 	return ""
 }
@@ -2230,7 +2246,7 @@ const file_arcmux_v1_arcmux_proto_rawDesc = "" +
 	"finalState\"\x15\n" +
 	"\x13ListSessionsRequest\"M\n" +
 	"\x14ListSessionsResponse\x125\n" +
-	"\bsessions\x18\x01 \x03(\v2\x19.arcmux.v1.SessionSummaryR\bsessions\"\xeb\x01\n" +
+	"\bsessions\x18\x01 \x03(\v2\x19.arcmux.v1.SessionSummaryR\bsessions\"\xbb\x02\n" +
 	"\x0eSessionSummary\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x14\n" +
@@ -2242,7 +2258,10 @@ const file_arcmux_v1_arcmux_proto_rawDesc = "" +
 	"\n" +
 	"started_at\x18\x06 \x01(\tR\tstartedAt\x12!\n" +
 	"\fsession_name\x18\a \x01(\tR\vsessionName\x12\x19\n" +
-	"\bowner_id\x18\b \x01(\tR\aownerId\"\x13\n" +
+	"\bowner_id\x18\b \x01(\tR\aownerId\x12#\n" +
+	"\rprofile_scope\x18\t \x01(\tR\fprofileScope\x12)\n" +
+	"\x10history_basename\x18\n" +
+	" \x01(\tR\x0fhistoryBasename\"\x13\n" +
 	"\x11ListAgentsRequest\"B\n" +
 	"\x12ListAgentsResponse\x12,\n" +
 	"\x06agents\x18\x01 \x03(\v2\x14.arcmux.v1.AgentInfoR\x06agents\"\xd7\x01\n" +

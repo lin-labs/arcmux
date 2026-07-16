@@ -4,6 +4,9 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"time"
+
+	"github.com/lin-labs/arcmux/internal/handoff"
 )
 
 func (h *HTTPServer) handleMeshHandoffs(w http.ResponseWriter, r *http.Request) {
@@ -124,6 +127,78 @@ func (h *HTTPServer) handleMeshHandoffLaunch(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeJSON(w, http.StatusOK, launched)
+}
+
+func (h *HTTPServer) handleMeshHandoffVerify(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "POST required"})
+		return
+	}
+	if err := requireOnlyQuery(r, "id"); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "id is required"})
+		return
+	}
+	if err := requireEmptyBody(r); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	outbox, err := h.handoffOutbox()
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "handoff outbox is unavailable"})
+		return
+	}
+	verified, err := outbox.verify(r.Context(), id)
+	if err != nil {
+		writeSourceHandoffError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, verified)
+}
+
+type sourceHandoffRetireRequest struct {
+	HandoffID      string `json:"handoff_id"`
+	AfterTurnEnd   bool   `json:"after_turn_end"`
+	TimeoutSeconds int64  `json:"timeout_seconds"`
+}
+
+func (h *HTTPServer) handleMeshHandoffRetire(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "POST required"})
+		return
+	}
+	if len(r.URL.Query()) != 0 {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "retire does not accept query parameters"})
+		return
+	}
+	var request sourceHandoffRetireRequest
+	if err := decodeMeshHTTPJSON(w, r, &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	if request.HandoffID == "" || request.TimeoutSeconds < 1 || request.TimeoutSeconds > 300 {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "handoff_id and timeout_seconds between 1 and 300 are required"})
+		return
+	}
+	mode := handoff.RetirementImmediate
+	if request.AfterTurnEnd {
+		mode = handoff.RetirementAfterTurnEnd
+	}
+	outbox, err := h.handoffOutbox()
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: "handoff outbox is unavailable"})
+		return
+	}
+	retired, err := outbox.retire(r.Context(), request.HandoffID, mode, time.Duration(request.TimeoutSeconds)*time.Second)
+	if err != nil {
+		writeSourceHandoffError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, retired)
 }
 
 func requireOnlyQuery(r *http.Request, allowed string) error {

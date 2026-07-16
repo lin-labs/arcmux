@@ -38,16 +38,23 @@ type sourceHandoffPrepareRequest struct {
 
 // sourceHandoffDTO is the complete local operator response allowlist. The
 // immutable manifest remains private state because it contains the goal,
-// history locator, repository branch, and source-session identity.
+// history locator, and repository branch. Exact source/target identities are
+// exposed so local controllers can prove which sessions and agent profile the
+// state machine is authorized to act on.
 type sourceHandoffDTO struct {
-	HandoffID      string                 `json:"handoff_id"`
-	ManifestDigest string                 `json:"manifest_digest"`
-	State          handoff.SourceState    `json:"state"`
-	Attempts       uint32                 `json:"attempts"`
-	TargetDevice   string                 `json:"target_device"`
-	Project        string                 `json:"project"`
-	Failure        *meshHandoffFailureDTO `json:"failure,omitempty"`
-	TargetLocator  *handoff.TargetLocator `json:"target_locator,omitempty"`
+	HandoffID         string                 `json:"handoff_id"`
+	ManifestDigest    string                 `json:"manifest_digest"`
+	State             handoff.SourceState    `json:"state"`
+	Attempts          uint32                 `json:"attempts"`
+	TargetDevice      string                 `json:"target_device"`
+	TargetProfile     string                 `json:"target_profile"`
+	Project           string                 `json:"project"`
+	SourceLocator     handoff.SourceSession  `json:"source_locator"`
+	Failure           *meshHandoffFailureDTO `json:"failure,omitempty"`
+	TargetLocator     *handoff.TargetLocator `json:"target_locator,omitempty"`
+	VerificationState string                 `json:"verification_state"`
+	ContextLoaded     bool                   `json:"context_loaded"`
+	RetirementState   string                 `json:"retirement_state"`
 }
 
 type sourceHandoffErrorKind string
@@ -72,6 +79,8 @@ type sourceRepositoryInspector func(context.Context, string, project.ResolvedPro
 type sourceHistoryPublisher func(string, string, string) (handoff.HistoryRef, error)
 type sourceHandoffPrepareCaller func(context.Context, string, meshHandoffPrepareRequest) (meshHandoffStatus, error)
 type sourceHandoffLaunchCaller func(context.Context, string, meshHandoffLaunchRequest) (meshHandoffStatus, error)
+type sourceHandoffVerifyCaller func(context.Context, string, meshHandoffVerifyRequest) (meshHandoffVerification, error)
+type sourceSessionCloser func(context.Context, handoff.SourceSession, time.Duration) error
 type safeIDGenerator func(string) (string, error)
 
 type sourceHandoffOutbox struct {
@@ -86,6 +95,8 @@ type sourceHandoffOutbox struct {
 	publishHistory    sourceHistoryPublisher
 	callPrepare       sourceHandoffPrepareCaller
 	callLaunch        sourceHandoffLaunchCaller
+	callVerify        sourceHandoffVerifyCaller
+	closeSource       sourceSessionCloser
 	newID             safeIDGenerator
 	attemptTimeout    time.Duration
 }
@@ -117,9 +128,41 @@ func (d *Daemon) sourceHandoffOutbox() (*sourceHandoffOutbox, error) {
 		publishHistory:    handoff.PublishSourceHistory,
 		callPrepare:       d.callRemoteHandoffPrepare,
 		callLaunch:        d.callRemoteHandoffLaunch,
-		newID:             newHandoffSafeID,
-		attemptTimeout:    sourceHandoffAttemptTimeout,
+		callVerify:        d.callRemoteHandoffVerify,
+		closeSource: func(ctx context.Context, source handoff.SourceSession, timeout time.Duration) error {
+			if source.DeviceID != deviceID {
+				return errors.New("source session belongs to a different device")
+			}
+			scope := sessionview.ProfileScope(source.ProfileScope)
+			locator, locatorErr := sessionview.NewLocator(scope, source.SessionID)
+			if locatorErr != nil {
+				return errors.New("source session locator is invalid")
+			}
+			catalog := d.SessionCatalog()
+			if _, ok := catalog.Get(locator); !ok {
+				return errors.New("exact source session is unavailable")
+			}
+			sourceDaemon, ok := catalog.source(scope)
+			if !ok {
+				return errors.New("exact source profile is unavailable")
+			}
+			return sourceDaemon.Kill(ctx, source.SessionID, true, timeout)
+		},
+		newID:          newHandoffSafeID,
+		attemptTimeout: sourceHandoffAttemptTimeout,
 	}, nil
+}
+
+func (d *Daemon) callRemoteHandoffVerify(ctx context.Context, peer string, request meshHandoffVerifyRequest) (meshHandoffVerification, error) {
+	manager, err := d.currentMeshManager()
+	if err != nil {
+		return meshHandoffVerification{}, err
+	}
+	var response meshHandoffVerification
+	if err := manager.Call(ctx, peer, meshMethodHandoffsVerify, request, &response); err != nil {
+		return meshHandoffVerification{}, err
+	}
+	return response, nil
 }
 
 func (d *Daemon) callRemoteHandoffLaunch(ctx context.Context, peer string, request meshHandoffLaunchRequest) (meshHandoffStatus, error) {
@@ -322,6 +365,177 @@ func (o *sourceHandoffOutbox) launch(ctx context.Context, id string) (sourceHand
 	return o.attemptLaunch(attemptCtx, id, true)
 }
 
+func (o *sourceHandoffOutbox) verify(ctx context.Context, id string) (sourceHandoffDTO, error) {
+	if o == nil || o.store == nil || o.callVerify == nil || o.now == nil {
+		return sourceHandoffDTO{}, sourceOutboxUnavailable("handoff verification is unavailable")
+	}
+	release := sourceAttemptLocks.lock(o.store.Root() + "\x00" + id)
+	defer release()
+	record, err := o.store.GetSource(id)
+	if err != nil {
+		if errors.Is(err, handoff.ErrNotFound) {
+			return sourceHandoffDTO{}, sourceOutboxNotFound("handoff not found")
+		}
+		return sourceHandoffDTO{}, sourceOutboxInvalid("invalid handoff id")
+	}
+	if record.State != handoff.SourceAccepted || record.TargetLocator == nil {
+		return sourceHandoffDTO{}, sourceOutboxConflict("handoff must be accepted before verification")
+	}
+	attemptCtx, cancel := o.attemptContext(ctx)
+	defer cancel()
+	remote, callErr := o.callVerify(attemptCtx, record.Manifest.Target.DeviceID, meshHandoffVerifyRequest{
+		HandoffID: record.Manifest.HandoffID, ManifestDigest: record.Digest, TargetLocator: *record.TargetLocator,
+	})
+	if callErr != nil {
+		dto := sourceHandoffRecordDTO(record)
+		dto.ContextLoaded = false
+		var rpcErr *arcmuxmesh.RPCError
+		if errors.As(callErr, &rpcErr) && (rpcErr.Code == arcmuxmesh.ErrorInvalidRequest || rpcErr.Code == arcmuxmesh.ErrorPermissionDenied) {
+			dto.VerificationState = "mismatch"
+		} else {
+			dto.VerificationState = "unavailable"
+		}
+		return dto, nil
+	}
+	if remote.HandoffID != record.Manifest.HandoffID || remote.ManifestDigest != record.Digest || remote.TargetLocator != *record.TargetLocator {
+		dto := sourceHandoffRecordDTO(record)
+		dto.VerificationState = "mismatch"
+		dto.ContextLoaded = false
+		return dto, nil
+	}
+	if !remote.ContextLoaded || remote.VerificationState != "context_loaded" {
+		dto := sourceHandoffRecordDTO(record)
+		dto.VerificationState = "pending"
+		dto.ContextLoaded = false
+		return dto, nil
+	}
+	if remote.Acknowledgement == nil {
+		dto := sourceHandoffRecordDTO(record)
+		dto.VerificationState = "mismatch"
+		dto.ContextLoaded = false
+		return dto, nil
+	}
+	at := sourceTransitionTime(o.now, record.Updated)
+	verified, _, err := o.store.RecordSourceContextLoaded(id, record.Revision, *remote.Acknowledgement, at)
+	if err != nil {
+		dto := sourceHandoffRecordDTO(record)
+		dto.VerificationState = "mismatch"
+		dto.ContextLoaded = false
+		return dto, nil
+	}
+	return sourceHandoffRecordDTO(verified), nil
+}
+
+func (o *sourceHandoffOutbox) retire(ctx context.Context, id string, mode handoff.RetirementMode, timeout time.Duration) (sourceHandoffDTO, error) {
+	if o == nil || o.store == nil || o.lookupSession == nil || o.closeSource == nil || o.now == nil {
+		return sourceHandoffDTO{}, sourceOutboxUnavailable("source retirement is unavailable")
+	}
+	release := sourceAttemptLocks.lock(o.store.Root() + "\x00" + id)
+	defer release()
+	record, err := o.store.GetSource(id)
+	if err != nil {
+		if errors.Is(err, handoff.ErrNotFound) {
+			return sourceHandoffDTO{}, sourceOutboxNotFound("handoff not found")
+		}
+		return sourceHandoffDTO{}, sourceOutboxInvalid("invalid handoff id")
+	}
+	if record.State != handoff.SourceAccepted || record.ContextLoaded == nil {
+		return sourceHandoffDTO{}, sourceOutboxConflict("source retirement requires verified context-loaded acknowledgement")
+	}
+	if record.Manifest.Source.DeviceID != o.deviceID {
+		return sourceHandoffDTO{}, sourceOutboxConflict("source identity does not match this device")
+	}
+	if record.Retirement == nil {
+		detail, ok := o.lookupExactSource(record)
+		if !ok {
+			return sourceHandoffDTO{}, sourceOutboxConflict("exact source session is unavailable")
+		}
+		baseline := turnObservation(detail)
+		record, _, err = o.store.RequestSourceRetirement(id, record.Revision, mode, timeout, baseline, sourceTransitionTime(o.now, record.Updated))
+		if err != nil {
+			return sourceHandoffDTO{}, sourceOutboxConflict("source retirement state changed concurrently")
+		}
+	} else if record.Retirement.Mode != mode || record.Retirement.TimeoutSeconds != int64(timeout/time.Second) {
+		return sourceHandoffDTO{}, sourceOutboxConflict("source retirement was already requested with different options")
+	}
+	if record.Retirement.State == handoff.RetirementRetired || mode == handoff.RetirementAfterTurnEnd {
+		return sourceHandoffRecordDTO(record), nil
+	}
+	return o.retirePending(ctx, record)
+}
+
+func (o *sourceHandoffOutbox) lookupExactSource(record handoff.SourceRecord) (sessionview.Detail, bool) {
+	scope := sessionview.ProfileScope(record.Manifest.Source.ProfileScope)
+	detail, ok := o.lookupSession(scope, record.Manifest.Source.SessionID)
+	if !ok || detail.Summary.Locator.ProfileScope != scope || detail.Summary.Locator.SessionID != record.Manifest.Source.SessionID {
+		return sessionview.Detail{}, false
+	}
+	return detail, true
+}
+
+func turnObservation(detail sessionview.Detail) handoff.TurnObservation {
+	observation := handoff.TurnObservation{}
+	if detail.Turn != nil {
+		observation.TurnCount = detail.Turn.TurnCount
+		if detail.Turn.LastTurnEndAt != nil {
+			last := detail.Turn.LastTurnEndAt.UTC()
+			observation.LastTurnEndAt = &last
+		}
+	}
+	return observation
+}
+
+func sourceAfterTurnRetirementReady(record handoff.SourceRecord, detail sessionview.Detail) bool {
+	retirement := record.Retirement
+	if retirement == nil || retirement.Mode != handoff.RetirementAfterTurnEnd || detail.Turn == nil || detail.Turn.LastTurnEndAt == nil {
+		return false
+	}
+	// prompt_submit increments TurnCount before an agent can request deferred
+	// retirement. The matching turn_end therefore carries the same count. An
+	// exact fresh hook turn_end is authoritative even when the daemon's coarse
+	// state still lags as working. Exact count equality prevents a stale pending
+	// request from unexpectedly retiring the source after some later turn.
+	return detail.Turn.TurnCount == retirement.BaselineTurnCount && detail.Turn.LastTurnEndAt.After(retirement.RequestedAt)
+}
+
+func (o *sourceHandoffOutbox) retirePending(ctx context.Context, record handoff.SourceRecord) (sourceHandoffDTO, error) {
+	if record.Retirement == nil || record.Retirement.State != handoff.RetirementPending {
+		return sourceHandoffRecordDTO(record), nil
+	}
+	detail, ok := o.lookupExactSource(record)
+	if !ok {
+		// Missing is ambiguous: fail closed and keep the durable request pending.
+		return sourceHandoffRecordDTO(record), nil
+	}
+	if detail.Summary.State == "exited" {
+		completed, _, err := o.store.CompleteSourceRetirement(record.Manifest.HandoffID, record.Revision, sourceTransitionTime(o.now, record.Updated))
+		if err != nil {
+			return sourceHandoffRecordDTO(record), nil
+		}
+		return sourceHandoffRecordDTO(completed), nil
+	}
+	if record.Retirement.Mode == handoff.RetirementAfterTurnEnd && !sourceAfterTurnRetirementReady(record, detail) {
+		return sourceHandoffRecordDTO(record), nil
+	}
+	timeout := time.Duration(record.Retirement.TimeoutSeconds) * time.Second
+	if err := o.closeSource(ctx, record.Manifest.Source, timeout); err != nil {
+		return sourceHandoffRecordDTO(record), nil
+	}
+	closedDetail, ok := o.lookupExactSource(record)
+	if !ok || closedDetail.Summary.State != "exited" {
+		// A close request is not proof. Keep the durable request pending until
+		// the exact catalog entry confirms that supervision observed the source
+		// exit; this prevents a successful-looking tmux command from retiring a
+		// still-live pane.
+		return sourceHandoffRecordDTO(record), nil
+	}
+	completed, _, err := o.store.CompleteSourceRetirement(record.Manifest.HandoffID, record.Revision, sourceTransitionTime(o.now, record.Updated))
+	if err != nil {
+		return sourceHandoffRecordDTO(record), nil
+	}
+	return sourceHandoffRecordDTO(completed), nil
+}
+
 func (o *sourceHandoffOutbox) attemptContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	timeout := o.attemptTimeout
 	if timeout <= 0 {
@@ -330,9 +544,10 @@ func (o *sourceHandoffOutbox) attemptContext(ctx context.Context) (context.Conte
 	return context.WithTimeout(ctx, timeout)
 }
 
-// reconcile resumes prepare work and launches that already crossed the
-// explicit SourceLaunchingRemote authorization boundary. SourceRemotePrepared
-// remains inert across restarts and reconnects.
+// reconcile resumes prepare work, launches that crossed the explicit
+// SourceLaunchingRemote boundary, and every durable pending retirement. A
+// merely SourceRemotePrepared handoff remains inert across restarts and
+// reconnects.
 func (o *sourceHandoffOutbox) reconcile(ctx context.Context, at time.Time) error {
 	if o == nil || o.store == nil || o.now == nil {
 		return errors.New("source handoff recovery is unavailable")
@@ -357,6 +572,10 @@ func (o *sourceHandoffOutbox) reconcile(ctx context.Context, at time.Time) error
 			if candidate.NextRetry == nil || candidate.NextRetry.After(at) {
 				continue
 			}
+		case handoff.SourceAccepted:
+			if candidate.Retirement == nil || candidate.Retirement.State != handoff.RetirementPending {
+				continue
+			}
 		default:
 			continue
 		}
@@ -365,7 +584,16 @@ func (o *sourceHandoffOutbox) reconcile(ctx context.Context, at time.Time) error
 		// operator retries and coalesced runtime passes therefore make one RPC.
 		attemptCtx, cancel := o.attemptContext(ctx)
 		var attemptErr error
-		if candidate.State == handoff.SourceLaunchingRemote || candidate.State == handoff.SourceLaunchRetryWait {
+		if candidate.State == handoff.SourceAccepted {
+			release := sourceAttemptLocks.lock(o.store.Root() + "\x00" + candidate.Manifest.HandoffID)
+			current, getErr := o.store.GetSource(candidate.Manifest.HandoffID)
+			if getErr == nil {
+				_, attemptErr = o.retirePending(attemptCtx, current)
+			} else {
+				attemptErr = getErr
+			}
+			release()
+		} else if candidate.State == handoff.SourceLaunchingRemote || candidate.State == handoff.SourceLaunchRetryWait {
 			_, attemptErr = o.attemptLaunch(attemptCtx, candidate.Manifest.HandoffID, false)
 		} else {
 			_, attemptErr = o.attempt(attemptCtx, candidate.Manifest.HandoffID, false)
@@ -718,7 +946,9 @@ func validSourceFailureCode(code handoff.FailureCode) bool {
 func sourceHandoffRecordDTO(record handoff.SourceRecord) sourceHandoffDTO {
 	dto := sourceHandoffDTO{
 		HandoffID: record.Manifest.HandoffID, ManifestDigest: record.Digest, State: record.State,
-		Attempts: record.Attempts, TargetDevice: record.Manifest.Target.DeviceID, Project: record.Manifest.Repository.ProjectSlug,
+		Attempts: record.Attempts, TargetDevice: record.Manifest.Target.DeviceID, TargetProfile: record.Manifest.Target.Profile,
+		Project:       record.Manifest.Repository.ProjectSlug,
+		SourceLocator: record.Manifest.Source, VerificationState: "not_ready", RetirementState: "not_requested",
 	}
 	if record.Failure != nil {
 		dto.Failure = &meshHandoffFailureDTO{
@@ -728,6 +958,16 @@ func sourceHandoffRecordDTO(record handoff.SourceRecord) sourceHandoffDTO {
 	if record.TargetLocator != nil {
 		locator := *record.TargetLocator
 		dto.TargetLocator = &locator
+	}
+	if record.State == handoff.SourceAccepted {
+		dto.VerificationState = "pending"
+	}
+	if record.ContextLoaded != nil {
+		dto.VerificationState = "context_loaded"
+		dto.ContextLoaded = true
+	}
+	if record.Retirement != nil {
+		dto.RetirementState = string(record.Retirement.State)
 	}
 	return dto
 }

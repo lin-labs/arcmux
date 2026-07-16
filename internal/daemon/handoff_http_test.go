@@ -79,6 +79,17 @@ func TestHandoffHTTPLaunchIsOperatorOnlyAndStrict(t *testing.T) {
 	if launched.Code != http.StatusOK || !strings.Contains(launched.Body.String(), `"state":"accepted"`) || !strings.Contains(launched.Body.String(), `"session_id":"target-session"`) {
 		t.Fatalf("launch status=%d body=%s", launched.Code, launched.Body.String())
 	}
+	verified := meshHTTPRequest(h, http.MethodPost, "/mesh/handoffs/verify?id=handoff-test-1", nil)
+	if verified.Code != http.StatusOK || !strings.Contains(verified.Body.String(), `"verification_state":"pending"`) || !strings.Contains(verified.Body.String(), `"source_locator"`) {
+		t.Fatalf("verify status=%d body=%s", verified.Code, verified.Body.String())
+	}
+	retireBeforeAck := meshHTTPRequest(h, http.MethodPost, "/mesh/handoffs/retire", []byte(`{"handoff_id":"handoff-test-1","timeout_seconds":10}`))
+	if retireBeforeAck.Code != http.StatusConflict {
+		t.Fatalf("retire before ack status=%d body=%s", retireBeforeAck.Code, retireBeforeAck.Body.String())
+	}
+	if strict := meshHTTPRequest(h, http.MethodPost, "/mesh/handoffs/retire", []byte(`{"handoff_id":"handoff-test-1","timeout_seconds":10,"source_session":"spoofed"}`)); strict.Code != http.StatusBadRequest {
+		t.Fatalf("retire unknown field status=%d body=%s", strict.Code, strict.Body.String())
+	}
 	if got := meshHTTPRequest(h, http.MethodGet, "/mesh/handoffs/launch?id=handoff-test-1", nil); got.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET launch status=%d", got.Code)
 	}

@@ -44,6 +44,7 @@ const (
 	meshMethodHandoffsPrepare   = "handoffs.prepare"
 	meshMethodHandoffsStatus    = "handoffs.status"
 	meshMethodHandoffsLaunch    = "handoffs.launch"
+	meshMethodHandoffsVerify    = "handoffs.verify"
 )
 
 var meshMethodSpecs = []arcmuxmesh.MethodSpec{
@@ -56,6 +57,7 @@ var meshMethodSpecs = []arcmuxmesh.MethodSpec{
 	{Name: meshMethodHandoffsPrepare, Capability: arcmuxmesh.CapabilityHandoffsV1, RequiredScope: arcmuxmesh.ScopeHandoffsPrepare},
 	{Name: meshMethodHandoffsStatus, Capability: arcmuxmesh.CapabilityHandoffsV1, RequiredScope: arcmuxmesh.ScopeHandoffsPrepare},
 	{Name: meshMethodHandoffsLaunch, Capability: arcmuxmesh.CapabilityHandoffsV1, RequiredScope: arcmuxmesh.ScopeHandoffsLaunch},
+	{Name: meshMethodHandoffsVerify, Capability: arcmuxmesh.CapabilityHandoffsV1, RequiredScope: arcmuxmesh.ScopeHandoffsLaunch},
 }
 
 type meshPeerSubscription struct {
@@ -432,6 +434,17 @@ func (d *Daemon) registerMeshApplication(manager *arcmuxmesh.Manager) error {
 			resumeCtx, cancel := app.resumeContext(ctx)
 			defer cancel()
 			return app.launch(resumeCtx, principal, d.meshDeviceID(), request)
+		},
+		meshMethodHandoffsVerify: func(ctx context.Context, principal arcmuxmesh.Principal, raw json.RawMessage) (any, error) {
+			var request meshHandoffVerifyRequest
+			if err := decodeMeshParams(raw, &request); err != nil {
+				return nil, meshInvalidRequest(errors.New("invalid handoff verify request"))
+			}
+			app, err := d.handoffApplication()
+			if err != nil {
+				return nil, err
+			}
+			return app.verify(ctx, principal, d.meshDeviceID(), request)
 		},
 	}
 	for _, spec := range meshMethodSpecs {

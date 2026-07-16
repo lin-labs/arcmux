@@ -10,6 +10,7 @@ import (
 
 	arcmuxv1 "github.com/lin-labs/arcmux/gen/arcmux/v1"
 	"github.com/lin-labs/arcmux/internal/session"
+	"github.com/lin-labs/arcmux/internal/sessionview"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -158,21 +159,38 @@ func (s *GRPCServer) Kill(ctx context.Context, req *arcmuxv1.KillRequest) (*arcm
 
 func (s *GRPCServer) ListSessions(ctx context.Context, req *arcmuxv1.ListSessionsRequest) (*arcmuxv1.ListSessionsResponse, error) {
 	sessions := s.daemon.ListSessions()
+	scope := sessionview.RootProfileScope
+	if s.daemon.cfg.Daemon.ProfileName != "" {
+		var err error
+		scope, err = sessionview.NamedProfileScope(s.daemon.cfg.Daemon.ProfileName)
+		if err != nil {
+			return nil, status.Error(codes.Internal, "invalid daemon profile scope")
+		}
+	}
+	catalog := s.daemon.SessionCatalog()
 	resp := &arcmuxv1.ListSessionsResponse{
 		Sessions: make([]*arcmuxv1.SessionSummary, 0, len(sessions)),
 	}
 
 	for _, sess := range sessions {
 		snap := sess.Snapshot()
+		historyBasename := ""
+		if locator, err := sessionview.NewLocator(scope, snap.ID); err == nil {
+			if detail, ok := catalog.Get(locator); ok && detail.Summary.History != nil {
+				historyBasename = detail.Summary.History.Basename
+			}
+		}
 		resp.Sessions = append(resp.Sessions, &arcmuxv1.SessionSummary{
-			SessionId:   snap.ID,
-			Agent:       snap.Agent,
-			Cwd:         snap.CWD,
-			State:       string(snap.State),
-			TmuxTarget:  snap.TmuxTarget,
-			StartedAt:   snap.StartedAt.Format(time.RFC3339),
-			SessionName: snap.Name,
-			OwnerId:     snap.OwnerID,
+			SessionId:       snap.ID,
+			Agent:           snap.Agent,
+			Cwd:             snap.CWD,
+			State:           string(snap.State),
+			TmuxTarget:      snap.TmuxTarget,
+			StartedAt:       snap.StartedAt.Format(time.RFC3339),
+			SessionName:     snap.Name,
+			OwnerId:         snap.OwnerID,
+			ProfileScope:    string(scope),
+			HistoryBasename: historyBasename,
 		})
 	}
 

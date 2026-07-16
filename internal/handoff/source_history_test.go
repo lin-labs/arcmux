@@ -34,8 +34,8 @@ func TestPublishSourceHistoryPinsExactContentForTarget(t *testing.T) {
 	if ref.Basename == originalName || !strings.HasPrefix(ref.Basename, sourceHistoryPrefix) || strings.Contains(ref.Basename, "2026") {
 		t.Fatalf("publication basename leaks mutable identity: %q", ref.Basename)
 	}
-	if filepath.Ext(ref.Basename) == ".md" || !strings.HasSuffix(ref.Basename, ".snapshot") {
-		t.Fatalf("publication can be mistaken for a canonical Markdown session log: %q", ref.Basename)
+	if strings.HasPrefix(ref.Basename, ".") || filepath.Ext(ref.Basename) != ".md" {
+		t.Fatalf("publication is not a syncable non-hidden Markdown file: %q", ref.Basename)
 	}
 	info, err := os.Lstat(filepath.Join(root, ref.Basename))
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {

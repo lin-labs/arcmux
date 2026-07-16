@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -82,6 +83,30 @@ func PublishLaunchRendezvous(rendezvousRoot, marker, protocolStateRoot string) e
 // active protocol state and then applies the target-record/state/marker checks
 // in ReadLaunchInstructions before returning any private content.
 func ReceiveLaunchInstructions(rendezvousRoot, marker string) ([]byte, error) {
+	store, err := launchRendezvousStore(rendezvousRoot, marker)
+	if err != nil {
+		return nil, ErrLaunchInstructionsUnavailable
+	}
+	return store.ReadLaunchInstructions(marker)
+}
+
+// AcknowledgeLaunchContext resolves only owner-local protocol state, then
+// persists an acknowledgement bound to both the marker and the caller's
+// authoritative daemon-catalog identity. It returns no launch instructions or
+// other private content.
+func AcknowledgeLaunchContext(rendezvousRoot, marker string, phase AcknowledgementPhase, callerProfileScope, callerSessionID string) (ContextAcknowledgement, bool, error) {
+	store, err := launchRendezvousStore(rendezvousRoot, marker)
+	if err != nil {
+		return ContextAcknowledgement{}, false, ErrAcknowledgementUnavailable
+	}
+	record, replay, err := store.AcknowledgeTarget(marker, phase, callerProfileScope, callerSessionID, time.Time{})
+	if err != nil || record.ContextLoaded == nil {
+		return ContextAcknowledgement{}, false, err
+	}
+	return *cloneAcknowledgement(record.ContextLoaded), replay, nil
+}
+
+func launchRendezvousStore(rendezvousRoot, marker string) (*Store, error) {
 	if strings.TrimSpace(rendezvousRoot) == "" || !validLaunchMarker(marker) {
 		return nil, ErrLaunchInstructionsUnavailable
 	}
@@ -106,7 +131,7 @@ func ReceiveLaunchInstructions(rendezvousRoot, marker string) ([]byte, error) {
 	if err != nil {
 		return nil, ErrLaunchInstructionsUnavailable
 	}
-	return store.ReadLaunchInstructions(marker)
+	return store, nil
 }
 
 // ReadLaunchInstructions resolves an opaque launch marker against durable
