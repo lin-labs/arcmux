@@ -211,8 +211,8 @@ Gotchas learned:
   `swept legacy per-session hook scripts removed=N`.
 - **Runtime-path change ⇒ rebuild + restart required**: any change to the
   daemon launch path needs `make install` (→ `~/.local/bin/arcmux`) + restart
-  (`systemctl --user restart arcmux`). arcmux runs as a systemd user service;
-  restarting recycles every managed pane (the whole org tier) — drive the live
-  restart from OUTSIDE the profile (a `systemd-run --user` transient unit) so
-  the deploy survives the restart, and verify post-restart: legacy swept to 0,
-  generic hook present, `/tmp/arcmux` 0700 + `<id>.env` 0600.
+  (`systemctl --user restart arcmux`). The managed Linux unit must report
+  `KillMode=process`: the daemon restarts while the external tmux server and
+  every managed pane survive. Verify an exact pre-existing session ID and pane
+  after restart, plus: legacy swept to 0, generic hook present, `/tmp/arcmux`
+  0700 + `<id>.env` 0600.

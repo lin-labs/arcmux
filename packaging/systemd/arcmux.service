@@ -1,0 +1,20 @@
+[Unit]
+Description=arcmux agent tmux runtime service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@HOME@
+Environment=PATH=@PATH@
+ExecStart=@BIN@ start
+Restart=always
+RestartSec=2
+TimeoutStopSec=15
+
+# The tmux server is durable session state, not a disposable daemon helper.
+# Restart only arcmux; the new daemon restores ownership of the surviving panes.
+KillMode=process
+
+[Install]
+WantedBy=default.target

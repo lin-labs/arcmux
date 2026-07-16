@@ -7,7 +7,7 @@ daemon at login/boot (`RunAtLoad`) and restarts it if it dies (`KeepAlive`).
 ## Install
 
 ```bash
-make service-install     # render plist -> ~/Library/LaunchAgents, bootstrap + kickstart
+make service-install     # selects launchd on Darwin, renders and kickstarts
 make status              # confirm the daemon is running
 ```
 

@@ -6,10 +6,12 @@ BIN := $(INSTALL_DIR)/$(BINARY)
 LOG_DIR := $(HOME)/.config/arcmux/logs
 LOG_FILE := $(LOG_DIR)/daemon.log
 
-# macOS launchd LaunchAgent — the systemd analogue on this platform.
+# Managed service definitions. `service-install` selects one at runtime.
 LAUNCHD_LABEL := com.blin.arcmux
 LAUNCHD_PLIST := $(HOME)/Library/LaunchAgents/$(LAUNCHD_LABEL).plist
 LAUNCHD_TEMPLATE := packaging/launchd/$(LAUNCHD_LABEL).plist
+SYSTEMD_UNIT := $(HOME)/.config/systemd/user/$(BINARY).service
+SYSTEMD_TEMPLATE := packaging/systemd/$(BINARY).service
 # PATH baked into the agent so the daemon can spawn tmux + coding agents
 # (codex/claude/grok/node) with no login shell to inherit from.
 SERVICE_PATH := $(HOME)/.local/bin:/opt/homebrew/bin:/opt/homebrew/opt/python@3.12/libexec/bin:$(HOME)/.grok/bin:$(HOME)/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
@@ -174,30 +176,79 @@ restart:
 		$(MAKE) --no-print-directory stop start; \
 	fi
 
-# Install (or refresh) the macOS launchd LaunchAgent so the daemon auto-starts
-# at login/boot and is restarted on crash (KeepAlive). Idempotent: renders the
-# plist template with this machine's paths, stops any pre-existing daemon
-# (manual or launchd) so launchd owns the singleton, then loads + kickstarts.
-service-install:
+# Install (or refresh) the native managed service. Linux uses a systemd user
+# unit whose KillMode deliberately preserves the external tmux server across
+# daemon restarts; macOS retains the launchd LaunchAgent behavior.
+service-install: install
 	@test -x $(BIN) || { echo "missing $(BIN); run 'make install' first"; exit 1; }
-	@mkdir -p $(HOME)/Library/LaunchAgents $(LOG_DIR)
-	@sed -e 's#@HOME@#$(HOME)#g' \
-	     -e 's#@BIN@#$(BIN)#g' \
-	     -e 's#@LOG_FILE@#$(LOG_FILE)#g' \
-	     -e 's#@PATH@#$(SERVICE_PATH)#g' \
-	     $(LAUNCHD_TEMPLATE) > $(LAUNCHD_PLIST)
-	@launchctl bootout gui/$$(id -u)/$(LAUNCHD_LABEL) 2>/dev/null || true
-	@pkill -TERM -x $(BINARY) 2>/dev/null || true
-	@sleep 1
-	@launchctl bootstrap gui/$$(id -u) $(LAUNCHD_PLIST)
-	@launchctl enable gui/$$(id -u)/$(LAUNCHD_LABEL)
-	@launchctl kickstart gui/$$(id -u)/$(LAUNCHD_LABEL) 2>/dev/null || true
-	@echo "installed launchd agent $(LAUNCHD_LABEL) -> $(LAUNCHD_PLIST)"
+	@set -e; case "$$(uname -s)" in \
+	  Darwin) \
+	    mkdir -p $(HOME)/Library/LaunchAgents $(LOG_DIR); \
+	    sed -e 's#@HOME@#$(HOME)#g' \
+	        -e 's#@BIN@#$(BIN)#g' \
+	        -e 's#@LOG_FILE@#$(LOG_FILE)#g' \
+	        -e 's#@PATH@#$(SERVICE_PATH)#g' \
+	        $(LAUNCHD_TEMPLATE) > $(LAUNCHD_PLIST); \
+	    launchctl bootout gui/$$(id -u)/$(LAUNCHD_LABEL) 2>/dev/null || true; \
+	    pkill -TERM -x $(BINARY) 2>/dev/null || true; \
+	    sleep 1; \
+	    launchctl bootstrap gui/$$(id -u) $(LAUNCHD_PLIST); \
+	    launchctl enable gui/$$(id -u)/$(LAUNCHD_LABEL); \
+	    launchctl kickstart gui/$$(id -u)/$(LAUNCHD_LABEL) 2>/dev/null || true; \
+	    echo "installed launchd agent $(LAUNCHD_LABEL) -> $(LAUNCHD_PLIST)"; \
+	    ;; \
+	  Linux) \
+	    was_active=false; \
+	    if systemctl --user is-active --quiet $(BINARY).service; then \
+	      was_active=true; \
+	    fi; \
+	    mkdir -p $(dir $(SYSTEMD_UNIT)); \
+	    sed -e 's#@HOME@#$(HOME)#g' \
+	        -e 's#@BIN@#$(BIN)#g' \
+	        -e 's#@PATH@#$(SERVICE_PATH)#g' \
+	        $(SYSTEMD_TEMPLATE) > $(SYSTEMD_UNIT); \
+	    systemctl --user daemon-reload; \
+	    if [ "$$was_active" != true ]; then \
+	      pkill -TERM -x $(BINARY) 2>/dev/null || true; \
+	      for i in 1 2 3 4 5; do \
+	        pgrep -x $(BINARY) >/dev/null || break; \
+	        sleep 1; \
+	      done; \
+	      if pgrep -x $(BINARY) >/dev/null; then \
+	        pkill -KILL -x $(BINARY); \
+	      fi; \
+	    fi; \
+	    systemctl --user enable $(BINARY).service; \
+	    systemctl --user restart $(BINARY).service; \
+	    echo "installed systemd user unit $(BINARY).service -> $(SYSTEMD_UNIT)"; \
+	    ;; \
+	  *) \
+	    echo "unsupported service platform: $$(uname -s)" >&2; \
+	    exit 1; \
+	    ;; \
+	esac
 
 service-uninstall:
-	@launchctl bootout gui/$$(id -u)/$(LAUNCHD_LABEL) 2>/dev/null || true
-	@rm -f $(LAUNCHD_PLIST)
-	@echo "removed launchd agent $(LAUNCHD_LABEL)"
+	@set -e; case "$$(uname -s)" in \
+	  Darwin) \
+	    launchctl bootout gui/$$(id -u)/$(LAUNCHD_LABEL) 2>/dev/null || true; \
+	    rm -f $(LAUNCHD_PLIST); \
+	    echo "removed launchd agent $(LAUNCHD_LABEL)"; \
+	    ;; \
+	  Linux) \
+	    load_state="$$(systemctl --user show --property LoadState --value $(BINARY).service 2>/dev/null || true)"; \
+	    if [ -f $(SYSTEMD_UNIT) ] || { [ -n "$$load_state" ] && [ "$$load_state" != not-found ]; }; then \
+	      systemctl --user disable --now $(BINARY).service; \
+	    fi; \
+	    rm -f $(SYSTEMD_UNIT); \
+	    systemctl --user daemon-reload; \
+	    echo "removed systemd user unit $(BINARY).service"; \
+	    ;; \
+	  *) \
+	    echo "unsupported service platform: $$(uname -s)" >&2; \
+	    exit 1; \
+	    ;; \
+	esac
 
 status:
 	@pids="$$(pgrep -x $(BINARY))"; \
@@ -217,9 +268,14 @@ tail:
 	@touch $(LOG_FILE)
 	@tail -f $(LOG_FILE)
 
-# Local-on-target release: rebuild binary, install to ~/.local/bin, restart daemon.
-# Run this on the host where arcmux runs (labs), or via `make deploy` from elsewhere.
+# Local-on-target release: Linux must install/reload the safe systemd unit
+# before its first restart. Darwin keeps the established install + launchd
+# restart path. Run this on the runtime host, or via `make deploy`.
+ifeq ($(shell uname -s),Linux)
+release: service-install
+else
 release: install restart
+endif
 	@echo "released $(BINARY) at $(BIN)"
 
 # Remote deploy: ssh to LABS_HOST, fast-forward git pull, then run `make release`.
