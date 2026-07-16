@@ -14,15 +14,16 @@ import (
 
 // Config is the top-level configuration for the arcmux daemon.
 type Config struct {
-	Daemon   DaemonConfig               `toml:"daemon"`
-	Mesh     MeshConfig                 `toml:"mesh"`
-	Mux      MuxConfig                  `toml:"mux"`
-	Tmux     TmuxConfig                 `toml:"tmux"`
-	Health   HealthConfig               `toml:"health"`
-	Hooks    HooksConfig                `toml:"hooks"`
-	Pulse    PulseConfig                `toml:"pulse"`
-	Delivery DeliveryConfig             `toml:"delivery"`
-	Agents   map[string]profile.Profile `toml:"agents"`
+	Daemon      DaemonConfig               `toml:"daemon"`
+	Mesh        MeshConfig                 `toml:"mesh"`
+	Mux         MuxConfig                  `toml:"mux"`
+	Tmux        TmuxConfig                 `toml:"tmux"`
+	Health      HealthConfig               `toml:"health"`
+	Hooks       HooksConfig                `toml:"hooks"`
+	CurrentWork CurrentWorkConfig          `toml:"current_work"`
+	Pulse       PulseConfig                `toml:"pulse"`
+	Delivery    DeliveryConfig             `toml:"delivery"`
+	Agents      map[string]profile.Profile `toml:"agents"`
 	// DataRoot is the local data root used for per-session artifacts
 	// (e.g. screen-recording logs). Defaults to ~/data when empty.
 	// Mirrors Pulse.DataRoot but lives at the top level so non-pulse
@@ -165,6 +166,29 @@ type HooksConfig struct {
 	AutoRegister    bool   `toml:"auto_register"`
 }
 
+// CurrentWorkConfig is persistent local provider selection for daemon-owned
+// semantic current-work inference. The credential itself never belongs in
+// config.toml: APIKeyFile names an owner-only regular file read at call time.
+// Environment variables remain backwards-compatible runtime overrides.
+type CurrentWorkConfig struct {
+	Provider   string `toml:"provider"` // "openai" | "xai" | "legacy-cli"
+	Model      string `toml:"model"`
+	APIKeyFile string `toml:"api_key_file"`
+	LegacyBin  string `toml:"legacy_bin"`
+}
+
+func (c CurrentWorkConfig) Validate() error {
+	switch strings.ToLower(strings.TrimSpace(c.Provider)) {
+	case "", "openai", "xai", "legacy-cli":
+	default:
+		return fmt.Errorf("config: current_work.provider %q is not one of openai|xai|legacy-cli", c.Provider)
+	}
+	if c.APIKeyFile != "" && !filepath.IsAbs(c.APIKeyFile) {
+		return fmt.Errorf("config: current_work.api_key_file must be absolute")
+	}
+	return nil
+}
+
 // DefaultConfigPath returns ~/.config/arcmux/config.toml.
 func DefaultConfigPath() string {
 	home, _ := os.UserHomeDir()
@@ -287,6 +311,9 @@ func Load(path string) (*Config, error) {
 	if err := cfg.Delivery.Validate(); err != nil {
 		return nil, err
 	}
+	if err := cfg.CurrentWork.Validate(); err != nil {
+		return nil, err
+	}
 	return cfg, nil
 }
 
@@ -401,6 +428,7 @@ func expandConfigPaths(cfg *Config) {
 	cfg.Hooks.GrokHookDir = expandTilde(cfg.Hooks.GrokHookDir)
 	cfg.Hooks.HookOutputDir = expandTilde(cfg.Hooks.HookOutputDir)
 	cfg.Hooks.SessionStateDir = expandTilde(cfg.Hooks.SessionStateDir)
+	cfg.CurrentWork.APIKeyFile = expandTilde(cfg.CurrentWork.APIKeyFile)
 	cfg.DataRoot = expandTilde(cfg.DataRoot)
 	cfg.Pulse.DataRoot = expandTilde(cfg.Pulse.DataRoot)
 	for name, prof := range cfg.Agents {

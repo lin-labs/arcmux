@@ -12,8 +12,10 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
+	"github.com/lin-labs/arcmux/internal/config"
 	"github.com/lin-labs/arcmux/internal/hooks"
 	"github.com/lin-labs/arcmux/internal/session"
 	"github.com/lin-labs/arcmux/internal/sessionview"
@@ -229,7 +231,7 @@ func (d *Daemon) refreshOverallGoal(ctx context.Context, candidate goalSummaryCa
 	if runner := d.goalSummaryRunner; runner != nil {
 		updated, err = runner(ctx, candidate.current, candidate.goal)
 	} else {
-		producer, producerErr := resolveGoalSummaryProducer()
+		producer, producerErr := resolveGoalSummaryProducer(d.cfg.CurrentWork)
 		if producerErr != nil {
 			return producerErr
 		}
@@ -308,7 +310,7 @@ func shorterGoalText(left, right string) string {
 }
 
 func runOverallGoalModel(ctx context.Context, current, goal string) (string, error) {
-	producer, err := resolveGoalSummaryProducer()
+	producer, err := resolveGoalSummaryProducer(config.CurrentWorkConfig{})
 	if err != nil {
 		return "", err
 	}
@@ -320,9 +322,15 @@ func runOverallGoalModel(ctx context.Context, current, goal string) (string, err
 // explicit legacy-cli capability and is never inferred from an executable's
 // basename. No agent CLI (Codex/Claude/Grok) is auto-launched with ambient
 // filesystem, environment, or personal-instruction authority.
-func resolveGoalSummaryProducer() (goalSummaryProducer, error) {
+func resolveGoalSummaryProducer(settings config.CurrentWorkConfig) (goalSummaryProducer, error) {
 	kind := strings.ToLower(strings.TrimSpace(os.Getenv("ARCMUX_GOAL_PROVIDER")))
+	if kind == "" {
+		kind = strings.ToLower(strings.TrimSpace(settings.Provider))
+	}
 	legacyBin := strings.TrimSpace(os.Getenv("ARCMUX_GOAL_BIN"))
+	if legacyBin == "" {
+		legacyBin = strings.TrimSpace(settings.LegacyBin)
+	}
 	if kind == "" {
 		switch {
 		case legacyBin != "":
@@ -330,9 +338,9 @@ func resolveGoalSummaryProducer() (goalSummaryProducer, error) {
 			// explicit binary setting declares legacy capability; basename never
 			// influences provider selection.
 			kind = string(goalSummaryProducerLegacy)
-		case providerAPIKey("OPENAI_API_KEY", "OPENAI_API_KEY_FILE") != "":
+		case providerAPIKey("OPENAI_API_KEY", "OPENAI_API_KEY_FILE", "") != "":
 			kind = string(goalSummaryProducerOpenAI)
-		case providerAPIKey("XAI_API_KEY", "XAI_API_KEY_FILE") != "":
+		case providerAPIKey("XAI_API_KEY", "XAI_API_KEY_FILE", "") != "":
 			kind = string(goalSummaryProducerXAI)
 		default:
 			return goalSummaryProducer{}, errGoalSummaryUnavailable
@@ -340,21 +348,21 @@ func resolveGoalSummaryProducer() (goalSummaryProducer, error) {
 	}
 	switch goalSummaryProducerKind(kind) {
 	case goalSummaryProducerOpenAI:
-		key := providerAPIKey("OPENAI_API_KEY", "OPENAI_API_KEY_FILE")
+		key := providerAPIKey("OPENAI_API_KEY", "OPENAI_API_KEY_FILE", settings.APIKeyFile)
 		if key == "" {
 			return goalSummaryProducer{}, errGoalSummaryUnavailable
 		}
 		return goalSummaryProducer{
-			kind: goalSummaryProducerOpenAI, model: goalSummaryModel(goalSummaryProducerOpenAI),
+			kind: goalSummaryProducerOpenAI, model: goalSummaryModel(goalSummaryProducerOpenAI, settings.Model),
 			apiKey: key, endpoint: openAIGoalEndpoint,
 		}, nil
 	case goalSummaryProducerXAI:
-		key := providerAPIKey("XAI_API_KEY", "XAI_API_KEY_FILE")
+		key := providerAPIKey("XAI_API_KEY", "XAI_API_KEY_FILE", settings.APIKeyFile)
 		if key == "" {
 			return goalSummaryProducer{}, errGoalSummaryUnavailable
 		}
 		return goalSummaryProducer{
-			kind: goalSummaryProducerXAI, model: goalSummaryModel(goalSummaryProducerXAI),
+			kind: goalSummaryProducerXAI, model: goalSummaryModel(goalSummaryProducerXAI, settings.Model),
 			apiKey: key, endpoint: xAIGoalEndpoint,
 		}, nil
 	case goalSummaryProducerLegacy:
@@ -366,7 +374,7 @@ func resolveGoalSummaryProducer() (goalSummaryProducer, error) {
 			return goalSummaryProducer{}, errGoalSummaryUnavailable
 		}
 		return goalSummaryProducer{
-			kind: goalSummaryProducerLegacy, model: goalSummaryModel(goalSummaryProducerLegacy), bin: bin,
+			kind: goalSummaryProducerLegacy, model: goalSummaryModel(goalSummaryProducerLegacy, settings.Model), bin: bin,
 		}, nil
 	default:
 		return goalSummaryProducer{}, errors.New("unsupported overall-goal provider")
@@ -377,16 +385,20 @@ func resolveGoalSummaryProducer() (goalSummaryProducer, error) {
 // owner-provisioned key file. The latter keeps the credential out of service
 // definitions and `systemctl show Environment`; unsafe/symlinked/oversized
 // files fail closed without surfacing their path or content.
-func providerAPIKey(envName, fileEnvName string) string {
+func providerAPIKey(envName, fileEnvName, configuredFile string) string {
 	if key := strings.TrimSpace(os.Getenv(envName)); key != "" {
 		return key
 	}
 	path := strings.TrimSpace(os.Getenv(fileEnvName))
 	if path == "" {
+		path = strings.TrimSpace(configuredFile)
+	}
+	if path == "" {
 		return ""
 	}
 	pathInfo, err := os.Lstat(path)
-	if err != nil || !pathInfo.Mode().IsRegular() || pathInfo.Mode().Perm()&0o077 != 0 || pathInfo.Size() > 8192 {
+	if err != nil || !pathInfo.Mode().IsRegular() || pathInfo.Mode().Perm()&0o077 != 0 ||
+		pathInfo.Size() > 8192 || !fileInfoOwnedByCurrentUID(pathInfo) {
 		return ""
 	}
 	file, err := os.Open(path)
@@ -396,7 +408,7 @@ func providerAPIKey(envName, fileEnvName string) string {
 	defer file.Close()
 	openInfo, err := file.Stat()
 	if err != nil || !openInfo.Mode().IsRegular() || openInfo.Mode().Perm()&0o077 != 0 ||
-		openInfo.Size() > 8192 || !os.SameFile(pathInfo, openInfo) {
+		openInfo.Size() > 8192 || !fileInfoOwnedByCurrentUID(openInfo) || !os.SameFile(pathInfo, openInfo) {
 		return ""
 	}
 	data, err := io.ReadAll(io.LimitReader(file, 8193))
@@ -406,8 +418,16 @@ func providerAPIKey(envName, fileEnvName string) string {
 	return strings.TrimSpace(string(data))
 }
 
-func goalSummaryModel(kind goalSummaryProducerKind) string {
+func fileInfoOwnedByCurrentUID(info os.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && int(stat.Uid) == os.Geteuid()
+}
+
+func goalSummaryModel(kind goalSummaryProducerKind, configured string) string {
 	if model := strings.TrimSpace(os.Getenv("ARCMUX_GOAL_MODEL")); model != "" {
+		return model
+	}
+	if model := strings.TrimSpace(configured); model != "" {
 		return model
 	}
 	switch kind {

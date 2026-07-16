@@ -17,8 +17,10 @@ this contract.
 | Path | What | Writer | Readers |
 |---|---|---|---|
 | `~/data/mux/sessions/<session_id>.json` | Per-session hook state doc (see schema) | `arcmux hook` (locked read-modify-write) ; seeded/archived by the daemon | hooks judge, mission-control, anyone |
+| `~/data/mux/sessions/profiles/<profile>/<session_id>.json` | Profile-scoped state for IDs that may duplicate root/other profiles | profile `arcmux hook` + profile daemon | session catalog, mission-control, anyone |
 | `~/data/mux/sessions/archived/<session_id>.json` | State docs of ended sessions | daemon | anyone |
 | `~/data/mux/hook-output/arcmux-hooks-<session_id>.jsonl` | Raw per-session hook event audit (append-only JSONL) | generic hook script | daemon watcher, anyone |
+| `~/data/mux/hook-output/profiles/<profile>/arcmux-hooks-<session_id>.jsonl` | Profile-scoped raw event audit | generic hook script | profile daemon watcher, anyone |
 | `/tmp/arcmux/<session_id>.env` | Per-session env handoff (0600, ARCMUX_* allowlist) | daemon | `arcmux hook-env` only — never source raw |
 
 Config keys: `[hooks] session_state_dir` (default `~/data/mux/sessions`) and
@@ -35,7 +37,9 @@ startup (idempotent, never overwrites the new location).
 
 ## Session state doc schema (`sessions/<id>.json`)
 
-Written atomically under a per-session lock; safe to poll-read.
+Written atomically under a per-profile/session lock; safe to poll-read. Session
+IDs are unique only inside their profile scope, so consumers must keep the root
+and `profiles/<name>/` namespaces distinct.
 
 ```json
 {
@@ -111,12 +115,24 @@ are unchanged; a concurrent hook update makes the response stale. The generic
 hook and public CLI expose no way to stamp trusted provenance. Missing providers
 or rejected output simply omit mesh `current_work` until a safe summary exists.
 
-Provider selection is controlled by `ARCMUX_GOAL_PROVIDER=openai|xai`; credentials
-come from `OPENAI_API_KEY` / `XAI_API_KEY`, or from an owner-only regular file
-named by `OPENAI_API_KEY_FILE` / `XAI_API_KEY_FILE`. The fixed HTTPS requests
-declare no tools, explicitly disable OpenAI response storage, and size-bound
-response bodies. `ARCMUX_GOAL_BIN` remains an explicit `legacy-cli`
-compatibility path and is never auto-discovered from an agent binary.
+Managed services do not source interactive shell files. Persist provider choice
+and the credential-file path in owner-local `~/.config/arcmux/config.toml`; keep
+the credential itself out of TOML:
+
+```toml
+[current_work]
+provider = "openai" # openai | xai | legacy-cli
+model = "gpt-5.4-mini"
+api_key_file = "~/.config/arcmux/openai-api-key" # 0600, current-uid regular file
+```
+
+The environment variables `ARCMUX_GOAL_PROVIDER`, `ARCMUX_GOAL_MODEL`,
+`OPENAI_API_KEY` / `XAI_API_KEY`, and `OPENAI_API_KEY_FILE` /
+`XAI_API_KEY_FILE` remain runtime overrides. The fixed HTTPS requests declare no
+tools, explicitly disable OpenAI response storage, and size-bound response
+bodies. `ARCMUX_GOAL_BIN` or `[current_work].legacy_bin` remains an explicit
+`legacy-cli` compatibility path and is never auto-discovered from an agent
+binary.
 
 A subscriber that wants "is session X working? when did it last finish a
 turn?" should read `sessions/<id>.json`. A subscriber that wants the full

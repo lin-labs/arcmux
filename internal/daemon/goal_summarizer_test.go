@@ -12,9 +12,11 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/lin-labs/arcmux/internal/config"
 	"github.com/lin-labs/arcmux/internal/hooks"
 	"github.com/lin-labs/arcmux/internal/session"
 )
@@ -86,8 +88,45 @@ func TestSameCWDSessionsUseExactStateAndPrivateSessionIsNeverSummarized(t *testi
 	assertGoalSummary(t, d, private.ID, "PRIVATE-LAUNCH-SENTINEL-3333", false)
 }
 
+func TestDuplicateSessionIDsAcrossProfileScopedStateDoNotCrossAttribute(t *testing.T) {
+	root := newMeshApplicationTestDaemon(t, "ref")
+	profile := newMeshApplicationTestDaemon(t, "ref")
+	stateRoot := filepath.Join(t.TempDir(), "sessions")
+	root.cfg.Hooks.SessionStateDir = stateRoot
+	profile.cfg.Daemon.ProfileName = "alpha"
+	profile.cfg.Hooks.SessionStateDir = filepath.Join(stateRoot, "profiles", "alpha")
+	cwd := t.TempDir()
+	const duplicateID = "s-profile-duplicate"
+	rootSession := addGoalSummarySession(t, root, duplicateID, cwd, false,
+		"Coordinate root deployment safely", "RAW-ROOT-USER-1111", "RAW-ROOT-LAUNCH-1111")
+	profileSession := addGoalSummarySession(t, profile, duplicateID, cwd, false,
+		"Validate isolated profile attribution", "RAW-PROFILE-USER-2222", "RAW-PROFILE-LAUNCH-2222")
+
+	root.goalSummaryRunner = func(_ context.Context, _, goal string) (string, error) {
+		if goal != "Coordinate root deployment safely" {
+			t.Fatalf("root read profile state: %q", goal)
+		}
+		return "Advance machine-wide rollout through verified metadata", nil
+	}
+	profile.goalSummaryRunner = func(_ context.Context, _, goal string) (string, error) {
+		if goal != "Validate isolated profile attribution" {
+			t.Fatalf("profile read root state: %q", goal)
+		}
+		return "Confirm the scoped surface uses its own recording", nil
+	}
+	root.queueOverallGoalSummaries(context.Background())
+	profile.queueOverallGoalSummaries(context.Background())
+	root.goalSummaryWG.Wait()
+	profile.goalSummaryWG.Wait()
+
+	assertGoalSummary(t, root, rootSession.ID, "Advance machine-wide rollout through verified metadata", true)
+	assertGoalSummary(t, profile, profileSession.ID, "Confirm the scoped surface uses its own recording", true)
+}
+
 func TestGoalSummarySingleFlightAndGlobalConcurrencyBound(t *testing.T) {
 	d := newMeshApplicationTestDaemon(t, "ref")
+	profile := newMeshApplicationTestDaemon(t, "ref")
+	profile.goalSummarySlots = d.goalSummarySlots
 	var active atomic.Int32
 	var maximum atomic.Int32
 	var calls atomic.Int32
@@ -107,12 +146,15 @@ func TestGoalSummarySingleFlightAndGlobalConcurrencyBound(t *testing.T) {
 		active.Add(-1)
 		return "Consolidate bounded inference with isolated execution", nil
 	}
+	profile.goalSummaryRunner = d.goalSummaryRunner
 
 	candidates := make([]goalSummaryCandidate, 0, 3)
+	owners := []*Daemon{d, d, profile}
 	for i, goal := range []string{"first independent objective", "second independent objective", "third independent objective"} {
-		managed := addGoalSummarySession(t, d, "s-bound-"+string(rune('a'+i)), t.TempDir(), false,
+		owner := owners[i]
+		managed := addGoalSummarySession(t, owner, "s-bound-"+string(rune('a'+i)), t.TempDir(), false,
 			goal, "raw user "+goal, "raw launch "+goal)
-		candidate, ok := d.goalSummaryCandidate(managed.Snapshot())
+		candidate, ok := owner.goalSummaryCandidate(managed.Snapshot())
 		if !ok {
 			t.Fatalf("candidate %d missing", i)
 		}
@@ -123,7 +165,7 @@ func TestGoalSummarySingleFlightAndGlobalConcurrencyBound(t *testing.T) {
 		t.Fatal("single-flight start failed")
 	}
 	if !d.startOverallGoalSummary(context.Background(), candidates[1]) ||
-		!d.startOverallGoalSummary(context.Background(), candidates[2]) {
+		!profile.startOverallGoalSummary(context.Background(), candidates[2]) {
 		t.Fatal("bounded start failed")
 	}
 	for i := 0; i < goalSummaryGlobalLimit; i++ {
@@ -143,12 +185,13 @@ func TestGoalSummarySingleFlightAndGlobalConcurrencyBound(t *testing.T) {
 	}
 	close(release)
 	d.goalSummaryWG.Wait()
+	profile.goalSummaryWG.Wait()
 
 	// The candidate skipped only because the pool was full was not retry-gated.
-	if !d.startOverallGoalSummary(context.Background(), candidates[2]) {
+	if !profile.startOverallGoalSummary(context.Background(), candidates[2]) {
 		t.Fatal("third candidate did not retry")
 	}
-	d.goalSummaryWG.Wait()
+	profile.goalSummaryWG.Wait()
 	if calls.Load() != 3 {
 		t.Fatalf("calls=%d, want 3", calls.Load())
 	}
@@ -255,17 +298,17 @@ func TestResolveGoalSummaryProducerUsesOnlyExplicitSafeCapabilities(t *testing.T
 	} {
 		t.Setenv(key, "")
 	}
-	if _, err := resolveGoalSummaryProducer(); !errors.Is(err, errGoalSummaryUnavailable) {
+	if _, err := resolveGoalSummaryProducer(config.CurrentWorkConfig{}); !errors.Is(err, errGoalSummaryUnavailable) {
 		t.Fatalf("no-capability error=%v", err)
 	}
 	t.Setenv("OPENAI_API_KEY", "openai-test")
 	t.Setenv("XAI_API_KEY", "xai-test")
-	producer, err := resolveGoalSummaryProducer()
+	producer, err := resolveGoalSummaryProducer(config.CurrentWorkConfig{})
 	if err != nil || producer.kind != goalSummaryProducerOpenAI {
 		t.Fatalf("automatic producer=%+v err=%v", producer, err)
 	}
 	t.Setenv("ARCMUX_GOAL_PROVIDER", "xai")
-	producer, err = resolveGoalSummaryProducer()
+	producer, err = resolveGoalSummaryProducer(config.CurrentWorkConfig{})
 	if err != nil || producer.kind != goalSummaryProducerXAI {
 		t.Fatalf("explicit producer=%+v err=%v", producer, err)
 	}
@@ -285,7 +328,7 @@ func TestProviderAPIKeyFileRequiresPrivateRegularFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("OPENAI_API_KEY_FILE", keyPath)
-	producer, err := resolveGoalSummaryProducer()
+	producer, err := resolveGoalSummaryProducer(config.CurrentWorkConfig{})
 	if err != nil || producer.kind != goalSummaryProducerOpenAI || producer.apiKey != "file-secret" {
 		t.Fatalf("private key file producer kind=%q key-present=%v err=%v", producer.kind, producer.apiKey != "", err)
 	}
@@ -293,7 +336,7 @@ func TestProviderAPIKeyFileRequiresPrivateRegularFile(t *testing.T) {
 	if err := os.Chmod(keyPath, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := resolveGoalSummaryProducer(); !errors.Is(err, errGoalSummaryUnavailable) {
+	if _, err := resolveGoalSummaryProducer(config.CurrentWorkConfig{}); !errors.Is(err, errGoalSummaryUnavailable) {
 		t.Fatalf("world-readable key file error=%v", err)
 	}
 
@@ -305,8 +348,53 @@ func TestProviderAPIKeyFileRequiresPrivateRegularFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("OPENAI_API_KEY_FILE", symlinkPath)
-	if _, err := resolveGoalSummaryProducer(); !errors.Is(err, errGoalSummaryUnavailable) {
+	if _, err := resolveGoalSummaryProducer(config.CurrentWorkConfig{}); !errors.Is(err, errGoalSummaryUnavailable) {
 		t.Fatalf("symlinked key file error=%v", err)
+	}
+}
+
+type uidFileInfo struct {
+	os.FileInfo
+	uid uint32
+}
+
+func (i uidFileInfo) Sys() any { return &syscall.Stat_t{Uid: i.uid} }
+
+func TestProviderAPIKeyFileRequiresCurrentUIDOwnership(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "key")
+	if err := os.WriteFile(path, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fileInfoOwnedByCurrentUID(uidFileInfo{FileInfo: info, uid: uint32(os.Geteuid())}) {
+		t.Fatal("current uid was rejected")
+	}
+	if fileInfoOwnedByCurrentUID(uidFileInfo{FileInfo: info, uid: uint32(os.Geteuid() + 1)}) {
+		t.Fatal("non-owner uid was accepted")
+	}
+}
+
+func TestResolveGoalSummaryProducerUsesPersistentConfigWithoutServiceEnvironment(t *testing.T) {
+	for _, key := range []string{
+		"ARCMUX_GOAL_PROVIDER", "ARCMUX_GOAL_BIN", "ARCMUX_GOAL_MODEL",
+		"OPENAI_API_KEY", "OPENAI_API_KEY_FILE", "XAI_API_KEY", "XAI_API_KEY_FILE",
+	} {
+		t.Setenv(key, "")
+	}
+	keyPath := filepath.Join(t.TempDir(), "openai.key")
+	if err := os.WriteFile(keyPath, []byte("configured-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	producer, err := resolveGoalSummaryProducer(config.CurrentWorkConfig{
+		Provider: "openai", Model: "configured-model", APIKeyFile: keyPath,
+	})
+	if err != nil || producer.kind != goalSummaryProducerOpenAI ||
+		producer.model != "configured-model" || producer.apiKey != "configured-secret" {
+		t.Fatalf("persistent producer kind=%q model=%q key-present=%v err=%v",
+			producer.kind, producer.model, producer.apiKey != "", err)
 	}
 }
 

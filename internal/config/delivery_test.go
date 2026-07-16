@@ -66,6 +66,50 @@ func TestDeliveryUnknownJudgeFailsLoud(t *testing.T) {
 	}
 }
 
+func TestCurrentWorkProviderPersistsWithoutServiceEnvironment(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, "config.toml")
+	if err := os.WriteFile(path, []byte(`
+[current_work]
+provider = "openai"
+model = "gpt-5.4-mini"
+api_key_file = "~/.config/arcmux/openai-api-key"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CurrentWork.Provider != "openai" || cfg.CurrentWork.Model != "gpt-5.4-mini" ||
+		cfg.CurrentWork.APIKeyFile != filepath.Join(home, ".config", "arcmux", "openai-api-key") {
+		t.Fatalf("current-work config=%+v", cfg.CurrentWork)
+	}
+}
+
+func TestCurrentWorkProviderRejectsUnknownOrRelativeCredentialFile(t *testing.T) {
+	for name, body := range map[string]string{
+		"unknown provider": `[current_work]
+provider = "agent-cli"
+`,
+		"relative key file": `[current_work]
+provider = "openai"
+api_key_file = "relative.key"
+`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(path); err == nil {
+				t.Fatal("unsafe current-work config was accepted")
+			}
+		})
+	}
+}
+
 func TestProtocolStateRootFollowsSessionStateDirectory(t *testing.T) {
 	cases := []struct {
 		name     string

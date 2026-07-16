@@ -244,11 +244,19 @@ func (pm *ProfileManager) startLocked(ctx context.Context, rec ProfileRecord) er
 	cfg.Tmux.DefaultSession = rec.Name
 	cfg.Pulse.Enabled = false
 	cfg.Pulse.DataRoot = rec.DataDir
+	// Session IDs are unique only within a profile scope. Keep both canonical
+	// hook state and raw hook output in a profile-owned namespace so duplicate
+	// root/profile IDs cannot read or mutate each other's recording.
+	cfg.Hooks.SessionStateDir = filepath.Join(pm.parent.cfg.Hooks.SessionStateDir, "profiles", rec.Name)
+	cfg.Hooks.HookOutputDir = filepath.Join(pm.parent.cfg.Hooks.HookOutputDir, "profiles", rec.Name)
 	// Mesh connectivity is machine-scoped. Only the root daemon owns the
 	// shared registry, listener, and outbound peer loops.
 	cfg.Mesh.Enabled = false
 
 	d := New(cfg, pm.parent.logger.With("profile", rec.Name))
+	// The daemon process owns one inference budget. Profile daemons retain
+	// per-session single-flight state but share the root's global slot pool.
+	d.goalSummarySlots = pm.parent.goalSummarySlots
 	if err := d.Start(ctx); err != nil {
 		return fmt.Errorf("start profile %s: %w", rec.Name, err)
 	}

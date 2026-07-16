@@ -64,20 +64,24 @@ make start && sleep 1 && make status
   The command accepts no arbitrary shell text and both endpoints must remain
   loopback-only.
 - Semantic `current_work` gate: run
-  `go test -race ./internal/daemon ./internal/sessionview ./internal/hooks -run 'Test(DaemonOwnsTrustedOverallGoalWrite|SameCWDSessionsUseExactStateAndPrivateSessionIsNeverSummarized|GoalSummarySingleFlightAndGlobalConcurrencyBound|ToollessOpenAIProviderUsesBoundedHTTPSRequest|APIGoalProviderDoesNotRedirectCredential|ExplicitLegacyProducerKindPreservesCompatibilityWithoutBasenameInference|ResolveGoalSummaryProducerUsesOnlyExplicitSafeCapabilities|ProviderAPIKeyFileRequiresPrivateRegularFile|RefreshOverallGoalRejectsWrappedEmbeddedAndUnsafeOutput|BoundedGoalReadersRejectOversizedStreamingOutput|MeshSessionListAndGetAgreeForRealHookStateFixture|SummarizedOverallGoalRejectsStaleTurnAndAdvancesFreshness|SummarizedOverallGoalRejectsSameTurnContractRevisionChange|BuildCurrentWorkRequiresSummarizerProvenance|NormalizeCurrentWork)' -count=5`.
+  `go test -race ./internal/daemon ./internal/sessionview ./internal/hooks ./internal/config -run 'Test(DaemonOwnsTrustedOverallGoalWrite|SameCWDSessionsUseExactStateAndPrivateSessionIsNeverSummarized|DuplicateSessionIDsAcrossProfileScopedStateDoNotCrossAttribute|GoalSummarySingleFlightAndGlobalConcurrencyBound|ToollessOpenAIProviderUsesBoundedHTTPSRequest|APIGoalProviderDoesNotRedirectCredential|ExplicitLegacyProducerKindPreservesCompatibilityWithoutBasenameInference|ResolveGoalSummaryProducerUsesOnlyExplicitSafeCapabilities|ProviderAPIKeyFileRequiresPrivateRegularFile|ProviderAPIKeyFileRequiresCurrentUIDOwnership|ResolveGoalSummaryProducerUsesPersistentConfigWithoutServiceEnvironment|RefreshOverallGoalRejectsWrappedEmbeddedAndUnsafeOutput|BoundedGoalReadersRejectOversizedStreamingOutput|MeshSessionListAndGetAgreeForRealHookStateFixture|SummarizedOverallGoalRejectsStaleTurnAndAdvancesFreshness|SummarizedOverallGoalRejectsSameTurnContractRevisionChange|BuildCurrentWorkRequiresSummarizerProvenance|NormalizeCurrentWork|CurrentWorkProviderPersistsWithoutServiceEnvironment|CurrentWorkProviderRejectsUnknownOrRelativeCredentialFile|ProfileManager_CreateRemoveRestart)' -count=5`.
   Automatic producer selection uses direct, tool-less OpenAI or xAI HTTPS
   calls; select one with `ARCMUX_GOAL_PROVIDER` and provide its conventional
-  API-key environment variable or owner-only `OPENAI_API_KEY_FILE` /
-  `XAI_API_KEY_FILE`. `ARCMUX_GOAL_BIN` is supported only as an explicitly
-  configured `legacy-cli` compatibility capability; no agent CLI is
-  auto-launched. Missing producers and unsafe, oversized, or verbatim-derived
-  outputs omit `current_work` with a credential-free warning. The inference
-  input comes only from the exact session-id-keyed hook state, never cwd/host
-  history matching or raw user/history text; private sessions are skipped.
+  API-key environment variable or owner-only key file. Managed services use
+  persistent `[current_work]` provider/model/api-key-file config without
+  sourcing shell startup files. `ARCMUX_GOAL_BIN` is supported only as an
+  explicitly configured `legacy-cli` compatibility capability; no agent CLI
+  is auto-launched. Missing producers and unsafe, oversized, or
+  verbatim-derived outputs omit `current_work` with a credential-free warning.
+  The inference input comes only from the exact profile-scoped,
+  session-id-keyed hook state, never cwd/host history matching or raw
+  user/history text; private sessions are skipped.
   Successful completed-turn refreshes are globally bounded to two concurrent
-  calls with one per session, stamp `hook.overall_goal_summarizer.v1`, use a
-  full-revision CAS, agree across `sessions.list`/`sessions.get`, and never
-  expose raw goal/user/history sentinels or credential-like output.
+  calls across the root and every profile daemon, with one call per session;
+  duplicate IDs are isolated by profile-scoped state/output directories.
+  Successful writes stamp `hook.overall_goal_summarizer.v1`, use a full-revision
+  CAS, agree across `sessions.list`/`sessions.get`, and never expose raw
+  goal/user/history sentinels or credential-like output.
 - Live tailnet rung: on the stable host run
   `arcmux mesh serve ref --device <host> --url ws://<tailscale-host>:7788/v1/mesh --tailscale-port 7788`
   and pipe the JSON over SSH into

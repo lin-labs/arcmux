@@ -53,6 +53,24 @@ func TestProfileManager_CreateRemoveRestart(t *testing.T) {
 	if alpha.TmuxSocketName == beta.TmuxSocketName {
 		t.Fatalf("tmux sockets collide: %q", alpha.TmuxSocketName)
 	}
+	wantAlphaState := filepath.Join(cfg.Hooks.SessionStateDir, "profiles", "alpha")
+	wantBetaState := filepath.Join(cfg.Hooks.SessionStateDir, "profiles", "beta")
+	if pm.daemons["alpha"].cfg.Hooks.SessionStateDir != wantAlphaState ||
+		pm.daemons["beta"].cfg.Hooks.SessionStateDir != wantBetaState || wantAlphaState == wantBetaState {
+		t.Fatalf("profile hook state is not isolated: alpha=%q beta=%q",
+			pm.daemons["alpha"].cfg.Hooks.SessionStateDir, pm.daemons["beta"].cfg.Hooks.SessionStateDir)
+	}
+	wantAlphaOutput := filepath.Join(cfg.Hooks.HookOutputDir, "profiles", "alpha")
+	wantBetaOutput := filepath.Join(cfg.Hooks.HookOutputDir, "profiles", "beta")
+	if pm.daemons["alpha"].cfg.Hooks.HookOutputDir != wantAlphaOutput ||
+		pm.daemons["beta"].cfg.Hooks.HookOutputDir != wantBetaOutput || wantAlphaOutput == wantBetaOutput {
+		t.Fatalf("profile hook output is not isolated: alpha=%q beta=%q",
+			pm.daemons["alpha"].cfg.Hooks.HookOutputDir, pm.daemons["beta"].cfg.Hooks.HookOutputDir)
+	}
+	if pm.daemons["alpha"].goalSummarySlots != parent.goalSummarySlots ||
+		pm.daemons["beta"].goalSummarySlots != parent.goalSummarySlots {
+		t.Fatal("profile daemons do not share the process-wide current-work limiter")
+	}
 	if pm.daemons["alpha"].mesh != nil || pm.daemons["beta"].mesh != nil {
 		t.Fatal("profile daemon started the machine-scoped mesh")
 	}
@@ -132,8 +150,9 @@ func testProfileManagerConfig(t *testing.T) *config.Config {
 			StuckTimeout:    "5m",
 		},
 		Hooks: config.HooksConfig{
-			HookOutputDir: filepath.Join(tmp, "hooks"),
-			AutoInstall:   false,
+			HookOutputDir:   filepath.Join(tmp, "hooks"),
+			SessionStateDir: filepath.Join(tmp, "session-state"),
+			AutoInstall:     false,
 		},
 		Pulse: config.PulseConfig{
 			Enabled:           false,
