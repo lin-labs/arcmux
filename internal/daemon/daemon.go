@@ -1108,6 +1108,9 @@ func (d *Daemon) Kill(ctx context.Context, sessionID string, graceful bool, time
 		_ = d.tmux.WaitIdle(waitCtx, snap.TmuxTarget, timeout, 1*time.Second)
 	}
 
+	if snap.TmuxTarget == "" {
+		return errors.New("exact tmux pane target is unavailable")
+	}
 	var killErr error
 	if snap.TmuxSessionName != "" {
 		if d.killTmuxSessionHook != nil {
@@ -1120,12 +1123,6 @@ func (d *Daemon) Kill(ctx context.Context, sessionID string, graceful bool, time
 	} else {
 		killErr = d.tmux.KillPane(ctx, snap.TmuxTarget)
 	}
-	if killErr != nil {
-		return fmt.Errorf("terminate exact tmux session: %w", killErr)
-	}
-	if snap.TmuxTarget == "" {
-		return errors.New("exact tmux pane target is unavailable")
-	}
 	var paneExists bool
 	if d.tmuxPaneExistsHook != nil {
 		paneExists = d.tmuxPaneExistsHook(ctx, snap.TmuxTarget)
@@ -1133,7 +1130,17 @@ func (d *Daemon) Kill(ctx context.Context, sessionID string, graceful bool, time
 		paneExists = d.tmux.PaneExists(ctx, snap.TmuxTarget)
 	}
 	if paneExists {
+		if killErr != nil {
+			return fmt.Errorf("terminate exact tmux session: %w", killErr)
+		}
 		return fmt.Errorf("exact tmux pane %s is still alive after termination", snap.TmuxTarget)
+	}
+	if killErr != nil {
+		d.logger.Warn("tmux termination command failed after exact pane exited",
+			"session_id", sessionID,
+			"tmux_target", snap.TmuxTarget,
+			"error", killErr,
+		)
 	}
 
 	// Only tear down supervision after exact termination has been confirmed.

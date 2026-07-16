@@ -337,6 +337,12 @@ func TestSourceHandoffImmediateRetirementRetriesAfterRestartUntilExactExit(t *te
 	if closeCalls != 2 || stored.Retirement == nil || stored.Retirement.State != handoff.RetirementRetired {
 		t.Fatalf("restart retirement=%+v close_calls=%d", stored.Retirement, closeCalls)
 	}
+	if err := fixture.outbox.reconcile(context.Background(), reconcileAt.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if closeCalls != 2 {
+		t.Fatalf("retired source was closed again: close_calls=%d", closeCalls)
+	}
 }
 
 func TestSourceHandoffAfterTurnRetirementWaitsForNewDurableTurnEnd(t *testing.T) {
