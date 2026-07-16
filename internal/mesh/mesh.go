@@ -32,6 +32,14 @@ const (
 
 var errHeartbeatTimeout = errors.New("peer heartbeat timed out")
 
+type retryCause string
+
+const (
+	retryAfterProbeFailure     retryCause = "probe_failure"
+	retryAfterHandshakeFailure retryCause = "handshake_failure"
+	retryAfterConnectionDrop   retryCause = "connection_drop"
+)
+
 type Envelope struct {
 	Version      int             `json:"version"`
 	Type         string          `json:"type"`
@@ -72,12 +80,13 @@ type Manager struct {
 	ln     net.Listener
 	wg     sync.WaitGroup
 
-	mu      sync.RWMutex
-	peers   map[string]*peerRuntime
-	status  map[string]Status
-	gen     atomic.Uint64
-	started bool
-	probe   func(context.Context, Peer) error
+	mu         sync.RWMutex
+	peers      map[string]*peerRuntime
+	status     map[string]Status
+	gen        atomic.Uint64
+	started    bool
+	probe      func(context.Context, Peer) error
+	retryDelay func(int, time.Duration, time.Duration) time.Duration
 
 	capabilities []string
 	handlersMu   sync.RWMutex
@@ -114,7 +123,7 @@ func New(cfg config.ParsedMeshConfig, registry *Registry, logger *slog.Logger) *
 	}
 	return &Manager{cfg: cfg, registry: registry, logger: logger,
 		peers: map[string]*peerRuntime{}, status: map[string]Status{},
-		probe:        tcpReachabilityProbe,
+		probe: tcpReachabilityProbe, retryDelay: fullJitter,
 		capabilities: append([]string(nil), defaultCapabilities...),
 		handlers:     map[string]registeredMethod{}, eventSubs: map[uint64]*eventSubscriber{}}
 }
@@ -270,8 +279,9 @@ func (m *Manager) connectLoop(peer Peer) {
 		probeCtx, probeCancel := context.WithTimeout(m.ctx, m.reachabilityProbeTimeout())
 		err := m.probe(probeCtx, peer)
 		probeCancel()
-		probeFailed := err != nil
+		retryCause := retryAfterHandshakeFailure
 		if err != nil {
+			retryCause = retryAfterProbeFailure
 			m.updateStatus(peer.ID, func(s *Status) {
 				s.ProbeState = "unreachable"
 				s.LastProbeAt = &probeAt
@@ -333,6 +343,7 @@ func (m *Manager) connectLoop(peer Peer) {
 			if time.Since(connectedAt) >= m.cfg.DeadAfter {
 				attempt = 0
 			}
+			retryCause = retryAfterConnectionDrop
 		} else {
 			if conn != nil {
 				_ = conn.Close(websocket.StatusPolicyViolation, "handshake failed")
@@ -340,8 +351,8 @@ func (m *Manager) connectLoop(peer Peer) {
 			m.setError(peer.ID, sanitizeError(err))
 		}
 		attempt++
-		retryMin, retryMax := m.retryBounds(probeFailed)
-		delay := fullJitter(attempt, retryMin, retryMax)
+		retryMin, retryMax := m.retryBounds(retryCause)
+		delay := m.retryDelay(attempt, retryMin, retryMax)
 		next := time.Now().Add(delay)
 		m.updateStatus(peer.ID, func(s *Status) { s.State = "disconnected"; s.Attempts = attempt; s.NextRetryAt = &next })
 		t := time.NewTimer(delay)
@@ -356,11 +367,12 @@ func (m *Manager) connectLoop(peer Peer) {
 
 const maxReachabilityProbeTimeout = time.Second
 
-// Failed reachability probes use five seconds as their default ceiling even
-// when the general WebSocket reconnect ceiling is higher, so Wi-Fi/Tailscale
-// restoration is noticed promptly. An explicitly higher reconnect minimum
-// remains the operator's floor. Reachable peers that fail the authenticated
-// WebSocket handshake continue to honor the configured reconnect maximum.
+// Failed reachability probes and dropped established links use five seconds as
+// their default ceiling even when the general WebSocket reconnect ceiling is
+// higher, so Wi-Fi/Tailscale restoration is noticed promptly. An explicitly
+// higher reconnect minimum remains the operator's floor. Reachable peers that
+// fail the authenticated WebSocket handshake continue to honor the configured
+// reconnect maximum.
 const maxReachabilityProbeRetry = 5 * time.Second
 
 func (m *Manager) reachabilityProbeTimeout() time.Duration {
@@ -370,8 +382,8 @@ func (m *Manager) reachabilityProbeTimeout() time.Duration {
 	return maxReachabilityProbeTimeout
 }
 
-func (m *Manager) retryBounds(probeFailed bool) (time.Duration, time.Duration) {
-	if !probeFailed {
+func (m *Manager) retryBounds(cause retryCause) (time.Duration, time.Duration) {
+	if cause == retryAfterHandshakeFailure {
 		return m.cfg.ReconnectMin, m.cfg.ReconnectMax
 	}
 	// min(configured max, max(configured min, five-second probe ceiling))

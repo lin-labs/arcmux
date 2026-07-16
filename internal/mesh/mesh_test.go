@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -173,16 +174,18 @@ func TestReachabilityProbeTimeoutIsLightweightAndBounded(t *testing.T) {
 	}
 }
 
-func TestProbeRetryCapPreservesHandshakeReconnectMaximum(t *testing.T) {
+func TestRetryCauseBoundsCapProbeAndConnectionDropOnly(t *testing.T) {
 	cfg := testConfig("127.0.0.1:0")
 	cfg.ReconnectMin = 500 * time.Millisecond
 	cfg.ReconnectMax = 30 * time.Second
 	manager := New(cfg, &Registry{Version: 1, DeviceID: "ref"}, testLogger())
-	probeMin, probeMax := manager.retryBounds(true)
-	if probeMin != 500*time.Millisecond || probeMax != 5*time.Second {
-		t.Fatalf("probe retry bounds = [%v,%v], want [500ms,5s]", probeMin, probeMax)
+	for _, cause := range []retryCause{retryAfterProbeFailure, retryAfterConnectionDrop} {
+		min, max := manager.retryBounds(cause)
+		if min != 500*time.Millisecond || max != 5*time.Second {
+			t.Fatalf("%s retry bounds = [%v,%v], want [500ms,5s]", cause, min, max)
+		}
 	}
-	handshakeMin, handshakeMax := manager.retryBounds(false)
+	handshakeMin, handshakeMax := manager.retryBounds(retryAfterHandshakeFailure)
 	if handshakeMin != 500*time.Millisecond || handshakeMax != 30*time.Second {
 		t.Fatalf("handshake retry bounds = [%v,%v], want configured [500ms,30s]", handshakeMin, handshakeMax)
 	}
@@ -190,7 +193,7 @@ func TestProbeRetryCapPreservesHandshakeReconnectMaximum(t *testing.T) {
 	cfg.ReconnectMin = 20 * time.Millisecond
 	cfg.ReconnectMax = 50 * time.Millisecond
 	manager = New(cfg, &Registry{Version: 1, DeviceID: "ref"}, testLogger())
-	probeMin, probeMax = manager.retryBounds(true)
+	probeMin, probeMax := manager.retryBounds(retryAfterConnectionDrop)
 	if probeMin != 20*time.Millisecond || probeMax != 50*time.Millisecond {
 		t.Fatalf("probe retry bounds below default ceiling = [%v,%v], want configured [20ms,50ms]", probeMin, probeMax)
 	}
@@ -198,10 +201,101 @@ func TestProbeRetryCapPreservesHandshakeReconnectMaximum(t *testing.T) {
 	cfg.ReconnectMin = 10 * time.Second
 	cfg.ReconnectMax = 30 * time.Second
 	manager = New(cfg, &Registry{Version: 1, DeviceID: "ref"}, testLogger())
-	probeMin, probeMax = manager.retryBounds(true)
+	probeMin, probeMax = manager.retryBounds(retryAfterProbeFailure)
 	if probeMin != 10*time.Second || probeMax != 10*time.Second {
 		t.Fatalf("probe retry bounds above default ceiling = [%v,%v], want operator floor [10s,10s]", probeMin, probeMax)
 	}
+}
+
+func TestHighAttemptShortLivedConnectionDropUsesPromptRetryWithoutDisturbingPeer(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	devboxToken, _ := NewToken()
+	devbox := New(testConfig("127.0.0.1:0"), &Registry{
+		Version: 1, DeviceID: "devbox", Serve: true,
+		Accept: map[string]string{"ref": TokenHash(devboxToken)},
+	}, testLogger())
+	startManager(t, devbox, ctx)
+
+	labsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: []string{"*"}, Subprotocols: []string{subprotocol}})
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		handshakeCtx, handshakeCancel := context.WithTimeout(r.Context(), time.Second)
+		defer handshakeCancel()
+		if _, err := readEnvelope(handshakeCtx, conn); err != nil {
+			return
+		}
+		if err := writeEnvelope(handshakeCtx, conn, Envelope{Version: 1, Type: "welcome", DeviceID: "labs"}); err != nil {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+		_ = conn.Close(websocket.StatusNormalClosure, "test short-lived connection drop")
+	}))
+	defer labsServer.Close()
+
+	cfg := testConfig("127.0.0.1:0")
+	cfg.ReconnectMin = 500 * time.Millisecond
+	cfg.ReconnectMax = 30 * time.Second
+	cfg.DeadAfter = time.Hour
+	client := New(cfg, &Registry{
+		Version: 1, DeviceID: "ref", Peers: []Peer{
+			{ID: "labs", URL: "ws" + strings.TrimPrefix(labsServer.URL, "http") + meshPath, Token: "unused"},
+			{ID: "devbox", URL: "ws://" + devbox.Addr() + meshPath, Token: devboxToken},
+		},
+	}, testLogger())
+	var retryCalls atomic.Int32
+	type retryObservation struct {
+		attempt int
+		max     time.Duration
+	}
+	highAttempt := make(chan retryObservation, 1)
+	client.retryDelay = func(attempt int, min, max time.Duration) time.Duration {
+		call := retryCalls.Add(1)
+		if call == 11 {
+			highAttempt <- retryObservation{attempt: attempt, max: max}
+			return max
+		}
+		return time.Millisecond
+	}
+	startManager(t, client, ctx)
+	devboxBefore := waitState(t, client, "devbox", "connected")
+
+	select {
+	case observed := <-highAttempt:
+		if observed.attempt != 11 || observed.max != 5*time.Second {
+			t.Fatalf("short-lived connection drop retry=%+v, want attempt 11 max 5s", observed)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("short-lived labs connection did not reach attempt 11; status=%+v", client.Status())
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		for _, status := range client.Status() {
+			if status.PeerID == "labs" && status.State == "disconnected" && status.Attempts >= 11 {
+				deadline = time.Time{}
+				break
+			}
+		}
+		if deadline.IsZero() {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !deadline.IsZero() {
+		t.Fatalf("labs did not publish high-attempt retry status: %+v", client.Status())
+	}
+	devboxAfter := waitState(t, client, "devbox", "connected")
+	if devboxBefore.ConnectedAt == nil || devboxAfter.ConnectedAt == nil || !devboxAfter.ConnectedAt.Equal(*devboxBefore.ConnectedAt) {
+		t.Fatalf("labs short-lived drops disturbed devbox: before=%+v after=%+v", devboxBefore, devboxAfter)
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	client.Stop(stopCtx)
+	devbox.Stop(stopCtx)
 }
 
 func TestConnectPingAndGracefulShutdown(t *testing.T) {

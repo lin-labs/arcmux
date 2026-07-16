@@ -41,14 +41,16 @@ make start && sleep 1 && make status
   serving daemon, and confirm the dialer transitions disconnected → connected
   without either side's local sessions changing.
 - Multi-peer reachability gate: run
-  `go test -race ./internal/mesh -run 'Test(MultipleReachablePeersConnectIndependently|ProbePhasePreservesCompatibleConnectionState|ReachabilityProbeTimeoutIsLightweightAndBounded|ProbeRetryCapPreservesHandshakeReconnectMaximum|UnreachablePeerDoesNotDelayReachablePeer|NeitherReachableUsesBoundedProbeBackoff|PeerChurnDoesNotDisturbOtherConnection|RestoredPeerReconnectsWithinProbeRetryBoundWithoutDisturbingOtherPeer)$' -count=10`.
+  `go test -race ./internal/mesh -run 'Test(MultipleReachablePeersConnectIndependently|ProbePhasePreservesCompatibleConnectionState|ReachabilityProbeTimeoutIsLightweightAndBounded|RetryCauseBoundsCapProbeAndConnectionDropOnly|UnreachablePeerDoesNotDelayReachablePeer|NeitherReachableUsesBoundedProbeBackoff|PeerChurnDoesNotDisturbOtherConnection|RestoredPeerReconnectsWithinProbeRetryBoundWithoutDisturbingOtherPeer|HighAttemptShortLivedConnectionDropUsesPromptRetryWithoutDisturbingPeer)$' -count=10`.
   It must prove devbox and labs connect together, one unavailable target does
   not delay the other, failed lightweight TCP probes back off without a busy
   loop with effective ceiling
   `min(reconnect_max, max(reconnect_min, 5s))`, and one peer can leave/rejoin
   promptly without disturbing the other. Reachable peers with
   WebSocket/handshake failures must retain the configured `reconnect_max`
-  ceiling.
+  ceiling. A short-lived established link that drops at a high attempt count
+  must use the same prompt poll ceiling as a failed probe, while another
+  connected peer retains its exact `connected_at` value.
 - Live tailnet rung: on the stable host run
   `arcmux mesh serve ref --device <host> --url ws://<tailscale-host>:7788/v1/mesh --tailscale-port 7788`
   and pipe the JSON over SSH into
