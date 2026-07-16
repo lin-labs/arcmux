@@ -46,6 +46,7 @@ type Daemon struct {
 	monitors  map[string]context.CancelFunc
 	processes map[string]*os.Process
 	recorders map[string]*recorder // sessionID → active screen recorder
+	stopping  bool
 
 	healthEvents chan health.HealthEvent
 	eventBus     *EventBus
@@ -103,6 +104,7 @@ type Daemon struct {
 	state   *store.DB
 
 	goalSummaryMu       sync.Mutex
+	goalSummaryWG       sync.WaitGroup
 	goalSummaryAttempts map[string]goalSummaryAttempt
 	goalSummaryRunner   func(context.Context, string, string) (string, error)
 	goalHistoryRoot     string
@@ -368,7 +370,23 @@ func (d *Daemon) Start(ctx context.Context) error {
 func (d *Daemon) Stop() {
 	d.logger.Info("daemon stopping")
 
-	// Persist session state before shutdown
+	d.beginStop()
+	ownedDaemons := []*Daemon{d}
+	if d.profileManager != nil {
+		ownedDaemons = append(ownedDaemons, d.profileManager.beginStop()...)
+	}
+	var drainWG sync.WaitGroup
+	drainWG.Add(len(ownedDaemons))
+	for _, owned := range ownedDaemons {
+		go func(owned *Daemon) {
+			defer drainWG.Done()
+			owned.drainOwnedProcesses()
+		}(owned)
+	}
+	drainWG.Wait()
+
+	// Persist session state after exec waiters have published terminal/idle
+	// state, so a restart never revives an orphaned working exec as idle.
 	d.persistSessions()
 
 	// Stop all monitors
@@ -399,10 +417,6 @@ func (d *Daemon) Stop() {
 		cancel()
 	}
 
-	if d.cancel != nil {
-		d.cancel()
-	}
-
 	if d.profileManager != nil {
 		d.profileManager.Stop()
 	}
@@ -427,6 +441,28 @@ func (d *Daemon) Stop() {
 		d.state = nil
 	}
 	d.stateMu.Unlock()
+}
+
+func (d *Daemon) beginStop() {
+	// Close the exec/summary start gates before taking owned-process snapshots.
+	// Both launch paths register under d.mu, so concurrent starts are either
+	// included in the drain or rejected.
+	d.mu.Lock()
+	alreadyStopping := d.stopping
+	d.stopping = true
+	cancel := d.cancel
+	d.mu.Unlock()
+	if !alreadyStopping && cancel != nil {
+		cancel()
+	}
+}
+
+func (d *Daemon) drainOwnedProcesses() {
+	// Exec transports and summary models are daemon-owned subprocess trees.
+	// Drain them before persistence because systemd intentionally leaves only
+	// the external tmux servers untouched across daemon restarts.
+	d.stopExecProcesses()
+	d.goalSummaryWG.Wait()
 }
 
 // ReloadMesh atomically swaps only the best-effort mesh transport. It never

@@ -111,17 +111,37 @@ func (pm *ProfileManager) Start(ctx context.Context) error {
 }
 
 func (pm *ProfileManager) Stop() {
+	daemons := pm.beginStop()
+	for _, d := range daemons {
+		d.Stop()
+	}
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
+	for name := range pm.daemons {
+		delete(pm.daemons, name)
+	}
+}
+
+func (pm *ProfileManager) beginStop() []*Daemon {
+	if pm == nil {
+		return nil
+	}
+	pm.mu.Lock()
 	if pm.cancel != nil {
 		pm.cancel()
 		pm.cancel = nil
 		pm.ctx = nil
 	}
-	for name, d := range pm.daemons {
-		d.Stop()
-		delete(pm.daemons, name)
+	daemons := make([]*Daemon, 0, len(pm.daemons))
+	for _, d := range pm.daemons {
+		daemons = append(daemons, d)
 	}
+	pm.mu.Unlock()
+
+	for _, d := range daemons {
+		d.beginStop()
+	}
+	return daemons
 }
 
 func (pm *ProfileManager) List() []ProfileRecord {

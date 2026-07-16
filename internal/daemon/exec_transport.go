@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -24,6 +25,11 @@ type execRunConfig struct {
 	parser          execOutputParser
 	finalOutputPath string
 }
+
+const (
+	execShutdownGracePeriod = 2 * time.Second
+	execShutdownKillWait    = 2 * time.Second
+)
 
 type execOutputParser interface {
 	HandleStdoutLine(sess *session.Session, line string)
@@ -76,10 +82,20 @@ func (d *Daemon) sendExecPrompt(ctx context.Context, sess *session.Session, prof
 	}
 
 	runCtx, cancel := context.WithCancel(d.ctx)
+	d.mu.Lock()
+	if d.stopping {
+		d.mu.Unlock()
+		cancel()
+		return errors.New("daemon stopping")
+	}
 	if err := runCfg.cmd.Start(); err != nil {
+		d.mu.Unlock()
 		cancel()
 		return fmt.Errorf("start exec process: %w", err)
 	}
+	d.processes[snap.ID] = runCfg.cmd.Process
+	d.monitors[snap.ID] = cancel
+	d.mu.Unlock()
 
 	sess.SetPID(runCfg.cmd.Process.Pid)
 	sess.SetCurrentCommand(commandText)
@@ -87,11 +103,6 @@ func (d *Daemon) sendExecPrompt(ctx context.Context, sess *session.Session, prof
 	sess.SetHealth("healthy")
 	sess.ResetNudge()
 	d.persistSessions()
-
-	d.mu.Lock()
-	d.processes[snap.ID] = runCfg.cmd.Process
-	d.monitors[snap.ID] = cancel
-	d.mu.Unlock()
 
 	d.emitStateChanged(snap.ID, session.StateWorking, "prompt started")
 	d.emitEvent(Event{
@@ -145,13 +156,18 @@ func (d *Daemon) waitExecPrompt(runCtx context.Context, sess *session.Session, r
 		d.logger.Warn("write exec output failed", "session_id", sessionID, "error", err)
 	}
 
-	d.mu.Lock()
-	delete(d.processes, sessionID)
-	if cancel, ok := d.monitors[sessionID]; ok {
-		cancel()
-		delete(d.monitors, sessionID)
-	}
-	d.mu.Unlock()
+	// Keep the process registered until output parsing, state transition, and
+	// persistence are complete. Daemon.Stop waits on this registry as its
+	// exec-drain barrier.
+	defer func() {
+		d.mu.Lock()
+		delete(d.processes, sessionID)
+		if cancel, ok := d.monitors[sessionID]; ok {
+			cancel()
+			delete(d.monitors, sessionID)
+		}
+		d.mu.Unlock()
+	}()
 
 	snap := sess.Snapshot()
 	sess.SetPID(0)
@@ -323,14 +339,21 @@ func (d *Daemon) killExecSession(ctx context.Context, sess *session.Session, gra
 
 	if proc != nil {
 		if graceful {
-			_ = proc.Signal(os.Interrupt)
+			_ = signalExecProcessTree(proc, os.Interrupt)
 			waitCtx, waitCancel := context.WithTimeout(ctx, timeout)
-			defer waitCancel()
-			if err := d.waitForExecProcessExit(waitCtx, snap.ID); err != nil {
-				_ = proc.Kill()
-			}
+			_ = d.waitForExecProcessExit(waitCtx, snap.ID)
+			waitCancel()
+			// The leader may exit while descendants remain. Always clear the
+			// original process group after the graceful window.
+			_ = signalExecProcessTree(proc, os.Kill)
+			killCtx, killCancel := context.WithTimeout(context.Background(), execShutdownKillWait)
+			_ = d.waitForExecProcessTreesExit(killCtx, map[string]*os.Process{snap.ID: proc})
+			killCancel()
 		} else {
-			_ = proc.Kill()
+			_ = signalExecProcessTree(proc, os.Kill)
+			killCtx, killCancel := context.WithTimeout(context.Background(), execShutdownKillWait)
+			_ = d.waitForExecProcessTreesExit(killCtx, map[string]*os.Process{snap.ID: proc})
+			killCancel()
 		}
 	}
 
@@ -355,6 +378,57 @@ func (d *Daemon) killExecSession(ctx context.Context, sess *session.Session, gra
 	return nil
 }
 
+func (d *Daemon) stopExecProcesses() {
+	d.mu.RLock()
+	processes := make(map[string]*os.Process, len(d.processes))
+	for id, proc := range d.processes {
+		processes[id] = proc
+	}
+	cancels := make(map[string]context.CancelFunc, len(processes))
+	for id := range processes {
+		if cancel := d.monitors[id]; cancel != nil {
+			cancels[id] = cancel
+		}
+	}
+	d.mu.RUnlock()
+
+	if len(processes) == 0 {
+		return
+	}
+
+	for id, proc := range processes {
+		if err := signalExecProcessTree(proc, os.Interrupt); err != nil {
+			d.logger.Warn("graceful exec shutdown signal failed", "session_id", id, "error", err)
+		}
+		if cancel := cancels[id]; cancel != nil {
+			cancel()
+		}
+	}
+
+	graceCtx, graceCancel := context.WithTimeout(context.Background(), execShutdownGracePeriod)
+	_ = d.waitForExecProcessTreesExit(graceCtx, processes)
+	graceCancel()
+
+	// Process-group ownership outlives the leader: an agent can exit on
+	// interrupt while a tool subprocess ignores it. Kill every original group
+	// so no headless descendants become unsupervised under KillMode=process.
+	for id, proc := range processes {
+		if err := signalExecProcessTree(proc, os.Kill); err != nil {
+			d.logger.Warn("force exec shutdown signal failed", "session_id", id, "error", err)
+		}
+	}
+
+	killCtx, killCancel := context.WithTimeout(context.Background(), execShutdownKillWait)
+	err := d.waitForExecProcessTreesExit(killCtx, processes)
+	killCancel()
+	if err != nil {
+		d.mu.RLock()
+		remaining := len(d.processes)
+		d.mu.RUnlock()
+		d.logger.Warn("exec processes did not drain before daemon stop", "remaining", remaining)
+	}
+}
+
 func (d *Daemon) waitForExecProcessExit(ctx context.Context, sessionID string) error {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
@@ -364,6 +438,39 @@ func (d *Daemon) waitForExecProcessExit(ctx context.Context, sessionID string) e
 		_, running := d.processes[sessionID]
 		d.mu.RUnlock()
 		if !running {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (d *Daemon) waitForExecProcessTreesExit(ctx context.Context, processes map[string]*os.Process) error {
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		d.mu.RLock()
+		running := false
+		for id := range processes {
+			if _, ok := d.processes[id]; ok {
+				running = true
+				break
+			}
+		}
+		d.mu.RUnlock()
+		treesAlive := false
+		for _, proc := range processes {
+			if execProcessTreeAlive(proc) {
+				treesAlive = true
+				break
+			}
+		}
+		if !running && !treesAlive {
 			return nil
 		}
 
@@ -424,6 +531,7 @@ func commandWithSnapshotEnv(name string, args, unset []string, snap session.Snap
 	cmd := exec.Command(path, args...)
 	cmd.Dir = snap.CWD
 	cmd.Env = env
+	configureExecProcess(cmd)
 	return cmd, nil
 }
 

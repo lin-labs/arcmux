@@ -80,3 +80,39 @@ func TestFindSessionHistoryRequiresExactHostAndCWD(t *testing.T) {
 		t.Fatalf("path=%q want=%q err=%v", path, want, err)
 	}
 }
+
+func TestStopCancelsAndWaitsQueuedGoalSummary(t *testing.T) {
+	d := newMeshApplicationTestDaemon(t, "ref")
+	runCtx, cancel := context.WithCancel(context.Background())
+	d.ctx = runCtx
+	d.cancel = cancel
+	history := filepath.Join(t.TempDir(), "history.md")
+	if err := os.WriteFile(history, []byte("conversation"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	started := make(chan struct{})
+	finished := make(chan struct{})
+	d.goalSummaryRunner = func(ctx context.Context, _, _ string) (string, error) {
+		close(started)
+		<-ctx.Done()
+		time.Sleep(50 * time.Millisecond)
+		close(finished)
+		return "", ctx.Err()
+	}
+	if !d.startOverallGoalSummary(runCtx, goalSummaryCandidate{
+		sessionID: "s-summary-stop",
+		history:   history,
+	}) {
+		t.Fatal("goal summary was not queued")
+	}
+	<-started
+
+	d.Stop()
+
+	select {
+	case <-finished:
+	default:
+		t.Fatal("Stop returned before queued goal summary exited")
+	}
+}

@@ -72,13 +72,29 @@ func (d *Daemon) queueOverallGoalSummaries(ctx context.Context) {
 		d.goalSummaryAttempts[snap.ID] = goalSummaryAttempt{key: key, at: now}
 		d.goalSummaryMu.Unlock()
 
-		go func(candidate goalSummaryCandidate) {
-			if err := d.refreshOverallGoal(ctx, candidate); err != nil &&
-				!errors.Is(err, context.Canceled) && !errors.Is(err, hooks.ErrStaleOverallGoal) {
-				d.logger.Debug("overall-goal refresh skipped", "session_id", candidate.sessionID, "error", err)
-			}
-		}(candidate)
+		if !d.startOverallGoalSummary(ctx, candidate) {
+			return
+		}
 	}
+}
+
+func (d *Daemon) startOverallGoalSummary(ctx context.Context, candidate goalSummaryCandidate) bool {
+	d.mu.Lock()
+	if d.stopping {
+		d.mu.Unlock()
+		return false
+	}
+	d.goalSummaryWG.Add(1)
+	d.mu.Unlock()
+
+	go func() {
+		defer d.goalSummaryWG.Done()
+		if err := d.refreshOverallGoal(ctx, candidate); err != nil &&
+			!errors.Is(err, context.Canceled) && !errors.Is(err, hooks.ErrStaleOverallGoal) {
+			d.logger.Debug("overall-goal refresh skipped", "session_id", candidate.sessionID, "error", err)
+		}
+	}()
+	return true
 }
 
 func (d *Daemon) goalSummaryCandidate(sessionID, agent, cwd string) (goalSummaryCandidate, bool) {
@@ -304,6 +320,14 @@ func runOverallGoalModel(ctx context.Context, current, conversation string) (str
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(runCtx, bin, "--no-alt-screen", "--disable-web-search", "-m", model, "--prompt-file", path)
+	configureExecProcess(cmd)
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		return signalExecProcessTree(cmd.Process, os.Kill)
+	}
+	cmd.WaitDelay = execShutdownKillWait
 	cmd.Stdin = strings.NewReader("")
 	output, err := cmd.Output()
 	if err != nil {
