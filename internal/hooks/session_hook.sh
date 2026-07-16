@@ -12,7 +12,6 @@
 #      session is doing — the THREE valued views (recording, not steering):
 #        - goal:              latest gauged "Your ask:" (the current sub-task)
 #        - last_user_message: the raw last user turn (Go truncates to 3 lines)
-#        - vault_link:        where the conversation is saved in the vault
 #
 # The daemon owner observes turn_end state and performs overall-goal inference.
 # The pane hook deliberately has no command that can stamp trusted provenance.
@@ -210,53 +209,14 @@ case "$EVENT_TYPE" in
   *)                                               exit 0 ;;
 esac
 
-# 3) Best-effort vault link: only on turn_end, find the history log under
-# ~/agents/histories whose frontmatter cwd matches this session (newest mtime).
-VAULT_LINK=""
-if [ "$CANON" = "turn_end" ] && [ -n "$ARCMUX_SESSION_CWD" ] && command -v python3 >/dev/null 2>&1; then
-  VAULT_LINK=$(ARCMUX_SESSION_CWD="$ARCMUX_SESSION_CWD" python3 -c '
-import os, glob
-from pathlib import Path
-cwd = os.environ.get("ARCMUX_SESSION_CWD", "")
-host = os.uname().nodename.split(".")[0]
-root = os.path.expanduser("~/agents/histories")
-best = ""; best_mtime = -1.0
-for f in glob.glob(os.path.join(root, "*.md")):
-    try:
-        head = Path(f).read_text(encoding="utf-8", errors="ignore")[:1500]
-    except Exception:
-        continue
-    fm_cwd = ""; fm_host = ""
-    for line in head.splitlines():
-        s = line.strip()
-        if s.startswith("cwd:"):
-            fm_cwd = s.split(":", 1)[1].strip()
-        elif s.startswith("host:"):
-            fm_host = s.split(":", 1)[1].strip()
-        elif s == "---" and (fm_cwd or fm_host):
-            break
-    if not fm_cwd or fm_cwd != cwd:
-        continue
-    if fm_host and host and fm_host != host:
-        continue
-    try:
-        m = os.path.getmtime(f)
-    except OSError:
-        continue
-    if m > best_mtime:
-        best_mtime = m; best = f
-print(best)
-' 2>/dev/null)
-fi
-
-# 4) Mutate the state doc. arcmux hook reads session/agent/state-dir from env by
+# 3) Mutate the exact session-id-keyed state doc. arcmux hook reads
+# session/agent/state-dir from env by
 # default; pass recording fields only when present so empty values never clobber.
 ARCMUX_BIN="${ARCMUX_BIN:-arcmux}"
 set -- hook --agent "${ARCMUX_HOOK_AGENT:-claude}" --event "$CANON" --tool "$TOOL_NAME"
 [ -n "$GOAL" ] && set -- "$@" --goal "$GOAL"
 [ -n "$USER_MSG" ] && set -- "$@" --last-message "$USER_MSG"
-[ -n "$VAULT_LINK" ] && set -- "$@" --vault-link "$VAULT_LINK"
-if [ -n "$GOAL$USER_MSG$VAULT_LINK" ]; then
+if [ -n "$GOAL$USER_MSG" ]; then
   set -- "$@" --contract-source "$EVENT_TYPE"
 fi
 "$ARCMUX_BIN" "$@" >/dev/null 2>&1 || true

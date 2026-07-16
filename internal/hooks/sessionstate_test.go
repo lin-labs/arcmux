@@ -53,7 +53,7 @@ func TestTurnContractRecording(t *testing.T) {
 	// The background summarizer refreshes overall_goal WITHOUT moving counters.
 	beforeEvents := st.EventsSeen
 	beforeTurns := st.TurnCount
-	if err := ApplySummarizedOverallGoal(dir, id, "claude", "ship X end to end", st.TurnCount, st.LastTurnEndAt, now.Add(2*time.Minute)); err != nil {
+	if err := ApplySummarizedOverallGoal(dir, id, "claude", "ship X end to end", SnapshotOverallGoalInput(st), now.Add(2*time.Minute)); err != nil {
 		t.Fatalf("contract-only: %v", err)
 	}
 	st, _ = ReadSessionState(dir, id)
@@ -101,7 +101,7 @@ func TestSummarizedOverallGoalRejectsStaleTurnAndAdvancesFreshness(t *testing.T)
 		<-releaseOldSummary
 		oldSummaryErr <- ApplySummarizedOverallGoal(
 			dir, "s-race", "codex", "stale turn one",
-			old.TurnCount, old.LastTurnEndAt, now.Add(4*time.Second),
+			SnapshotOverallGoalInput(old), now.Add(4*time.Second),
 		)
 	}()
 	if err := ApplyEvent(dir, "s-race", "codex", EventPromptSubmit, "", now.Add(2*time.Second)); err != nil {
@@ -116,7 +116,7 @@ func TestSummarizedOverallGoalRejectsStaleTurnAndAdvancesFreshness(t *testing.T)
 	}
 	current, _ := ReadSessionState(dir, "s-race")
 	updatedAt := now.Add(5 * time.Second)
-	if err := ApplySummarizedOverallGoal(dir, "s-race", "codex", "fresh turn two", current.TurnCount, current.LastTurnEndAt, updatedAt); err != nil {
+	if err := ApplySummarizedOverallGoal(dir, "s-race", "codex", "fresh turn two", SnapshotOverallGoalInput(current), updatedAt); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := ReadSessionState(dir, "s-race")
@@ -125,6 +125,37 @@ func TestSummarizedOverallGoalRejectsStaleTurnAndAdvancesFreshness(t *testing.T)
 	}
 	if !got.UpdatedAt.Equal(updatedAt) {
 		t.Fatalf("source freshness=%s want %s", got.UpdatedAt, updatedAt)
+	}
+}
+
+func TestSummarizedOverallGoalRejectsSameTurnContractRevisionChange(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	now := time.Date(2026, 7, 16, 20, 0, 0, 0, time.UTC)
+	if err := ApplyEventWithContract(
+		dir, "s-contract-cas", "codex", EventPromptSubmit, "",
+		TurnContractUpdate{Goal: "first semantic goal"}, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyEvent(dir, "s-contract-cas", "codex", EventTurnEnd, "", now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	stale, _ := ReadSessionState(dir, "s-contract-cas")
+	if err := ApplyContractOnly(
+		dir, "s-contract-cas", "codex", TurnContractUpdate{Goal: "revised semantic goal"}, now.Add(2*time.Second),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplySummarizedOverallGoal(
+		dir, "s-contract-cas", "codex", "must not overwrite revised goal",
+		SnapshotOverallGoalInput(stale), now.Add(3*time.Second),
+	); !errors.Is(err, ErrStaleOverallGoal) {
+		t.Fatalf("same-turn stale summary error=%v", err)
+	}
+	current, _ := ReadSessionState(dir, "s-contract-cas")
+	if current.TurnContract.Goal != "revised semantic goal" || current.TurnContract.OverallGoalProvenance != "" {
+		t.Fatalf("revised contract overwritten: %+v", current.TurnContract)
 	}
 }
 

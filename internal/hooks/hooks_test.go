@@ -130,7 +130,9 @@ func TestInstaller_EnsureGenericHook_WithoutSession(t *testing.T) {
 }
 
 func TestGenericHookCannotStampTrustedOverallGoal(t *testing.T) {
-	for _, forbidden := range []string{"hook-summary", "--overall-goal-provenance"} {
+	for _, forbidden := range []string{
+		"hook-summary", "--overall-goal-provenance", "ARCMUX_SESSION_CWD", "glob.glob", "--vault-link",
+	} {
 		if strings.Contains(genericHookScript, forbidden) {
 			t.Fatalf("generic hook exposes trusted summary writer %q", forbidden)
 		}

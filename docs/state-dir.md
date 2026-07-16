@@ -39,6 +39,7 @@ Written atomically under a per-session lock; safe to poll-read.
 
 ```json
 {
+  "revision": 4,
   "session_id": "s-1781037342173817000",
   "agent": "grok",
   "created_at": "2026-06-09T13:35:42-07:00",
@@ -53,8 +54,9 @@ Written atomically under a per-session lock; safe to poll-read.
   "turn_contract": {
     "goal": "add the vault link field to the state doc",
     "overall_goal": "Make arcmux's session JSON an accurate per-turn recording",
+    "overall_goal_provenance": "hook.overall_goal_summarizer.v1",
+    "overall_goal_updated_at": "2026-06-09T13:36:09-07:00",
     "last_user_message": "now also record where the convo is saved\n…",
-    "vault_link": "/home/blin/agents/histories/2026-06-25-09-arcmux-hooks.md",
     "source": "Stop",
     "updated_at": "2026-06-09T13:36:08-07:00"
   }
@@ -73,15 +75,17 @@ It captures three valued views:
 - `goal` — the **latest** gauged goal: the agent's most recent "Your ask:"
   restatement (the AGENTS.md rule), i.e. the current sub-task being steered.
 - `overall_goal` — the **whole conversation's** objective, **continuously
-  evolving**. Seeded from the launch prompt, then re-derived each turn by a
-  background pass that sends the kept user turns + the current overall goal to a
-  summarizer (xAI grok). Normally one succinct line; when the conversation has
-  clearly split into separate themes, a short checklist with completed/abandoned
-  earlier goals checked off (`- [x] …`) and active ones unchecked (`- [ ] …`).
+  evolving**. Seeded from the launch prompt as untrusted display state, then
+  re-derived after completed turns by a daemon-owned, tool-less OpenAI or xAI
+  HTTPS call. Its only semantic inputs are the exact session-id-keyed gauged
+  goal and any prior trusted summary; raw user messages, launch seeds, and
+  history files are never model inputs. Only the daemon writer can stamp
+  `overall_goal_provenance: hook.overall_goal_summarizer.v1`.
 - `last_user_message` — the **raw** last user turn, verbatim, truncated to 3
   lines. Recorded alongside the gauged goal, never as a substitute.
-- `vault_link` — best-effort path to where the conversation is saved in the
-  vault (`~/agents/histories/<…>.md`), matched by session cwd/host.
+- `vault_link` — optional legacy/external-producer metadata. The generic hook
+  does not infer it from cwd/host because that heuristic can confuse concurrent
+  conversations in the same checkout.
 
 Optional `success_verification` / `path` fields are retained for callers that
 set them, but the unified hook no longer scrapes them. This is not a transcript
@@ -95,19 +99,26 @@ grok drop-in — see [llm-classes.md](llm-classes.md)) run the **same unified
 script** (`arcmux-session-hook.sh`; codex no longer has a divergent bridge),
 which (1) appends the raw event to the JSONL audit and (2) calls
 `arcmux hook --agent <agent> --event <canonical>` (plus `--goal` /
-`--last-message` / `--vault-link` recording flags) to mutate the state doc. The
+`--last-message` recording flags) to mutate the state doc. The
 per-session identity comes from `ARCMUX_SESSION_ID` / `ARCMUX_SESSION_STATE_DIR`
-env injected at launch (with `ARCMUX_SESSION_CWD` added for vault-link
-resolution); the script no-ops for non-arcmux sessions, so global registration
-is safe.
+env injected at launch; the script no-ops for non-arcmux sessions, so global
+registration is safe.
 
-On `turn_end` the hook also fires a **background, best-effort** summarizer that
-refreshes `overall_goal` via `arcmux hook --overall-goal <text>` — a
-**contract-only** write (no `--event`) that updates the recording without moving
-any event counters. It never blocks the turn; if grok is unreachable,
-`overall_goal` simply keeps its prior value.
+The daemon observes `turn_end` and schedules a **background, best-effort**
+summary, bounded to two concurrent calls globally and one per session. The
+result is committed only if the exact state revision and complete input snapshot
+are unchanged; a concurrent hook update makes the response stale. The generic
+hook and public CLI expose no way to stamp trusted provenance. Missing providers
+or rejected output simply omit mesh `current_work` until a safe summary exists.
+
+Provider selection is controlled by `ARCMUX_GOAL_PROVIDER=openai|xai`; credentials
+come from `OPENAI_API_KEY` / `XAI_API_KEY`, or from an owner-only regular file
+named by `OPENAI_API_KEY_FILE` / `XAI_API_KEY_FILE`. The fixed HTTPS requests
+declare no tools, explicitly disable OpenAI response storage, and size-bound
+response bodies. `ARCMUX_GOAL_BIN` remains an explicit `legacy-cli`
+compatibility path and is never auto-discovered from an agent binary.
 
 A subscriber that wants "is session X working? when did it last finish a
 turn?" should read `sessions/<id>.json`. A subscriber that wants the full
 event stream should tail the JSONL. Do not write to either — `arcmux hook` is
-the single writer of the state doc.
+the event/recording writer and the daemon is the trusted summary writer.

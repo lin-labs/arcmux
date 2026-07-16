@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,6 +38,10 @@ var CanonicalEvents = []string{
 // mutated only through the locked hook writers and seeded by InitSessionState
 // when the daemon starts watching a session.
 type SessionState struct {
+	// Revision advances on every successful locked mutation. It is the CAS
+	// boundary for daemon-owned semantic summaries; old state documents decode
+	// as revision zero and advance normally on their next write.
+	Revision   uint64    `json:"revision"`
 	SessionID  string    `json:"session_id"`
 	Agent      string    `json:"agent"`
 	CreatedAt  time.Time `json:"created_at"`
@@ -64,13 +69,11 @@ type SessionState struct {
 //   - Goal (latest): the agent's latest "Your ask:" restatement — the current
 //     sub-task being steered, scraped from the transcript (no model call).
 //   - LastUserMessage: the raw last user turn, verbatim (3-line truncated).
-//   - OverallGoal: the entirety of the conversation, CONTINUOUSLY EVOLVING. It
-//     is seeded from the launch prompt and then re-derived each turn by passing
-//     the kept user turns + the current overall goal to a daemon-owned summarizer
-//     (the configured legacy producer, or the local Codex fallback); normally one
-//     succinct line, or — when the conversation has clearly shifted gears into
-//     separate themes — a short checklist with earlier goals checked off. It is
-//     NOT frozen.
+//   - OverallGoal: the semantic current-work view, CONTINUOUSLY EVOLVING. It is
+//     seeded locally from the launch prompt but does not gain trusted provenance
+//     until a daemon-owned, tool-less API provider transforms the exact
+//     session-id-keyed Goal plus any prior trusted summary. Raw prompt/history
+//     text and untrusted launch seeds are never inference inputs.
 type TurnContract struct {
 	// Goal is the current gauged goal — the agent's latest "Your ask:". Shifts
 	// each turn while still reflecting the objective.
@@ -84,8 +87,8 @@ type TurnContract struct {
 	// LastUserMessage is the raw, verbatim most-recent user prompt (truncated to
 	// 3 lines) — recorded alongside the gauged goal, never as a substitute.
 	LastUserMessage string `json:"last_user_message,omitempty"`
-	// VaultLink is the best-effort path to where the conversation is saved in
-	// the vault (~/agents/histories/<…>.md), resolved by cwd/host match.
+	// VaultLink is retained for old/external recording producers. The generic
+	// hook no longer guesses it from cwd/host, and current_work never reads it.
 	VaultLink string `json:"vault_link,omitempty"`
 	// SuccessVerification and Path are optional, retained from the original
 	// contract: how success is/was verified, and the consolidated approach.
@@ -106,6 +109,43 @@ type TurnContractUpdate struct {
 	SuccessVerification string
 	Path                string
 	Source              string
+}
+
+// OverallGoalInputSnapshot is the complete hook-state input authorized for one
+// daemon summary attempt. ApplySummarizedOverallGoal compares every field and
+// the document revision under the state-file lock, so no same-turn hook update
+// can be overwritten by a slow model response.
+type OverallGoalInputSnapshot struct {
+	Revision              uint64
+	SessionID             string
+	Agent                 string
+	TurnCount             int
+	LastTurnEndAt         time.Time
+	Goal                  string
+	OverallGoal           string
+	OverallGoalProvenance string
+	OverallGoalUpdatedAt  time.Time
+	TurnContractUpdatedAt time.Time
+}
+
+// SnapshotOverallGoalInput captures the exact revision and semantic contract
+// fields consumed by the daemon summarizer.
+func SnapshotOverallGoalInput(st *SessionState) OverallGoalInputSnapshot {
+	if st == nil {
+		return OverallGoalInputSnapshot{}
+	}
+	snapshot := OverallGoalInputSnapshot{
+		Revision: st.Revision, SessionID: st.SessionID, Agent: st.Agent,
+		TurnCount: st.TurnCount, LastTurnEndAt: st.LastTurnEndAt,
+	}
+	if st.TurnContract != nil {
+		snapshot.Goal = st.TurnContract.Goal
+		snapshot.OverallGoal = st.TurnContract.OverallGoal
+		snapshot.OverallGoalProvenance = st.TurnContract.OverallGoalProvenance
+		snapshot.OverallGoalUpdatedAt = st.TurnContract.OverallGoalUpdatedAt
+		snapshot.TurnContractUpdatedAt = st.TurnContract.UpdatedAt
+	}
+	return snapshot
 }
 
 // SessionStatePath returns the live state file path for a session.
@@ -201,16 +241,23 @@ func ApplyContractOnly(stateDir, sessionID, agent string, contract TurnContractU
 // is fixed here (callers cannot assert it) and the write is conditional on the
 // exact turn snapshot used by the summarizer. A slow turn N summary therefore
 // cannot overwrite turn N+1.
-func ApplySummarizedOverallGoal(stateDir, sessionID, agent, overallGoal string, expectedTurnCount int, expectedLastTurnEndAt, now time.Time) error {
+func ApplySummarizedOverallGoal(stateDir, sessionID, agent, overallGoal string, expected OverallGoalInputSnapshot, now time.Time) error {
 	overallGoal = compactContractText(overallGoal)
 	if overallGoal == "" {
 		return errors.New("summarized overall goal is required")
 	}
-	if expectedTurnCount < 1 || expectedLastTurnEndAt.IsZero() {
+	if expected.SessionID != sessionID || expected.Agent == "" || expected.Agent != agent ||
+		expected.TurnCount < 1 || expected.LastTurnEndAt.IsZero() {
 		return errors.New("summary turn snapshot is required")
 	}
 	return mutateSessionStateChecked(stateDir, sessionID, func(st *SessionState) error {
-		if st.TurnCount != expectedTurnCount || !st.LastTurnEndAt.Equal(expectedLastTurnEndAt) {
+		actual := SnapshotOverallGoalInput(st)
+		if actual.Revision != expected.Revision || actual.SessionID != expected.SessionID ||
+			actual.Agent != expected.Agent || actual.TurnCount != expected.TurnCount ||
+			!actual.LastTurnEndAt.Equal(expected.LastTurnEndAt) || actual.Goal != expected.Goal ||
+			actual.OverallGoal != expected.OverallGoal || actual.OverallGoalProvenance != expected.OverallGoalProvenance ||
+			!actual.OverallGoalUpdatedAt.Equal(expected.OverallGoalUpdatedAt) ||
+			!actual.TurnContractUpdatedAt.Equal(expected.TurnContractUpdatedAt) {
 			return ErrStaleOverallGoal
 		}
 		st.SessionID = sessionID
@@ -436,6 +483,10 @@ func mutateSessionStateChecked(stateDir, sessionID string, mutate func(*SessionS
 	if err := mutate(st); err != nil {
 		return err
 	}
+	if st.Revision == math.MaxUint64 {
+		return errors.New("session state revision exhausted")
+	}
+	st.Revision++
 
 	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {

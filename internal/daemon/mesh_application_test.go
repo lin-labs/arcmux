@@ -134,7 +134,7 @@ func TestMeshApplicationSessionsArtifactsAndExplicitEvents(t *testing.T) {
 	if err := hooks.ApplySummarizedOverallGoal(
 		server.cfg.Hooks.SessionStateDir, "s-shared", "codex",
 		"Render remote surfaces as native Mission Control sessions",
-		hookState.TurnCount, hookState.LastTurnEndAt, time.Now(),
+		hooks.SnapshotOverallGoalInput(hookState), time.Now(),
 	); err != nil {
 		t.Fatal(err)
 	}

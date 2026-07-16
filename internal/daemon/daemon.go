@@ -106,8 +106,9 @@ type Daemon struct {
 	goalSummaryMu       sync.Mutex
 	goalSummaryWG       sync.WaitGroup
 	goalSummaryAttempts map[string]goalSummaryAttempt
+	goalSummaryActive   map[string]bool
+	goalSummarySlots    chan struct{}
 	goalSummaryRunner   func(context.Context, string, string) (string, error)
-	goalHistoryRoot     string
 }
 
 // New creates a new daemon instance.
@@ -149,6 +150,8 @@ func New(cfg *config.Config, logger *slog.Logger) *Daemon {
 		eventBus:            NewEventBus(),
 		delivery:            delivery.NewController(newDeliveryJudge(cfg, logger), delivery.DefaultControllerConfig()),
 		goalSummaryAttempts: make(map[string]goalSummaryAttempt),
+		goalSummaryActive:   make(map[string]bool),
+		goalSummarySlots:    make(chan struct{}, goalSummaryGlobalLimit),
 	}
 }
 
@@ -813,9 +816,6 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 				"ARCMUX_HOOK_OUTPUT_DIR":   d.cfg.Hooks.HookOutputDir,
 				"ARCMUX_SESSION_STATE_DIR": d.cfg.Hooks.SessionStateDir,
 				"ARCMUX_DAEMON_SOCKET":     d.cfg.Daemon.Socket,
-				// Lets the hook's vault-link resolver match this session's cwd
-				// against the history logs' frontmatter.
-				"ARCMUX_SESSION_CWD": req.CWD,
 			}
 			// Point the hook at this exact arcmux binary so it doesn't depend on
 			// `arcmux` being on the agent shell's PATH.

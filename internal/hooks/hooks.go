@@ -35,8 +35,9 @@ const genericHookName = "arcmux-session-hook.sh"
 //
 // ONE script serves every hook-backed class — it understands all input dialects
 // (claude stdin, grok snake_case, codex argv+transcript), records the gauged
-// goal / raw user message / vault link, and on turn_end fires the background
-// overall-goal summarizer. See session_hook.sh for the full contract.
+// goal / raw user message into the exact session-id-keyed state document. The
+// daemon observes turn_end and owns the background overall-goal summarizer.
+// See session_hook.sh for the full contract.
 //
 //go:embed session_hook.sh
 var genericHookScript string
