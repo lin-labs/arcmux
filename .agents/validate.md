@@ -52,12 +52,16 @@ make start && sleep 1 && make status
   must use the same prompt poll ceiling as a failed probe, while another
   connected peer retains its exact `connected_at` value.
 - Managed endpoint gate: run
-  `go test -race ./internal/mesh ./internal/daemon ./cmd/arcmux -run 'Test(ManagedSSHTunnel|SSHTunnel|ManagerStopWaitsForManagedTunnelReaper|EstablishedConnectionCloseReasonRedacts|DaemonRestartRecreatesConfiguredManagedTunnel|MeshTunnel|SanitizePeerError|UpsertPeerPreservesManagedTransport)' -count=10`.
+  `go test -race ./internal/mesh ./internal/daemon ./cmd/arcmux -run 'Test(ManagedSSHTunnel|ExponentialRetryCapReachesConfiguredMaximumAtHighAttempts|RetryCauseBoundsCapProbeAndConnectionDropOnly|SSHTunnel|ManagerStopWaitsForManagedTunnelReaper|EstablishedConnectionCloseReasonRedacts|DaemonRestartRecreatesConfiguredManagedTunnel|MeshTunnel|SanitizePeerError|UpsertPeerPreservesManagedTransport)' -count=10`.
   It must prove each structured SSH local-forward is independently supervised,
-  process death and daemon restart recreate it, unreachable hosts use bounded
-  backoff, inherited SSH alias forwarding directives fail closed before the
-  transport process starts, and neither status nor logs expose peer
-  credentials. Configure the
+  process death and daemon restart recreate it, and long-unreachable hosts use
+  full-jitter exponential transport relaunch backoff up to `reconnect_max`.
+  Transport relaunch is distinct from the lightweight reachability-probe loop,
+  whose five-second ceiling remains unchanged. Retry state resets only after a
+  tunnel survives `dead_after`; cancellation and one peer's recovery remain
+  independent of another peer's outage. Inherited SSH alias forwarding
+  directives fail closed before the transport process starts, and neither
+  status nor logs expose peer credentials. Configure the
   durable fallback with `arcmux mesh tunnel <peer> --ssh-target <ssh-alias>
   --local 127.0.0.1:<dedicated-port> --remote 127.0.0.1:7788`; remove it with
   `arcmux mesh tunnel <peer> --remove` once a native tailnet URL is reachable.

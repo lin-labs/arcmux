@@ -183,6 +183,25 @@ func TestFullJitterBoundsPreventBusyLoop(t *testing.T) {
 	}
 }
 
+func TestExponentialRetryCapReachesConfiguredMaximumAtHighAttempts(t *testing.T) {
+	min, max := 500*time.Millisecond, 30*time.Second
+	for _, tc := range []struct {
+		attempt int
+		want    time.Duration
+	}{
+		{attempt: 1, want: 500 * time.Millisecond},
+		{attempt: 2, want: time.Second},
+		{attempt: 3, want: 2 * time.Second},
+		{attempt: 6, want: 16 * time.Second},
+		{attempt: 7, want: 30 * time.Second},
+		{attempt: 100, want: 30 * time.Second},
+	} {
+		if got := exponentialRetryCap(tc.attempt, min, max); got != tc.want {
+			t.Fatalf("attempt %d cap=%v, want %v", tc.attempt, got, tc.want)
+		}
+	}
+}
+
 func TestReachabilityProbeTimeoutIsLightweightAndBounded(t *testing.T) {
 	cfg := testConfig("127.0.0.1:0")
 	cfg.HandshakeTimeout = 10 * time.Second
@@ -211,6 +230,10 @@ func TestRetryCauseBoundsCapProbeAndConnectionDropOnly(t *testing.T) {
 	handshakeMin, handshakeMax := manager.retryBounds(retryAfterHandshakeFailure)
 	if handshakeMin != 500*time.Millisecond || handshakeMax != 30*time.Second {
 		t.Fatalf("handshake retry bounds = [%v,%v], want configured [500ms,30s]", handshakeMin, handshakeMax)
+	}
+	transportMin, transportMax := manager.retryBounds(retryAfterTransportFailure)
+	if transportMin != 500*time.Millisecond || transportMax != 30*time.Second {
+		t.Fatalf("transport retry bounds = [%v,%v], want configured [500ms,30s]", transportMin, transportMax)
 	}
 
 	cfg.ReconnectMin = 20 * time.Millisecond

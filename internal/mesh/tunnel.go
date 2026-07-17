@@ -184,7 +184,7 @@ func (m *Manager) superviseTunnel(peer Peer) {
 			status.TransportAttempts = attempt + 1
 			status.TransportNextRetryAt = nil
 		})
-		startedAt := time.Now()
+		startedAt := m.tunnelNow()
 		process, err := m.tunnelLauncher(m.ctx, peer)
 		if err == nil {
 			m.updateStatus(peer.ID, func(status *Status) {
@@ -208,15 +208,15 @@ func (m *Manager) superviseTunnel(peer Peer) {
 			if err == nil {
 				err = errors.New("ssh transport exited")
 			}
-			if time.Since(startedAt) >= m.cfg.DeadAfter {
+			if m.tunnelNow().Sub(startedAt) >= m.cfg.DeadAfter {
 				attempt = 0
 			}
 		}
 
 		attempt++
-		minRetry, maxRetry := m.retryBounds(retryAfterProbeFailure)
+		minRetry, maxRetry := m.retryBounds(retryAfterTransportFailure)
 		delay := m.tunnelRetryDelay(attempt, minRetry, maxRetry)
-		next := time.Now().Add(delay)
+		next := m.tunnelNow().Add(delay)
 		safeError := sanitizePeerError(peer, err)
 		m.updateStatus(peer.ID, func(status *Status) {
 			status.TransportState = "backoff"

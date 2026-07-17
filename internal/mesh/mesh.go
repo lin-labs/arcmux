@@ -38,6 +38,7 @@ const (
 	retryAfterProbeFailure     retryCause = "probe_failure"
 	retryAfterHandshakeFailure retryCause = "handshake_failure"
 	retryAfterConnectionDrop   retryCause = "connection_drop"
+	retryAfterTransportFailure retryCause = "transport_failure"
 )
 
 type Envelope struct {
@@ -94,6 +95,7 @@ type Manager struct {
 	retryDelay       func(int, time.Duration, time.Duration) time.Duration
 	tunnelLauncher   tunnelLauncher
 	tunnelRetryDelay func(int, time.Duration, time.Duration) time.Duration
+	tunnelNow        func() time.Time
 
 	capabilities []string
 	handlersMu   sync.RWMutex
@@ -132,7 +134,7 @@ func New(cfg config.ParsedMeshConfig, registry *Registry, logger *slog.Logger) *
 	return &Manager{cfg: cfg, registry: registry, logger: logger,
 		peers: map[string]*peerRuntime{}, status: map[string]Status{},
 		probe: tcpReachabilityProbe, retryDelay: fullJitter,
-		tunnelLauncher: launchSSHTunnel, tunnelRetryDelay: fullJitter,
+		tunnelLauncher: launchSSHTunnel, tunnelRetryDelay: fullJitter, tunnelNow: time.Now,
 		capabilities: append([]string(nil), defaultCapabilities...),
 		handlers:     map[string]registeredMethod{}, eventSubs: map[uint64]*eventSubscriber{}}
 }
@@ -411,7 +413,7 @@ func (m *Manager) reachabilityProbeTimeout() time.Duration {
 }
 
 func (m *Manager) retryBounds(cause retryCause) (time.Duration, time.Duration) {
-	if cause == retryAfterHandshakeFailure {
+	if cause == retryAfterHandshakeFailure || cause == retryAfterTransportFailure {
 		return m.cfg.ReconnectMin, m.cfg.ReconnectMax
 	}
 	// min(configured max, max(configured min, five-second probe ceiling))
@@ -452,13 +454,7 @@ func tcpReachabilityProbe(ctx context.Context, peer Peer) error {
 }
 
 func fullJitter(attempt int, min, max time.Duration) time.Duration {
-	cap := min
-	for i := 1; i < attempt && cap < max; i++ {
-		cap *= 2
-	}
-	if cap > max {
-		cap = max
-	}
+	cap := exponentialRetryCap(attempt, min, max)
 	if cap <= 0 {
 		return 0
 	}
@@ -466,6 +462,20 @@ func fullJitter(attempt int, min, max time.Duration) time.Duration {
 	// full jitter across the remainder of the current exponential window.
 	floor := min / 4
 	return floor + time.Duration(rand.Int64N(int64(cap-floor)+1))
+}
+
+func exponentialRetryCap(attempt int, min, max time.Duration) time.Duration {
+	if min >= max {
+		return max
+	}
+	cap := min
+	for i := 1; i < attempt && cap < max; i++ {
+		if cap > max/2 {
+			return max
+		}
+		cap *= 2
+	}
+	return cap
 }
 
 func (m *Manager) activate(peerID, direction string, conn *websocket.Conn, capabilities []string, redactions ...string) (*peerRuntime, bool) {

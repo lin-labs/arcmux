@@ -177,6 +177,180 @@ func TestManagedSSHTunnelUnreachableHostUsesBoundedBackoff(t *testing.T) {
 	manager.Stop(stopCtx)
 }
 
+func TestManagedSSHTunnelLongOfflineUsesConfiguredExponentialBoundsAtHighAttempt(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	peer := managedTunnelPeer("labs", "token", "127.0.0.1:18444")
+	cfg := testConfig("127.0.0.1:0")
+	cfg.ReconnectMin = 500 * time.Millisecond
+	cfg.ReconnectMax = 30 * time.Second
+	manager := New(cfg, &Registry{
+		Version: RegistryVersion, DeviceID: "ref", Peers: []Peer{peer},
+	}, testLogger())
+	manager.probe = func(context.Context, Peer) error { return errors.New("offline") }
+	manager.tunnelLauncher = func(context.Context, Peer) (managedTunnelProcess, error) {
+		return nil, errors.New("ssh host unreachable")
+	}
+	type bounds struct {
+		attempt  int
+		min, max time.Duration
+	}
+	observed := make(chan bounds, 64)
+	manager.tunnelRetryDelay = func(attempt int, min, max time.Duration) time.Duration {
+		observed <- bounds{attempt: attempt, min: min, max: max}
+		return time.Millisecond
+	}
+	startManager(t, manager, ctx)
+
+	for want := 1; want <= 12; want++ {
+		got := <-observed
+		if got.attempt != want || got.min != cfg.ReconnectMin || got.max != cfg.ReconnectMax {
+			t.Fatalf("retry %d bounds=%+v, want [%v,%v]", want, got, cfg.ReconnectMin, cfg.ReconnectMax)
+		}
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	if err := manager.Stop(stopCtx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestManagedSSHTunnelBackoffResetsOnlyAfterStableRun(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	peer := managedTunnelPeer("labs", "token", "127.0.0.1:18444")
+	cfg := testConfig("127.0.0.1:0")
+	cfg.DeadAfter = 40 * time.Millisecond
+	manager := New(cfg, &Registry{
+		Version: RegistryVersion, DeviceID: "ref", Peers: []Peer{peer},
+	}, testLogger())
+	var clock atomic.Int64
+	clock.Store(time.Unix(1_700_000_000, 0).UnixNano())
+	manager.tunnelNow = func() time.Time { return time.Unix(0, clock.Load()) }
+	manager.probe = func(context.Context, Peer) error { return errors.New("offline") }
+	var launches atomic.Int32
+	processes := make(chan *fakeTunnelProcess, 3)
+	manager.tunnelLauncher = func(context.Context, Peer) (managedTunnelProcess, error) {
+		switch launches.Add(1) {
+		case 1, 2:
+			return nil, errors.New("ssh host unreachable")
+		default:
+			process := newFakeTunnelProcess()
+			processes <- process
+			return process, nil
+		}
+	}
+	attempts := make(chan int, 8)
+	manager.tunnelRetryDelay = func(attempt int, _, _ time.Duration) time.Duration {
+		attempts <- attempt
+		return time.Millisecond
+	}
+	startManager(t, manager, ctx)
+
+	for _, want := range []int{1, 2} {
+		if got := <-attempts; got != want {
+			t.Fatalf("launch failure retry attempt=%d, want %d", got, want)
+		}
+	}
+	shortRun := <-processes
+	shortRun.exit(errors.New("short-lived tunnel exit"))
+	if got := <-attempts; got != 3 {
+		t.Fatalf("short-lived run reset retry attempt to %d, want 3", got)
+	}
+
+	stableRun := <-processes
+	clock.Add(int64(cfg.DeadAfter))
+	stableRun.exit(errors.New("stable tunnel exit"))
+	if got := <-attempts; got != 1 {
+		t.Fatalf("stable run retry attempt=%d, want reset to 1", got)
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	if err := manager.Stop(stopCtx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestManagedSSHTunnelBackoffCancellationStopsPromptly(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	peer := managedTunnelPeer("labs", "token", "127.0.0.1:18444")
+	manager := New(testConfig("127.0.0.1:0"), &Registry{
+		Version: RegistryVersion, DeviceID: "ref", Peers: []Peer{peer},
+	}, testLogger())
+	manager.probe = func(context.Context, Peer) error { return errors.New("offline") }
+	var launches atomic.Int32
+	manager.tunnelLauncher = func(context.Context, Peer) (managedTunnelProcess, error) {
+		launches.Add(1)
+		return nil, errors.New("ssh host unreachable")
+	}
+	backoffEntered := make(chan struct{}, 1)
+	manager.tunnelRetryDelay = func(int, time.Duration, time.Duration) time.Duration {
+		backoffEntered <- struct{}{}
+		return time.Hour
+	}
+	startManager(t, manager, ctx)
+	<-backoffEntered
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer stopCancel()
+	if err := manager.Stop(stopCtx); err != nil {
+		t.Fatalf("cancel long transport backoff: %v", err)
+	}
+	if got := launches.Load(); got != 1 {
+		t.Fatalf("launches after cancellation=%d, want 1", got)
+	}
+}
+
+func TestManagedSSHTunnelPeerRecoversIndependentlyWhileOtherRemainsOffline(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	devbox := managedTunnelPeer("devbox", "devbox-token", "127.0.0.1:18443")
+	labs := managedTunnelPeer("labs", "labs-token", "127.0.0.1:18444")
+	manager := New(testConfig("127.0.0.1:0"), &Registry{
+		Version: RegistryVersion, DeviceID: "ref", Peers: []Peer{devbox, labs},
+	}, testLogger())
+	manager.probe = func(context.Context, Peer) error { return errors.New("offline") }
+	manager.tunnelRetryDelay = func(int, time.Duration, time.Duration) time.Duration { return time.Millisecond }
+	var devboxAttempts atomic.Int32
+	var labsAttempts atomic.Int32
+	devboxProcess := newFakeTunnelProcess()
+	manager.tunnelLauncher = func(_ context.Context, peer Peer) (managedTunnelProcess, error) {
+		if peer.ID == "labs" {
+			labsAttempts.Add(1)
+			return nil, errors.New("labs unavailable")
+		}
+		if devboxAttempts.Add(1) < 3 {
+			return nil, errors.New("devbox temporarily unavailable")
+		}
+		return devboxProcess, nil
+	}
+	startManager(t, manager, ctx)
+
+	devboxStatus := waitTransportState(t, manager, "devbox", "running")
+	if got := devboxAttempts.Load(); got != 3 || devboxStatus.TransportAttempts != 3 {
+		t.Fatalf("devbox recovery attempts=%d status=%+v", got, devboxStatus)
+	}
+	deadline := time.Now().Add(time.Second)
+	for labsAttempts.Load() < 4 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if labsAttempts.Load() < 4 {
+		t.Fatalf("offline labs did not keep retrying independently: attempts=%d", labsAttempts.Load())
+	}
+	if status := waitTransportState(t, manager, "devbox", "running"); status.TransportAttempts != 3 {
+		t.Fatalf("labs retries disturbed recovered devbox: %+v", status)
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	if err := manager.Stop(stopCtx); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestManagedSSHTunnelsOperateIndependentlyPerPeer(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
