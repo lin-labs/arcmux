@@ -48,6 +48,36 @@ func TestEnsureCodexHookRejectsRelativeDir(t *testing.T) {
 	}
 }
 
+func TestEnsureCodexHookRefusesSymlinkedForeignHook(t *testing.T) {
+	tmpDir := t.TempDir()
+	dir := filepath.Join(tmpDir, "codex", "hooks")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(tmpDir, "agents-repo-hook.sh")
+	foreign := []byte("#!/bin/sh\n# shared agents hook\nprintf preserved\\n\n")
+	if err := os.WriteFile(target, foreign, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := CodexHookPath(dir)
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+
+	inst := NewInstaller(t.TempDir())
+	err := inst.EnsureCodexHook(dir)
+	if err == nil || !strings.Contains(err.Error(), "refusing to replace symlinked hook") {
+		t.Fatalf("EnsureCodexHook error = %v, want explicit symlink refusal", err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(foreign) {
+		t.Fatalf("foreign codex hook was mutated:\n%s", got)
+	}
+}
+
 // On a user prompt the unified hook records the raw last user message (recording,
 // not steering — no system-message injection), with the agent taken from the env.
 func TestCodexHookRecordsLastUserMessage(t *testing.T) {

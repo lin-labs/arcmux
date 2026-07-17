@@ -1,6 +1,7 @@
 package hooks
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -126,6 +127,148 @@ func TestInstaller_EnsureGenericHook_WithoutSession(t *testing.T) {
 	}
 	if string(got) != genericHookScript {
 		t.Error("generic hook content drifted from the fixed template")
+	}
+}
+
+func TestInstaller_EnsureGenericHook_RefusesSymlinkedForeignHook(t *testing.T) {
+	tmpDir := t.TempDir()
+	hookDir := filepath.Join(tmpDir, "claude")
+	targetDir := filepath.Join(tmpDir, "agents-repo", "hooks")
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	foreign := []byte("#!/bin/sh\n# richer user-managed hook\nprintf preserved\\n\n")
+	target := filepath.Join(targetDir, genericHookName)
+	if err := os.WriteFile(target, foreign, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := GenericHookPath(hookDir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+
+	installer := NewInstaller(filepath.Join(tmpDir, "out"))
+	err := installer.EnsureGenericHook(hookDir)
+	if err == nil || !strings.Contains(err.Error(), "refusing to replace symlinked hook") {
+		t.Fatalf("EnsureGenericHook error = %v, want explicit symlink refusal", err)
+	}
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("hook path stopped being a symlink: info=%v err=%v", info, err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(foreign) {
+		t.Fatalf("foreign hook was mutated:\n%s", got)
+	}
+}
+
+func TestInstaller_EnsureGenericHook_RefusesDifferentRegularHook(t *testing.T) {
+	tmpDir := t.TempDir()
+	hookDir := filepath.Join(tmpDir, "claude")
+	path := GenericHookPath(hookDir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	foreign := []byte("#!/bin/sh\n# user-managed extension\nprintf preserved\\n\n")
+	if err := os.WriteFile(path, foreign, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	installer := NewInstaller(filepath.Join(tmpDir, "out"))
+	err := installer.EnsureGenericHook(hookDir)
+	if err == nil || !strings.Contains(err.Error(), "refusing to replace non-matching hook") {
+		t.Fatalf("EnsureGenericHook error = %v, want explicit content refusal", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(foreign) {
+		t.Fatalf("foreign hook was mutated:\n%s", got)
+	}
+}
+
+func TestInstaller_Install_PreservesExternallyManagedHookAndReturnsWatchPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	hookDir := filepath.Join(tmpDir, "claude")
+	target := filepath.Join(tmpDir, "agents-repo-hook.sh")
+	foreign := []byte("#!/bin/sh\n# shared hook emits the arcmux JSONL contract\n")
+	if err := os.WriteFile(target, foreign, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := GenericHookPath(hookDir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	installer := NewInstaller(filepath.Join(tmpDir, "output"))
+	watchPath, err := installer.Install("s-external", "claude_hooks", hookDir)
+	if err != nil {
+		t.Fatalf("externally managed hook should remain watchable: %v", err)
+	}
+	if watchPath != installer.OutputPath("s-external") {
+		t.Fatalf("watch path=%q want=%q", watchPath, installer.OutputPath("s-external"))
+	}
+	got, err := os.ReadFile(target)
+	if err != nil || string(got) != string(foreign) {
+		t.Fatalf("foreign hook changed: data=%q err=%v", got, err)
+	}
+}
+
+func TestInstallManagedHookCleanupDoesNotDeleteConcurrentReplacement(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, genericHookName)
+	foreign := []byte("#!/bin/sh\n# concurrent foreign replacement\n")
+	injected := errors.New("injected install failure")
+	err := installManagedHookScriptWithHooks(path, managedHookInstallHooks{
+		afterCreate: func() error {
+			if err := os.Rename(path, path+".original"); err != nil {
+				return err
+			}
+			if err := os.WriteFile(path, foreign, 0o755); err != nil {
+				return err
+			}
+			return injected
+		},
+	})
+	if !errors.Is(err, injected) {
+		t.Fatalf("install error=%v want injected failure", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != string(foreign) {
+		t.Fatalf("cleanup deleted or changed concurrent replacement: data=%q err=%v", got, err)
+	}
+}
+
+func TestInstallManagedHookRejectsConcurrentReplacementDuringInspection(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, genericHookName)
+	if err := os.WriteFile(path, []byte(genericHookScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	foreign := []byte("#!/bin/sh\n# concurrent foreign replacement\n")
+	err := installManagedHookScriptWithHooks(path, managedHookInstallHooks{
+		afterExistingRead: func() error {
+			if err := os.Rename(path, path+".original"); err != nil {
+				return err
+			}
+			return os.WriteFile(path, foreign, 0o755)
+		},
+	})
+	if !errors.Is(err, ErrHookExternallyManaged) {
+		t.Fatalf("install error=%v want externally managed refusal", err)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil || string(got) != string(foreign) {
+		t.Fatalf("inspection changed concurrent replacement: data=%q err=%v", got, readErr)
 	}
 }
 

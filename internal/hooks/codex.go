@@ -26,11 +26,12 @@ func CodexHookPath(codexHookDir string) string {
 	return filepath.Join(codexHookDir, genericHookName)
 }
 
-// EnsureCodexHook writes the unified hook script into codexHookDir idempotently
-// (skips the write when the content already matches). It only materializes the
-// script file; it does not register or trust the hook in codex config. Mirrors
-// EnsureGenericHook for claude — and now installs the identical script, so
-// codex no longer has a divergent bridge.
+// EnsureCodexHook materializes the unified hook script only when the destination
+// is unowned. It accepts an existing executable only when its content already
+// matches, and never follows or overwrites a symlink or foreign script. It does
+// not register or trust the hook in codex config. Mirrors EnsureGenericHook for
+// claude — and now installs the identical script, so codex no longer has a
+// divergent bridge.
 func (i *Installer) EnsureCodexHook(codexHookDir string) error {
 	if !filepath.IsAbs(codexHookDir) {
 		return fmt.Errorf("codex hook dir must be absolute, got %q", codexHookDir)
@@ -39,11 +40,5 @@ func (i *Installer) EnsureCodexHook(codexHookDir string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create codex hook dir: %w", err)
 	}
-	if existing, err := os.ReadFile(path); err == nil && string(existing) == genericHookScript {
-		return nil
-	}
-	if err := os.WriteFile(path, []byte(genericHookScript), 0o755); err != nil {
-		return fmt.Errorf("write codex hook script: %w", err)
-	}
-	return nil
+	return installManagedHookScript(path)
 }

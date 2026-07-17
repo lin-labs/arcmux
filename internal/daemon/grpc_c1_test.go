@@ -174,7 +174,13 @@ func TestListSessionsBindsProfileScopeAndCanonicalHistory(t *testing.T) {
 	now := time.Now().UTC()
 	state := hooks.SessionState{
 		SessionID: sess.ID, Agent: "claude", CreatedAt: now, UpdatedAt: now,
-		TurnContract: &hooks.TurnContract{VaultLink: "/private/histories/2026-07-15-self.md", UpdatedAt: now},
+		TurnContract: &hooks.TurnContract{
+			CanonicalHistory: &hooks.CanonicalHistoryBinding{
+				Basename: "2026-07-15-self.md", ConversationID: "native-conversation-123",
+				Provenance: hooks.CanonicalHistoryBindingProvenance, UpdatedAt: now,
+			},
+			UpdatedAt: now,
+		},
 	}
 	data, err := json.Marshal(state)
 	if err != nil {

@@ -85,6 +85,15 @@ make start && sleep 1 && make status
   Successful writes stamp `hook.overall_goal_summarizer.v1`, use a full-revision
   CAS, agree across `sessions.list`/`sessions.get`, and never expose raw
   goal/user/history sentinels or credential-like output.
+- Canonical history binding gate: run
+  `go test -race ./internal/hooks ./internal/sessionview ./internal/daemon ./cmd/arcmux -run 'Test(Installer_EnsureGenericHook_Refuses|Installer_Install_PreservesExternallyManaged|InstallManagedHook|EnsureCodexHookRefuses|VerifyCanonicalHistoryBinding|ReadCanonicalHistoryFrontmatter|CanonicalHistoryBindingCarriesFixedProvenance|CmdHookBindsVerifiedCanonicalHistory|CmdHookRejects.*CanonicalHistory|CanonicalHistoryReference|ListSessionsBindsProfileScopeAndCanonicalHistory)' -count=10`.
+  It must prove release/startup never follows or overwrites a foreign hook
+  symlink or different regular script; exact canonical history is accepted only
+  from a basename plus matching native `conversation_id` frontmatter; the
+  verifier stops before transcript body bytes; and `session self`/the daemon
+  catalog expose only the safe basename with fixed provenance. Before and after
+  a ref release, hash the shared hook's resolved target and confirm its owning
+  repository remains clean.
 - Live tailnet rung: on the stable host run
   `arcmux mesh serve ref --device <host> --url ws://<tailscale-host>:7788/v1/mesh --tailscale-port 7788`
   and pipe the JSON over SSH into

@@ -41,9 +41,12 @@ func TestBuildRedactsUnsafeRuntimeFieldsAndRawPrompt(t *testing.T) {
 			Goal:            "ship it api_key=sk-live123456789",
 			OverallGoal:     "Keep bearer abcdefghijklmnop private",
 			LastUserMessage: "raw-user-prompt-must-not-cross",
-			VaultLink:       "/Users/test/agents/histories/2026-07-14-private.md",
-			Source:          "session-hook",
-			UpdatedAt:       now,
+			CanonicalHistory: &hooks.CanonicalHistoryBinding{
+				Basename: "2026-07-14-private.md", ConversationID: "raw-private-conversation-id",
+				Provenance: hooks.CanonicalHistoryBindingProvenance, UpdatedAt: now,
+			},
+			Source:    "session-hook",
+			UpdatedAt: now,
 		},
 	}
 
@@ -60,6 +63,7 @@ func TestBuildRedactsUnsafeRuntimeFieldsAndRawPrompt(t *testing.T) {
 		"env-super-secret", "OPENAI_API_KEY", "private-tmux-session",
 		"%private-pane", "raw-current-command", "backend-private-id",
 		"4242", "raw-user-prompt-must-not-cross", "/Users/test/agents/histories",
+		"raw-private-conversation-id",
 		"sk-live123456789", "abcdefghijklmnop",
 		`"env"`, `"pid"`, `"tmux_target"`, `"tmux_session_name"`,
 		`"current_command"`, `"backend_session_id"`, `"last_user_message"`,
@@ -77,6 +81,39 @@ func TestBuildRedactsUnsafeRuntimeFieldsAndRawPrompt(t *testing.T) {
 	}
 	if detail.Summary.Work.LatestAsk != "" {
 		t.Fatalf("latest ask must not be synthesized from goal or raw prompt: %#v", detail.Summary.Work)
+	}
+}
+
+func TestCanonicalHistoryReferencePrefersVerifiedExactBinding(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 16, 23, 0, 0, 0, time.UTC)
+	state := &hooks.SessionState{TurnContract: &hooks.TurnContract{
+		VaultLink: "/legacy/wrong-session.md",
+		CanonicalHistory: &hooks.CanonicalHistoryBinding{
+			Basename: "2026-07-16-exact-session.md", ConversationID: "native-conversation-123",
+			Provenance: hooks.CanonicalHistoryBindingProvenance, UpdatedAt: now,
+		},
+	}}
+	reference := CanonicalHistoryReference(state)
+	if reference == nil || reference.Basename != "2026-07-16-exact-session.md" ||
+		reference.Provenance != hooks.CanonicalHistoryBindingProvenance || !reference.UpdatedAt.Equal(now) {
+		t.Fatalf("reference=%+v", reference)
+	}
+
+	state.TurnContract.CanonicalHistory.Provenance = "caller.spoofed"
+	reference = CanonicalHistoryReference(state)
+	if reference != nil {
+		t.Fatalf("spoofed exact binding or legacy vault link became canonical: %+v", reference)
+	}
+}
+
+func TestCanonicalHistoryReferenceRejectsLegacyVaultLink(t *testing.T) {
+	t.Parallel()
+	state := &hooks.SessionState{TurnContract: &hooks.TurnContract{
+		VaultLink: "/legacy/cwd-inferred-wrong-session.md",
+	}}
+	if reference := CanonicalHistoryReference(state); reference != nil {
+		t.Fatalf("legacy vault_link became canonical history: %+v", reference)
 	}
 }
 

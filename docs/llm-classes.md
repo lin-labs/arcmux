@@ -44,13 +44,21 @@ reads (see [state-dir.md](state-dir.md)):
 
 - **claude**: generic script at `~/.claude/hooks/arcmux-session-hook.sh`;
   registration in `~/.claude/settings.json` is manual (see arcmux-urc).
-- **codex**: bridge at `~/.codex/hooks/arcmux-codex-hook.sh`; registration in
-  codex config is manual (see codex-hooks-findings.md).
+- **codex**: the same generic script at
+  `~/.codex/hooks/arcmux-session-hook.sh`; registration in codex config is
+  manual (see codex-hooks-findings.md).
 - **grok**: fully automatic. The daemon materializes the same generic script
   plus a drop-in registration `~/.grok/hooks/arcmux-session.json`; grok merges
   `~/.grok/hooks/*.json` (always trusted) at session start. The generic script
   parses both payload dialects (claude `hook_event_name`/PascalCase, grok
   `hookEventName`/snake_case).
+
+Hook installation is ownership-safe. Arcmux creates the script only when the
+destination is absent and accepts an existing regular file only when its bytes
+already equal the embedded script and it is executable. A symlink (commonly a
+link into a shared agent-configuration repository), a non-regular path, or a
+different user-managed script is never followed or overwritten; startup logs a
+non-fatal warning and leaves the owning configuration untouched.
 
 **Grok leader caveat (load-bearing).** Grok executes hooks in its *leader*
 process, not the TUI client. A shared leader spawned earlier by another client

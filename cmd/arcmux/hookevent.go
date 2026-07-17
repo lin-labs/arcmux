@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -32,6 +33,8 @@ import (
 //	--overall-goal <text>  an unproven whole-conversation objective
 //	--last-message <text>  the raw, verbatim last user turn (3-line truncated)
 //	--vault-link <path>    where the conversation is saved in the vault
+//	--history-basename <name> exact canonical Markdown basename (requires conversation id)
+//	--history-conversation-id <id> native conversation identity in that file's frontmatter
 //	--verification <text>  optional, current concrete success check
 //	--path <text>          optional, consolidated path taken/planned
 //	--contract-source <ev> which native event supplied the recording
@@ -41,12 +44,14 @@ import (
 // background overall-goal summarizer.
 func cmdHook(args []string) error {
 	var (
-		sessionID = os.Getenv("ARCMUX_SESSION_ID")
-		agent     = os.Getenv("ARCMUX_HOOK_AGENT")
-		stateDir  = os.Getenv("ARCMUX_SESSION_STATE_DIR")
-		event     string
-		tool      string
-		contract  hooks.TurnContractUpdate
+		sessionID             = os.Getenv("ARCMUX_SESSION_ID")
+		agent                 = os.Getenv("ARCMUX_HOOK_AGENT")
+		stateDir              = os.Getenv("ARCMUX_SESSION_STATE_DIR")
+		event                 string
+		tool                  string
+		contract              hooks.TurnContractUpdate
+		historyBasename       string
+		historyConversationID string
 	)
 
 	for i := 0; i < len(args); i++ {
@@ -82,6 +87,10 @@ func cmdHook(args []string) error {
 			contract.LastUserMessage, err = next()
 		case "--vault-link":
 			contract.VaultLink, err = next()
+		case "--history-basename":
+			historyBasename, err = next()
+		case "--history-conversation-id":
+			historyConversationID, err = next()
 		case "--verification", "--success-verification":
 			contract.SuccessVerification, err = next()
 		case "--path":
@@ -102,12 +111,33 @@ func cmdHook(args []string) error {
 	}
 	hasContract := contract.Goal != "" || contract.OverallGoal != "" ||
 		contract.LastUserMessage != "" || contract.VaultLink != "" ||
+		historyBasename != "" || historyConversationID != "" ||
 		contract.SuccessVerification != "" || contract.Path != ""
 	if event == "" && !hasContract {
 		return fmt.Errorf("arcmux hook: --event is required (one of %v)", hooks.CanonicalEvents)
 	}
 	if stateDir == "" {
 		return fmt.Errorf("arcmux hook: no state dir (set --state-dir or ARCMUX_SESSION_STATE_DIR)")
+	}
+	if historyBasename != "" || historyConversationID != "" {
+		if event != "" || contract.Goal != "" || contract.OverallGoal != "" || contract.LastUserMessage != "" ||
+			contract.VaultLink != "" || contract.SuccessVerification != "" || contract.Path != "" || contract.Source != "" {
+			return fmt.Errorf("arcmux hook: canonical history binding must be a contract-only, history-only update")
+		}
+		historyRoot := os.Getenv("ARCMUX_HISTORY_ROOT")
+		if historyRoot == "" {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return fmt.Errorf("arcmux hook: canonical history root is unavailable")
+			}
+			historyRoot = filepath.Join(home, "agents", "histories")
+		}
+		if err := hooks.ApplyVerifiedCanonicalHistoryBinding(
+			stateDir, sessionID, agent, historyRoot, historyBasename, historyConversationID, time.Now(),
+		); err != nil {
+			return fmt.Errorf("arcmux hook: %w", err)
+		}
+		return nil
 	}
 
 	if contract.Source == "" && hasContract {

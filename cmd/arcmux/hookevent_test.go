@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -26,6 +28,96 @@ func TestCmdHookAppliesEvent(t *testing.T) {
 	}
 	if !st.Working || st.LastPromptSubmitAt.IsZero() {
 		t.Fatalf("state not mutated: %+v", st)
+	}
+}
+
+func TestCmdHookBindsVerifiedCanonicalHistoryWithoutReadingTranscriptBody(t *testing.T) {
+	dir := t.TempDir()
+	historyRoot := t.TempDir()
+	basename := "2026-07-16-exact-session.md"
+	content := "---\nagent: codex\nconversation_id: native-conversation-123\n---\n\nRAW-PRIVATE-TRANSCRIPT-SENTINEL\n"
+	if err := os.WriteFile(filepath.Join(historyRoot, basename), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ARCMUX_SESSION_ID", "s-history")
+	t.Setenv("ARCMUX_SESSION_STATE_DIR", dir)
+	t.Setenv("ARCMUX_HOOK_AGENT", "codex")
+	t.Setenv("ARCMUX_HISTORY_ROOT", historyRoot)
+
+	if err := cmdHook([]string{
+		"--history-basename", basename,
+		"--history-conversation-id", "native-conversation-123",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state, err := hooks.ReadSessionState(dir, "s-history")
+	if err != nil || state == nil || state.TurnContract == nil || state.TurnContract.CanonicalHistory == nil {
+		t.Fatalf("state=%+v err=%v", state, err)
+	}
+	encoded := state.TurnContract.CanonicalHistory.Basename + state.TurnContract.CanonicalHistory.ConversationID
+	if strings.Contains(encoded, "RAW-PRIVATE-TRANSCRIPT-SENTINEL") {
+		t.Fatal("canonical history binding leaked transcript body")
+	}
+}
+
+func TestCmdHookRejectsMismatchedCanonicalHistoryWithoutMutatingState(t *testing.T) {
+	dir := t.TempDir()
+	historyRoot := t.TempDir()
+	basename := "2026-07-16-other-session.md"
+	if err := os.WriteFile(filepath.Join(historyRoot, basename), []byte("---\nconversation_id: other-native-conversation\n---\nprivate\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ARCMUX_SESSION_ID", "s-history-mismatch")
+	t.Setenv("ARCMUX_SESSION_STATE_DIR", dir)
+	t.Setenv("ARCMUX_HOOK_AGENT", "codex")
+	t.Setenv("ARCMUX_HISTORY_ROOT", historyRoot)
+
+	err := cmdHook([]string{
+		"--history-basename", basename,
+		"--history-conversation-id", "native-conversation-123",
+	})
+	if err == nil || !strings.Contains(err.Error(), "conversation identity does not match") {
+		t.Fatalf("cmdHook error=%v", err)
+	}
+	state, readErr := hooks.ReadSessionState(dir, "s-history-mismatch")
+	if readErr != nil || state != nil {
+		t.Fatalf("rejected binding mutated state: state=%+v err=%v", state, readErr)
+	}
+}
+
+func TestCmdHookRejectsCanonicalHistoryMixedWithUnverifiedContractOrEvent(t *testing.T) {
+	dir := t.TempDir()
+	historyRoot := t.TempDir()
+	basename := "2026-07-16-exact-session.md"
+	if err := os.WriteFile(filepath.Join(historyRoot, basename), []byte(
+		"---\nconversation_id: exact-conversation\n---\nprivate\n",
+	), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ARCMUX_SESSION_ID", "s-history-mixed")
+	t.Setenv("ARCMUX_SESSION_STATE_DIR", dir)
+	t.Setenv("ARCMUX_HOOK_AGENT", "codex")
+	t.Setenv("ARCMUX_HISTORY_ROOT", historyRoot)
+
+	for _, extra := range [][]string{
+		{"--event", "turn_end"},
+		{"--goal", "caller-controlled goal"},
+		{"--vault-link", "/legacy/unverified.md"},
+		{"--contract-source", "caller-controlled"},
+	} {
+		args := []string{
+			"--history-basename", basename,
+			"--history-conversation-id", "exact-conversation",
+		}
+		args = append(args, extra...)
+		err := cmdHook(args)
+		if err == nil || !strings.Contains(err.Error(), "history-only") {
+			t.Fatalf("mixed canonical history args %v error=%v", extra, err)
+		}
+	}
+	state, err := hooks.ReadSessionState(dir, "s-history-mixed")
+	if err != nil || state != nil {
+		t.Fatalf("rejected mixed updates mutated state: state=%+v err=%v", state, err)
 	}
 }
 

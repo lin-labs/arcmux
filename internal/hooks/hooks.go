@@ -3,9 +3,12 @@ package hooks
 import (
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -42,6 +45,11 @@ const genericHookName = "arcmux-session-hook.sh"
 //go:embed session_hook.sh
 var genericHookScript string
 
+// ErrHookExternallyManaged means the configured hook path already belongs to
+// another producer. Startup should warn, while per-session watchers may still
+// observe the standard output path emitted by that registered hook.
+var ErrHookExternallyManaged = errors.New("hook path is externally managed")
+
 // Installer auto-configures the generic agent hook for sessions.
 type Installer struct {
 	OutputDir string
@@ -65,7 +73,11 @@ func (i *Installer) Install(sessionID, hookType, hookDir string) (string, error)
 
 	switch hookType {
 	case "claude_hooks":
-		return outputPath, i.installGenericHook(hookDir)
+		err := i.installGenericHook(hookDir)
+		if errors.Is(err, ErrHookExternallyManaged) {
+			return outputPath, nil
+		}
+		return outputPath, err
 	case "grok_hooks":
 		// Grok loads drop-in JSON hook files from <hookDir>/hooks (always
 		// trusted), so install the generic script there plus the registration
@@ -123,14 +135,122 @@ func (i *Installer) installGenericHook(hookDir string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create hook script dir: %w", err)
 	}
-	// Idempotent: if the file already holds the exact content, do nothing.
-	if existing, err := os.ReadFile(path); err == nil && string(existing) == genericHookScript {
+	return installManagedHookScript(path)
+}
+
+// installManagedHookScript creates arcmux's generic hook only when the path is
+// unowned. Existing scripts are accepted exclusively when they are the exact,
+// executable arcmux payload. In particular, never follow a symlink here: user
+// agent homes commonly link this filename into a separate configuration repo,
+// and os.WriteFile would otherwise truncate that repository's richer hook.
+func installManagedHookScript(path string) error {
+	return installManagedHookScriptWithHooks(path, managedHookInstallHooks{})
+}
+
+type managedHookInstallHooks struct {
+	afterCreate       func() error
+	afterExistingRead func() error
+}
+
+func installManagedHookScriptWithHooks(path string, testHooks managedHookInstallHooks) error {
+	info, err := os.Lstat(path)
+	switch {
+	case err == nil:
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%w: refusing to replace symlinked hook %q; configure the owning hook producer instead", ErrHookExternallyManaged, path)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("%w: refusing to replace non-regular hook %q", ErrHookExternallyManaged, path)
+		}
+		file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+		if err != nil {
+			return fmt.Errorf("inspect existing hook %q: %w", path, err)
+		}
+		opened, err := file.Stat()
+		if err != nil {
+			_ = file.Close()
+			return fmt.Errorf("inspect opened hook %q: %w", path, err)
+		}
+		if !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
+			_ = file.Close()
+			return fmt.Errorf("%w: hook %q changed while it was being inspected", ErrHookExternallyManaged, path)
+		}
+		existing, readErr := io.ReadAll(io.LimitReader(file, int64(len(genericHookScript)+1)))
+		if readErr != nil {
+			_ = file.Close()
+			return fmt.Errorf("read existing hook %q: %w", path, readErr)
+		}
+		if testHooks.afterExistingRead != nil {
+			if err := testHooks.afterExistingRead(); err != nil {
+				_ = file.Close()
+				return fmt.Errorf("after reading existing hook %q: %w", path, err)
+			}
+		}
+		afterFile, fileErr := file.Stat()
+		afterPath, pathErr := os.Lstat(path)
+		closeErr := file.Close()
+		if fileErr != nil || pathErr != nil || afterPath.Mode()&os.ModeSymlink != 0 || !afterPath.Mode().IsRegular() ||
+			!os.SameFile(opened, afterFile) || !os.SameFile(opened, afterPath) ||
+			afterFile.Size() != opened.Size() || afterPath.Size() != opened.Size() ||
+			!afterFile.ModTime().Equal(opened.ModTime()) || !afterPath.ModTime().Equal(opened.ModTime()) {
+			return fmt.Errorf("%w: hook %q changed while it was being inspected", ErrHookExternallyManaged, path)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close existing hook %q: %w", path, closeErr)
+		}
+		if string(existing) != genericHookScript {
+			return fmt.Errorf("%w: refusing to replace non-matching hook %q; preserve or update it through its owning configuration", ErrHookExternallyManaged, path)
+		}
+		if opened.Mode().Perm()&0o100 == 0 {
+			return fmt.Errorf("existing arcmux hook %q is not executable; fix its mode through its owning configuration", path)
+		}
 		return nil
+	case !errors.Is(err, os.ErrNotExist):
+		return fmt.Errorf("inspect hook script %q: %w", path, err)
 	}
-	if err := os.WriteFile(path, []byte(genericHookScript), 0o755); err != nil {
-		return fmt.Errorf("write generic hook script: %w", err)
+
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o755)
+	if err != nil {
+		return fmt.Errorf("create hook script %q without replacing an existing path: %w", path, err)
 	}
+	createdInfo, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return fmt.Errorf("inspect newly created hook script %q: %w", path, err)
+	}
+	removePartial := true
+	defer func() {
+		if removePartial {
+			removeCreatedHookIfUnchanged(path, createdInfo)
+		}
+	}()
+	if testHooks.afterCreate != nil {
+		if err := testHooks.afterCreate(); err != nil {
+			_ = file.Close()
+			return fmt.Errorf("after creating hook script %q: %w", path, err)
+		}
+	}
+	if err := file.Chmod(0o755); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("chmod hook script %q: %w", path, err)
+	}
+	if _, err := file.WriteString(genericHookScript); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("write hook script %q: %w", path, err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close hook script %q: %w", path, err)
+	}
+	removePartial = false
 	return nil
+}
+
+func removeCreatedHookIfUnchanged(path string, created os.FileInfo) {
+	current, err := os.Lstat(path)
+	if err != nil || current.Mode()&os.ModeSymlink != 0 || !current.Mode().IsRegular() || !os.SameFile(created, current) {
+		return
+	}
+	_ = os.Remove(path)
 }
 
 // CleanupLegacyScripts removes the per-session hook scripts left behind by the

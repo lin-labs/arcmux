@@ -28,6 +28,12 @@ func TestSessionCatalogAggregatesRootAndProfilesWithDuplicateIDs(t *testing.T) {
 	addCatalogSession(alpha, "s-duplicate", "alpha session", now)
 	addCatalogSession(beta, "s-beta", "beta session", now)
 
+	historyRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(historyRoot, "root.md"), []byte(
+		"---\nconversation_id: native-root-conversation\n---\nprivate body\n",
+	), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := hooks.ApplyEventWithContract(
 		root.cfg.Hooks.SessionStateDir,
 		"s-duplicate",
@@ -37,12 +43,17 @@ func TestSessionCatalogAggregatesRootAndProfilesWithDuplicateIDs(t *testing.T) {
 		hooks.TurnContractUpdate{
 			Goal:            "summarized root ask",
 			LastUserMessage: "raw root prompt",
-			VaultLink:       "/Users/test/agents/histories/root.md",
 			Source:          "test",
 		},
 		now,
 	); err != nil {
 		t.Fatalf("write root hook state: %v", err)
+	}
+	if err := hooks.ApplyVerifiedCanonicalHistoryBinding(
+		root.cfg.Hooks.SessionStateDir, "s-duplicate", "codex", historyRoot,
+		"root.md", "native-root-conversation", now,
+	); err != nil {
+		t.Fatalf("bind exact root history: %v", err)
 	}
 	if err := os.MkdirAll(alpha.cfg.Hooks.SessionStateDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -77,6 +88,10 @@ func TestSessionCatalogAggregatesRootAndProfilesWithDuplicateIDs(t *testing.T) {
 	}
 	if list.Sessions[2].Work == nil || list.Sessions[2].Work.Goal != "summarized root ask" {
 		t.Fatalf("root work projection missing: %#v", list.Sessions[2].Work)
+	}
+	if list.Sessions[2].History == nil || list.Sessions[2].History.Basename != "root.md" ||
+		list.Sessions[2].History.Provenance != hooks.CanonicalHistoryBindingProvenance {
+		t.Fatalf("root exact history projection missing: %#v", list.Sessions[2].History)
 	}
 
 	alphaLocator, _ := sessionview.NewLocator(sessionview.ProfileScope("profile:alpha"), "s-duplicate")

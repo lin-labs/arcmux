@@ -254,6 +254,54 @@ func TestApplyEventWithContractConsolidates(t *testing.T) {
 	}
 }
 
+func TestCanonicalHistoryBindingCarriesFixedProvenance(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	historyRoot := t.TempDir()
+	now := time.Date(2026, 7, 16, 23, 0, 0, 0, time.UTC)
+	basename := "2026-07-16-exact-session.md"
+	conversationID := "native-conversation-123"
+	if err := os.WriteFile(filepath.Join(historyRoot, basename), []byte(
+		"---\nconversation_id: "+conversationID+"\n---\nprivate body\n",
+	), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyVerifiedCanonicalHistoryBinding(
+		dir, "s-history", "codex", historyRoot, basename, conversationID, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	state, err := ReadSessionState(dir, "s-history")
+	if err != nil || state == nil || state.TurnContract == nil || state.TurnContract.CanonicalHistory == nil {
+		t.Fatalf("state=%+v err=%v", state, err)
+	}
+	binding := state.TurnContract.CanonicalHistory
+	if binding.Basename != basename || binding.ConversationID != conversationID ||
+		binding.Provenance != CanonicalHistoryBindingProvenance || !binding.UpdatedAt.Equal(now) {
+		t.Fatalf("binding=%+v", binding)
+	}
+
+	for _, invalid := range []struct {
+		basename       string
+		conversationID string
+	}{
+		{basename: "only-basename.md"},
+		{conversationID: "only-conversation"},
+		{basename: "../escape.md", conversationID: conversationID},
+		{basename: basename, conversationID: "wrong-conversation"},
+	} {
+		if err := ApplyVerifiedCanonicalHistoryBinding(
+			dir, "s-invalid", "codex", historyRoot, invalid.basename, invalid.conversationID, now,
+		); err == nil {
+			t.Fatalf("invalid canonical history update accepted: %+v", invalid)
+		}
+	}
+	missing, err := ReadSessionState(dir, "s-invalid")
+	if err != nil || missing != nil {
+		t.Fatalf("rejected canonical history update mutated state: state=%+v err=%v", missing, err)
+	}
+}
+
 func TestReadSessionStateMissing(t *testing.T) {
 	t.Parallel()
 	st, err := ReadSessionState(t.TempDir(), "s-none")

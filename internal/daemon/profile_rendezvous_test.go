@@ -99,6 +99,7 @@ func TestCreateSessionDuplicateIDsUseProfileScopedHookRendezvous(t *testing.T) {
 			"ARCMUX_PROFILE_SCOPE='" + scope + "'",
 			"ARCMUX_SESSION_STATE_DIR='" + wantStateDir + "'",
 			"ARCMUX_DAEMON_SOCKET='" + wantSocket + "'",
+			"ARCMUX_HISTORY_ROOT='" + defaultHandoffHistoryRoot() + "'",
 		} {
 			if !strings.Contains(joined, want) {
 				t.Fatalf("%s rendezvous missing %q:\n%s", scope, want, joined)

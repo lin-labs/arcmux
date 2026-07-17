@@ -826,6 +826,7 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 				"ARCMUX_HOOK_OUTPUT_DIR":   d.cfg.Hooks.HookOutputDir,
 				"ARCMUX_SESSION_STATE_DIR": d.cfg.Hooks.SessionStateDir,
 				"ARCMUX_DAEMON_SOCKET":     d.cfg.Daemon.Socket,
+				"ARCMUX_HISTORY_ROOT":      defaultHandoffHistoryRoot(),
 			}
 			// Point the hook at this exact arcmux binary so it doesn't depend on
 			// `arcmux` being on the agent shell's PATH.
@@ -886,7 +887,7 @@ func (d *Daemon) createSessionWithIdempotency(ctx context.Context, req CreateSes
 }
 
 func (d *Daemon) supervisedSessionEnvironment(id string, supplied map[string]string) (map[string]string, string) {
-	environment := make(map[string]string, len(supplied)+4)
+	environment := make(map[string]string, len(supplied)+5)
 	for key, value := range supplied {
 		environment[key] = value
 	}
@@ -898,6 +899,7 @@ func (d *Daemon) supervisedSessionEnvironment(id string, supplied map[string]str
 	environment["ARCMUX_PROFILE_SCOPE"] = profileScope
 	environment["ARCMUX_DAEMON_SOCKET"] = d.cfg.Daemon.Socket
 	environment["ARCMUX_SESSION_STATE_DIR"] = d.cfg.Hooks.SessionStateDir
+	environment["ARCMUX_HISTORY_ROOT"] = defaultHandoffHistoryRoot()
 	return environment, profileScope
 }
 

@@ -25,6 +25,10 @@ const (
 	// the background hook summarizer. A launch prompt, raw user message, or
 	// transcript-derived "Your ask" must never inherit this provenance.
 	OverallGoalSummarizerProvenance = "hook.overall_goal_summarizer.v1"
+	// CanonicalHistoryBindingProvenance is stamped only after the hook CLI
+	// verifies a basename against the exact native conversation_id in the
+	// canonical Markdown file's frontmatter.
+	CanonicalHistoryBindingProvenance = "hook.canonical_history_frontmatter.v1"
 )
 
 var ErrStaleOverallGoal = errors.New("overall-goal summary is stale")
@@ -90,12 +94,23 @@ type TurnContract struct {
 	// VaultLink is retained for old/external recording producers. The generic
 	// hook no longer guesses it from cwd/host, and current_work never reads it.
 	VaultLink string `json:"vault_link,omitempty"`
+	// CanonicalHistory is the exact, frontmatter-verified conversation binding.
+	// It stores only a basename plus the native conversation identity locally;
+	// mesh/session projections expose the basename, never transcript contents.
+	CanonicalHistory *CanonicalHistoryBinding `json:"canonical_history,omitempty"`
 	// SuccessVerification and Path are optional, retained from the original
 	// contract: how success is/was verified, and the consolidated approach.
 	SuccessVerification string    `json:"success_verification,omitempty"`
 	Path                string    `json:"path,omitempty"`
 	Source              string    `json:"source,omitempty"`
 	UpdatedAt           time.Time `json:"updated_at,omitempty"`
+}
+
+type CanonicalHistoryBinding struct {
+	Basename       string    `json:"basename"`
+	ConversationID string    `json:"conversation_id"`
+	Provenance     string    `json:"provenance"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 // TurnContractUpdate carries optional replacements for the current contract.

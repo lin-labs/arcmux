@@ -61,6 +61,12 @@ and `profiles/<name>/` namespaces distinct.
     "overall_goal_provenance": "hook.overall_goal_summarizer.v1",
     "overall_goal_updated_at": "2026-06-09T13:36:09-07:00",
     "last_user_message": "now also record where the convo is saved\n…",
+    "canonical_history": {
+      "basename": "2026-06-09-arcmux-history.md",
+      "conversation_id": "native-conversation-123",
+      "provenance": "hook.canonical_history_frontmatter.v1",
+      "updated_at": "2026-06-09T13:36:08-07:00"
+    },
     "source": "Stop",
     "updated_at": "2026-06-09T13:36:08-07:00"
   }
@@ -87,9 +93,17 @@ It captures three valued views:
   `overall_goal_provenance: hook.overall_goal_summarizer.v1`.
 - `last_user_message` — the **raw** last user turn, verbatim, truncated to 3
   lines. Recorded alongside the gauged goal, never as a substitute.
+- `canonical_history` — an exact producer-supplied basename plus native
+  conversation identity. `arcmux hook` with `--history-basename <name>` and
+  `--history-conversation-id <id>` accepts the pair only when one regular,
+  non-symlink Markdown file directly under `ARCMUX_HISTORY_ROOT` has the exact
+  `conversation_id` in its frontmatter. The verifier stops at the closing
+  frontmatter fence and stamps `hook.canonical_history_frontmatter.v1`; it does
+  not read transcript body text or search by cwd, host, title, or mtime.
 - `vault_link` — optional legacy/external-producer metadata. The generic hook
   does not infer it from cwd/host because that heuristic can confuse concurrent
-  conversations in the same checkout.
+  conversations in the same checkout. It is never projected as canonical
+  history by `session self`, the daemon catalog, or mesh APIs.
 
 Optional `success_verification` / `path` fields are retained for callers that
 set them, but the unified hook no longer scrapes them. This is not a transcript
@@ -107,6 +121,21 @@ which (1) appends the raw event to the JSONL audit and (2) calls
 per-session identity comes from `ARCMUX_SESSION_ID` / `ARCMUX_SESSION_STATE_DIR`
 env injected at launch; the script no-ops for non-arcmux sessions, so global
 registration is safe.
+
+Canonical Markdown is owned by the agent-history producer, not inferred by
+arcmux. After that producer atomically creates or updates the exact destination,
+it may bind the result from inside the supervised session:
+
+```bash
+arcmux hook \
+  --history-basename "$(basename "$canonical_history")" \
+  --history-conversation-id "$native_conversation_id"
+```
+
+Both values are required. The daemon injects the canonical history root into
+the session as `ARCMUX_HISTORY_ROOT`; callers cannot select an alternate root by
+CLI flag. A failed, ambiguous, mismatched, symlinked, or missing file leaves the
+prior binding untouched.
 
 The daemon observes `turn_end` and schedules a **background, best-effort**
 summary, bounded to two concurrent calls globally and one per session. The

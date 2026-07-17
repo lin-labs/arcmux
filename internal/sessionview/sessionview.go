@@ -268,13 +268,17 @@ func CanonicalHistoryReference(hookState *hooks.SessionState) *HistoryReference 
 		return nil
 	}
 	contract := hookState.TurnContract
-	basename := safeHistoryBasename(contract.VaultLink)
-	if basename == "" {
-		return nil
+	if binding := contract.CanonicalHistory; binding != nil &&
+		binding.Provenance == hooks.CanonicalHistoryBindingProvenance &&
+		!binding.UpdatedAt.IsZero() && binding.ConversationID != "" {
+		basename := safeHistoryBasename(binding.Basename)
+		if basename == binding.Basename {
+			return &HistoryReference{
+				Basename: basename, Provenance: binding.Provenance, UpdatedAt: binding.UpdatedAt,
+			}
+		}
 	}
-	return &HistoryReference{
-		Basename: basename, Provenance: "hook.turn_contract.vault_link", UpdatedAt: contract.UpdatedAt,
-	}
+	return nil
 }
 
 // NormalizeCurrentWork enforces the additive mesh contract on both producer

@@ -299,12 +299,18 @@ func TestMeshSessionListAndGetAgreeForRealHookStateFixture(t *testing.T) {
     "overall_goal_updated_at": %q,
     "last_user_message": "RAW-USER-SENTINEL-2222",
     "vault_link": "/private/RAW-HISTORY-SENTINEL-3333.md",
+    "canonical_history": {
+      "basename": "RAW-EXACT-HISTORY-SENTINEL-4444.md",
+      "conversation_id": "RAW-CONVERSATION-SENTINEL-5555",
+      "provenance": "hook.canonical_history_frontmatter.v1",
+      "updated_at": %q
+    },
     "source": "Stop",
     "updated_at": %q
   }
 }`, now.Add(-time.Hour).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
 		now.Add(-time.Minute).Format(time.RFC3339Nano), now.Add(-30*time.Second).Format(time.RFC3339Nano),
-		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 	if err := os.MkdirAll(server.cfg.Hooks.SessionStateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -337,6 +343,7 @@ func TestMeshSessionListAndGetAgreeForRealHookStateFixture(t *testing.T) {
 	getJSON, _ := json.Marshal(detail)
 	for _, forbidden := range []string{
 		"RAW-GOAL-SENTINEL-1111", "RAW-USER-SENTINEL-2222", "RAW-HISTORY-SENTINEL-3333",
+		"RAW-EXACT-HISTORY-SENTINEL-4444", "RAW-CONVERSATION-SENTINEL-5555",
 		`"work"`, `"history"`, `"last_user_message"`, `"turn_contract"`,
 	} {
 		if strings.Contains(string(listJSON), forbidden) || strings.Contains(string(getJSON), forbidden) {
