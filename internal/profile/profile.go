@@ -139,13 +139,13 @@ func DefaultClasses() []Class {
 				// Claude Code v2.x renders its prompt as "❯" (U+276F) and shows
 				// no bare ">" on screen, so the old ">" ready pattern never
 				// matched and the handshake always timed out into StateFailed.
-				// "Remote Control active" is printed by --remote-control (which
+				// "/remote-control is active" is printed by --remote-control (which
 				// both the default StartCommand and the HTTP "cld --remote-control"
 				// launch path pass, and which arcmux *requires* to drive the pane
 				// at all) and appears only once the TUI is fully up — so it's the
 				// most robust readiness signal and, unlike "❯", can't match the
 				// pre-launch shell prompt line.
-				ReadyPattern: "Remote Control active",
+				ReadyPattern: "remote-control is active",
 				// Claude shows a folder-trust gate in any untrusted cwd:
 				// "Is this a project you created or one you trust? … 1. Yes, I
 				// trust this folder" with "Yes" pre-highlighted, so Enter confirms.

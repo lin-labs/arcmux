@@ -3,6 +3,7 @@ package profile
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -71,6 +72,10 @@ func TestDefaultProfiles_Claude(t *testing.T) {
 	// arcmux-u1c.
 	if p.ReadyPattern == "" || p.ReadyPattern == ">" {
 		t.Errorf("ReadyPattern = %q, must be a real ready signal (not empty or %q)", p.ReadyPattern, ">")
+	}
+	currentBanner := "/remote-control is active"
+	if !strings.Contains(strings.ToLower(currentBanner), strings.ToLower(p.ReadyPattern)) {
+		t.Errorf("ReadyPattern = %q does not match current Claude banner %q", p.ReadyPattern, currentBanner)
 	}
 	if p.WorkingIndicator == "" {
 		t.Error("WorkingIndicator must be set so working->idle isn't driven by screen quiescence alone")
