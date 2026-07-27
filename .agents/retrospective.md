@@ -24,6 +24,9 @@ codified checks live in `.agents/validate.md`.
   was the generated `gen/` content committed?
 - Did `make deploy` to labs succeed AND `make status` on labs confirm the
   new binary is the one running? "Built locally" ≠ "deployed."
+- Did an agent TUI version change its readiness text? Compare the configured
+  pattern with a live pane capture; a visible prompt does not prove arcmux's
+  handshake recognized it.
 
 ## Recurring failure modes (codified)
 
@@ -39,6 +42,8 @@ codified checks live in `.agents/validate.md`.
 - `make release` (build + push + restart) as the single deploy ritual.
 - Confirming the deployed binary via remote `make status` rather than
   trusting that the local build is what's running.
+- Reproducing TUI compatibility with the isolated live-agent hook gate before
+  restarting the pane-preserving service.
 
 ## Where retro findings from this project should land
 
@@ -59,6 +64,8 @@ arcmux-specific.
 - Was the port published in `.agents/validate.md` if it changed?
 - Was the protobuf-generated code re-generated and committed?
 - Was `make deploy` followed by a remote-side verification?
+- For a profile/readiness change, did `make validate-e2e-hooks AGENT=<agent>`
+  prove a fresh automatic handshake and first delivery?
 - Did the change require updating the `blin-lab-service` skill?
 
 ## How to fill this in
