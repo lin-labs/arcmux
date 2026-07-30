@@ -7,11 +7,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -45,6 +44,92 @@ func TestDaemonOwnsTrustedOverallGoalWrite(t *testing.T) {
 	}
 	if _, ok := d.goalSummaryCandidate(managed.Snapshot()); ok {
 		t.Fatal("completed turn remained eligible after a trusted summary refresh")
+	}
+}
+
+func TestGoalSummaryCandidateRequiresExactCanonicalHistoryBinding(t *testing.T) {
+	d := newMeshApplicationTestDaemon(t, "ref")
+	historyRoot := t.TempDir()
+	d.cfg.Hooks.HistoryRoot = historyRoot
+	managed := addGoalSummarySessionWithoutHistory(t, d, "s-exact-history", t.TempDir(), false,
+		"STATE-GOAL-MUST-NOT-BE-THE-MODEL-INPUT", "RAW-USER-SENTINEL-history", "RAW-LAUNCH-SENTINEL-history")
+	if err := hooks.ApplyContractOnly(d.cfg.Hooks.SessionStateDir, managed.ID, "codex", hooks.TurnContractUpdate{
+		VaultLink: "/guessed/latest-history.md", Source: "legacy-guess",
+	}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := d.goalSummaryCandidate(managed.Snapshot()); ok {
+		t.Fatal("vault_link-only state was accepted as summarization input")
+	}
+
+	basename := "2026-07-30-exact-history.md"
+	conversationID := "native-conversation-exact-history"
+	body := "Canonical conversation semantics from the exact native identity.\n"
+	content := "---\nconversation_id: " + conversationID + "\nagent: codex\n---\n" + body
+	if err := os.WriteFile(filepath.Join(historyRoot, basename), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := hooks.ApplyVerifiedCanonicalHistoryBinding(
+		d.cfg.Hooks.SessionStateDir, managed.ID, "codex", historyRoot, basename, conversationID, time.Now(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	candidate, ok := d.goalSummaryCandidate(managed.Snapshot())
+	if !ok {
+		t.Fatal("verified canonical history was not accepted")
+	}
+	if candidate.goal != body {
+		t.Fatalf("model input=%q, want exact canonical body %q", candidate.goal, body)
+	}
+}
+
+func TestMissingProviderBecomesPersistentTerminalAfterOneAttempt(t *testing.T) {
+	for _, key := range []string{
+		"ARCMUX_GOAL_PROVIDER", "OPENAI_API_KEY", "OPENAI_API_KEY_FILE", "XAI_API_KEY", "XAI_API_KEY_FILE",
+	} {
+		t.Setenv(key, "")
+	}
+	d := newMeshApplicationTestDaemon(t, "ref")
+	managed := addGoalSummarySession(t, d, "s-no-provider", t.TempDir(), false,
+		"Summarize only when an authenticated provider is configured", "RAW-USER-no-provider", "RAW-LAUNCH-no-provider")
+	if err := d.refreshOverallGoalOnce(context.Background(), managed.ID); !errors.Is(err, errGoalSummaryUnavailable) {
+		t.Fatalf("first missing-provider error=%v", err)
+	}
+	state, err := hooks.ReadSessionState(d.cfg.Hooks.SessionStateDir, managed.ID)
+	if err != nil || state.GoalSummaryAttempt == nil {
+		t.Fatalf("persistent attempt ledger=%+v err=%v", state, err)
+	}
+	ledger := state.GoalSummaryAttempt
+	if ledger.Attempts != 1 || !ledger.Terminal || ledger.FailureClass != "unavailable" {
+		t.Fatalf("ledger=%+v", ledger)
+	}
+	if _, ok := d.goalSummaryCandidate(managed.Snapshot()); ok {
+		t.Fatal("terminal turn remained eligible after a simulated daemon restart")
+	}
+	if err := d.refreshOverallGoalOnce(context.Background(), managed.ID); !errors.Is(err, hooks.ErrOverallGoalTerminal) {
+		t.Fatalf("terminal turn retried: %v", err)
+	}
+	state, _ = hooks.ReadSessionState(d.cfg.Hooks.SessionStateDir, managed.ID)
+	if state.GoalSummaryAttempt.Attempts != 1 {
+		t.Fatalf("terminal turn consumed another attempt: %+v", state.GoalSummaryAttempt)
+	}
+}
+
+func TestProviderAuthenticationFailureIsPermanentAndCredentialFree(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"secret-bearing provider body"}`))
+	}))
+	defer server.Close()
+	_, err := runAPIGoalSummary(context.Background(), goalSummaryProducer{
+		kind: goalSummaryProducerOpenAI, model: "gpt-test", apiKey: "must-not-appear", endpoint: server.URL,
+	}, "bounded prompt")
+	class, permanent := classifyGoalSummaryError(err)
+	if class != "auth" || !permanent {
+		t.Fatalf("class=%q permanent=%v err=%v", class, permanent, err)
+	}
+	if strings.Contains(err.Error(), "must-not-appear") || strings.Contains(err.Error(), "secret-bearing") {
+		t.Fatalf("credential or response body escaped error boundary: %v", err)
 	}
 }
 
@@ -123,80 +208,6 @@ func TestDuplicateSessionIDsAcrossProfileScopedStateDoNotCrossAttribute(t *testi
 	assertGoalSummary(t, profile, profileSession.ID, "Confirm the scoped surface uses its own recording", true)
 }
 
-func TestGoalSummarySingleFlightAndGlobalConcurrencyBound(t *testing.T) {
-	d := newMeshApplicationTestDaemon(t, "ref")
-	profile := newMeshApplicationTestDaemon(t, "ref")
-	profile.goalSummarySlots = d.goalSummarySlots
-	var active atomic.Int32
-	var maximum atomic.Int32
-	var calls atomic.Int32
-	started := make(chan string, 4)
-	release := make(chan struct{})
-	d.goalSummaryRunner = func(_ context.Context, _, goal string) (string, error) {
-		calls.Add(1)
-		current := active.Add(1)
-		for {
-			old := maximum.Load()
-			if current <= old || maximum.CompareAndSwap(old, current) {
-				break
-			}
-		}
-		started <- goal
-		<-release
-		active.Add(-1)
-		return "Consolidate bounded inference with isolated execution", nil
-	}
-	profile.goalSummaryRunner = d.goalSummaryRunner
-
-	candidates := make([]goalSummaryCandidate, 0, 3)
-	owners := []*Daemon{d, d, profile}
-	for i, goal := range []string{"first independent objective", "second independent objective", "third independent objective"} {
-		owner := owners[i]
-		managed := addGoalSummarySession(t, owner, "s-bound-"+string(rune('a'+i)), t.TempDir(), false,
-			goal, "raw user "+goal, "raw launch "+goal)
-		candidate, ok := owner.goalSummaryCandidate(managed.Snapshot())
-		if !ok {
-			t.Fatalf("candidate %d missing", i)
-		}
-		candidates = append(candidates, candidate)
-	}
-	if !d.startOverallGoalSummary(context.Background(), candidates[0]) ||
-		!d.startOverallGoalSummary(context.Background(), candidates[0]) {
-		t.Fatal("single-flight start failed")
-	}
-	if !d.startOverallGoalSummary(context.Background(), candidates[1]) ||
-		!profile.startOverallGoalSummary(context.Background(), candidates[2]) {
-		t.Fatal("bounded start failed")
-	}
-	for i := 0; i < goalSummaryGlobalLimit; i++ {
-		select {
-		case <-started:
-		case <-time.After(time.Second):
-			t.Fatal("bounded producer did not start")
-		}
-	}
-	select {
-	case extra := <-started:
-		t.Fatalf("third/global duplicate producer overlapped: %q", extra)
-	case <-time.After(100 * time.Millisecond):
-	}
-	if maximum.Load() != goalSummaryGlobalLimit || calls.Load() != goalSummaryGlobalLimit {
-		t.Fatalf("maximum=%d calls=%d", maximum.Load(), calls.Load())
-	}
-	close(release)
-	d.goalSummaryWG.Wait()
-	profile.goalSummaryWG.Wait()
-
-	// The candidate skipped only because the pool was full was not retry-gated.
-	if !profile.startOverallGoalSummary(context.Background(), candidates[2]) {
-		t.Fatal("third candidate did not retry")
-	}
-	profile.goalSummaryWG.Wait()
-	if calls.Load() != 3 {
-		t.Fatalf("calls=%d, want 3", calls.Load())
-	}
-}
-
 func TestToollessOpenAIProviderUsesBoundedHTTPSRequest(t *testing.T) {
 	const apiKey = "test-provider-key-never-log"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -258,36 +269,44 @@ func TestAPIGoalProviderDoesNotRedirectCredential(t *testing.T) {
 	}
 }
 
-func TestExplicitLegacyProducerKindPreservesCompatibilityWithoutBasenameInference(t *testing.T) {
+func TestLegacyProducerConfigurationCanNeverExecuteAProcess(t *testing.T) {
 	dir := t.TempDir()
-	argsPath := filepath.Join(dir, "args")
-	// The binary is intentionally named codex: provider behavior comes only
-	// from ARCMUX_GOAL_PROVIDER, never the executable basename.
-	fakeProducer := filepath.Join(dir, "codex")
+	markerPath := filepath.Join(dir, "executed")
+	fakeProducer := filepath.Join(dir, "grok")
 	script := `#!/bin/sh
-printf '%s' "$*" > "$FAKE_ARGS_FILE"
-printf '%s' 'Legacy producer remains compatible'
+touch "$FAKE_MARKER_FILE"
+printf '%s' 'unsafe legacy output'
 `
 	if err := os.WriteFile(fakeProducer, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("ARCMUX_GOAL_PROVIDER", "legacy-cli")
 	t.Setenv("ARCMUX_GOAL_BIN", fakeProducer)
-	t.Setenv("ARCMUX_GOAL_MODEL", "legacy-model")
-	t.Setenv("FAKE_ARGS_FILE", argsPath)
+	t.Setenv("FAKE_MARKER_FILE", markerPath)
 
-	got, err := runOverallGoalModel(context.Background(), "", "semantic goal")
-	if err != nil {
-		t.Fatal(err)
+	if _, err := runOverallGoalModel(context.Background(), "", "semantic goal"); !errors.Is(err, errGoalSummaryUnavailable) {
+		t.Fatalf("legacy provider error=%v, want unavailable", err)
 	}
-	if got != "Legacy producer remains compatible" {
-		t.Fatalf("summary=%q", got)
+	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
+		t.Fatalf("legacy provider executed a process: %v", err)
 	}
-	args, _ := os.ReadFile(argsPath)
-	invocation := string(args)
-	if !strings.Contains(invocation, "--no-alt-screen") || !strings.Contains(invocation, "-m legacy-model") ||
-		strings.Contains(invocation, "exec --ephemeral") {
-		t.Fatalf("explicit legacy invocation changed: %s", invocation)
+}
+
+func TestSummarizerSourcesContainNoProcessLaunchCapability(t *testing.T) {
+	_, currentFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot resolve test source path")
+	}
+	for _, name := range []string{"goal_summarizer.go", "summarize.go"} {
+		data, err := os.ReadFile(filepath.Join(filepath.Dir(currentFile), name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, forbidden := range []string{"\"os/exec\"", "exec.Command", "ARCMUX_GOAL_BIN", "legacy-cli"} {
+			if strings.Contains(string(data), forbidden) {
+				t.Fatalf("%s regained forbidden process-launch capability %q", name, forbidden)
+			}
+		}
 	}
 }
 
@@ -303,12 +322,11 @@ func TestResolveGoalSummaryProducerUsesOnlyExplicitSafeCapabilities(t *testing.T
 	}
 	t.Setenv("OPENAI_API_KEY", "openai-test")
 	t.Setenv("XAI_API_KEY", "xai-test")
-	producer, err := resolveGoalSummaryProducer(config.CurrentWorkConfig{})
-	if err != nil || producer.kind != goalSummaryProducerOpenAI {
-		t.Fatalf("automatic producer=%+v err=%v", producer, err)
+	if _, err := resolveGoalSummaryProducer(config.CurrentWorkConfig{}); !errors.Is(err, errGoalSummaryUnavailable) {
+		t.Fatalf("ambient credentials selected an implicit producer: %v", err)
 	}
 	t.Setenv("ARCMUX_GOAL_PROVIDER", "xai")
-	producer, err = resolveGoalSummaryProducer(config.CurrentWorkConfig{})
+	producer, err := resolveGoalSummaryProducer(config.CurrentWorkConfig{})
 	if err != nil || producer.kind != goalSummaryProducerXAI {
 		t.Fatalf("explicit producer=%+v err=%v", producer, err)
 	}
@@ -470,23 +488,28 @@ func TestRefreshOverallGoalRejectsWrappedEmbeddedAndUnsafeOutput(t *testing.T) {
 	}
 }
 
+func TestFeatureOutputRejectsCredentialsAndVerbatimTranscriptText(t *testing.T) {
+	candidate := goalSummaryCandidate{forbidden: []string{
+		"private feature sentinel alpha", "RAW-USER-FEATURE-7391",
+	}}
+	for _, output := range []string{
+		"OPENAI_API_KEY=sk-proj-abcdefghijklmnop",
+		"private-feature-sentinel-alpha",
+		"RAW-USER-FEATURE-7391",
+	} {
+		if _, err := validateGoalSummaryFeature(output, candidate); err == nil {
+			t.Fatalf("unsafe feature output accepted: %q", output)
+		}
+	}
+	if got, err := validateGoalSummaryFeature("Safe Summary Boundary", candidate); err != nil || got != "safe-summary-boundary" {
+		t.Fatalf("feature=%q err=%v", got, err)
+	}
+}
+
 func TestBoundedGoalReadersRejectOversizedStreamingOutput(t *testing.T) {
 	if _, err := readBoundedGoalSummary(strings.NewReader(strings.Repeat("x", goalSummaryOutputBytes+1))); err == nil {
 		t.Fatal("oversized API output was accepted")
 	}
-	dir := t.TempDir()
-	fake := filepath.Join(dir, "producer")
-	script := "#!/bin/sh\ni=0\nwhile [ $i -lt 2000 ]; do printf '0123456789'; i=$((i+1)); done\n"
-	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := runGoalSummaryCommand(execCommandContext(context.Background(), fake)); err == nil {
-		t.Fatal("oversized legacy stdout was accepted")
-	}
-}
-
-func execCommandContext(ctx context.Context, path string) *exec.Cmd {
-	return exec.CommandContext(ctx, path)
 }
 
 func TestStopCancelsAndWaitsQueuedGoalSummary(t *testing.T) {
@@ -503,13 +526,10 @@ func TestStopCancelsAndWaitsQueuedGoalSummary(t *testing.T) {
 		close(finished)
 		return "", ctx.Err()
 	}
-	if !d.startOverallGoalSummary(runCtx, goalSummaryCandidate{
-		sessionID: "s-summary-stop",
-		input: hooks.OverallGoalInputSnapshot{
-			Revision: 1, SessionID: "s-summary-stop", Agent: "codex", TurnCount: 1, LastTurnEndAt: time.Now(),
-		},
-		goal: "summarize shutdown behavior",
-	}) {
+	managed := addGoalSummarySession(t, d, "s-summary-stop", t.TempDir(), false,
+		"summarize shutdown behavior", "raw user shutdown", "raw launch shutdown")
+	candidate, ok := d.goalSummaryCandidate(managed.Snapshot())
+	if !ok || !d.startOverallGoalSummary(runCtx, candidate) {
 		t.Fatal("goal summary was not queued")
 	}
 	<-started
@@ -522,6 +542,27 @@ func TestStopCancelsAndWaitsQueuedGoalSummary(t *testing.T) {
 }
 
 func addGoalSummarySession(t *testing.T, d *Daemon, id, cwd string, private bool, goal, lastUser, launch string) *session.Session {
+	t.Helper()
+	managed := addGoalSummarySessionWithoutHistory(t, d, id, cwd, private, goal, lastUser, launch)
+	now := time.Now().UTC().Add(-2 * time.Second)
+	if err := os.MkdirAll(d.cfg.Hooks.HistoryRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	basename := id + ".md"
+	conversationID := "conversation-" + id
+	history := "---\nconversation_id: " + conversationID + "\nagent: codex\n---\n" + goal
+	if err := os.WriteFile(filepath.Join(d.cfg.Hooks.HistoryRoot, basename), []byte(history), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := hooks.ApplyVerifiedCanonicalHistoryBinding(
+		d.cfg.Hooks.SessionStateDir, id, "codex", d.cfg.Hooks.HistoryRoot, basename, conversationID, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	return managed
+}
+
+func addGoalSummarySessionWithoutHistory(t *testing.T, d *Daemon, id, cwd string, private bool, goal, lastUser, launch string) *session.Session {
 	t.Helper()
 	managed := session.NewSession(id, id, "codex", cwd)
 	if private {

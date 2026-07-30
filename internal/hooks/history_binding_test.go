@@ -105,3 +105,38 @@ func TestReadCanonicalHistoryFrontmatterRejectsOversizedOrUnclosedMetadata(t *te
 		}
 	}
 }
+
+func TestReadVerifiedCanonicalHistoryReturnsOnlyExactBoundedBody(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	basename := "2026-07-30-exact.md"
+	body := "exact conversation body\nsecond line\n"
+	content := "---\nconversation_id: native-id-123\nagent: codex\n---\n" + body
+	if err := os.WriteFile(filepath.Join(root, basename), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	binding := &CanonicalHistoryBinding{
+		Basename: basename, ConversationID: "native-id-123", Provenance: CanonicalHistoryBindingProvenance,
+	}
+	got, err := ReadVerifiedCanonicalHistory(root, binding, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != body {
+		t.Fatalf("body=%q, want %q", got, body)
+	}
+
+	for name, invalid := range map[string]*CanonicalHistoryBinding{
+		"missing provenance": {Basename: basename, ConversationID: "native-id-123"},
+		"wrong identity":     {Basename: basename, ConversationID: "other-id", Provenance: CanonicalHistoryBindingProvenance},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ReadVerifiedCanonicalHistory(root, invalid, 1024); err == nil {
+				t.Fatal("unsafe canonical history binding was accepted")
+			}
+		})
+	}
+	if _, err := ReadVerifiedCanonicalHistory(root, binding, len(body)-1); err == nil {
+		t.Fatal("oversized canonical history body was accepted")
+	}
+}

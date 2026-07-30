@@ -344,13 +344,13 @@ CLI: `arcmux-cli feature <name> [<slug>] [--no-pin]`.
 
 ## `POST /session/summarize`
 
-On-demand goal summarization — the recovery path for a subscriber (voxtop
-babysit) that finds a session with **no recorded briefing** (empty
-`turn_contract.overall_goal`). The daemon captures the pane scrollback, runs
-the same goal-model pass as the turn_end hook (`ARCMUX_GOAL_BIN`, default
-`grok`), and writes `overall_goal` + `feature` to the session state doc via the
-single writer. Debounced: one pass in flight per session (409 on duplicates in
-wait mode; silently coalesced in background mode).
+On-demand goal summarization — the recovery path for a subscriber that finds a
+session with no trusted briefing. This endpoint uses the same daemon-owned path
+as the turn-end scheduler: an exact hook-verified canonical history binding,
+an explicitly selected direct HTTPS provider, persistent per-turn attempts,
+and the process-wide fixed worker pool. It cannot capture pane scrollback or
+launch an agent CLI. Both wait and background requests return 409 for a
+duplicate; a full bounded queue returns 503.
 
 ### Query parameters
 

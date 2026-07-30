@@ -83,6 +83,7 @@ func serviceFixture(t *testing.T, platform, active, target string) (string, stri
 	t.Helper()
 	root := t.TempDir()
 	for _, path := range []string{
+		".gitignore",
 		"Makefile",
 		"packaging/launchd/com.blin.arcmux.plist",
 		"packaging/systemd/arcmux.service",
@@ -96,23 +97,51 @@ func serviceFixture(t *testing.T, platform, active, target string) (string, stri
 			t.Fatal(err)
 		}
 	}
+	gitEnv := append(os.Environ(),
+		"GIT_AUTHOR_NAME=Arcmux Test", "GIT_AUTHOR_EMAIL=arcmux@example.invalid",
+		"GIT_COMMITTER_NAME=Arcmux Test", "GIT_COMMITTER_EMAIL=arcmux@example.invalid",
+	)
+	for _, args := range [][]string{{"init", "-b", "main"}, {"add", "."}, {"commit", "-m", "fixture"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		cmd.Env = gitEnv
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	revisionCmd := exec.Command("git", "rev-parse", "HEAD")
+	revisionCmd.Dir = root
+	revisionBytes, err := revisionCmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixtureRevision := strings.TrimSpace(string(revisionBytes))
 
-	fakeBin := filepath.Join(root, "fake-bin")
+	fakeBin := filepath.Join(root, ".git", "test-bin")
 	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	writeExecutable(t, filepath.Join(fakeBin, "uname"), "printf '%s\\n' \"$FAKE_OS\"\n")
 	writeExecutable(t, filepath.Join(fakeBin, "go"),
-		"out=\n"+
+		"[ \"${1:-}\" = test ] && exit 0\n"+
+			"out=\n"+
 			"while [ \"$#\" -gt 0 ]; do\n"+
 			"  if [ \"$1\" = \"-o\" ]; then out=\"$2\"; break; fi\n"+
 			"  shift\n"+
 			"done\n"+
 			"mkdir -p \"$(dirname \"$out\")\"\n"+
-			": > \"$out\"\n"+
+			"if [ \"$(basename \"$out\")\" = arcmux ]; then\n"+
+			"  cat > \"$out\" <<'ARCMUX_TEST_BINARY'\n"+
+			"#!/bin/sh\n"+
+			"printf '%s\\n' '{\"version\":\"0.1.0\",\"revision\":\""+fixtureRevision+"\",\"build_time\":\"test\",\"summarizer_safety\":\"direct-api-only-v1\"}'\n"+
+			"ARCMUX_TEST_BINARY\n"+
+			"else\n"+
+			"  : > \"$out\"\n"+
+			"fi\n"+
 			"chmod 0755 \"$out\"\n")
 	writeExecutable(t, filepath.Join(fakeBin, "launchctl"),
-		"printf 'launchctl %s\\n' \"$*\" >> \"$SERVICE_TEST_LOG\"\n")
+		"printf 'launchctl %s\\n' \"$*\" >> \"$SERVICE_TEST_LOG\"\n"+
+			"case \" $* \" in *\" print \"*) [ \"$FAKE_ACTIVE\" = 1 ]; exit ;; esac\n")
 	writeExecutable(t, filepath.Join(fakeBin, "pkill"),
 		"printf 'pkill %s\\n' \"$*\" >> \"$SERVICE_TEST_LOG\"\n"+
 			"exit 1\n")
@@ -130,8 +159,8 @@ func serviceFixture(t *testing.T, platform, active, target string) (string, stri
 			"esac\n"+
 			"exit 0\n")
 
-	logPath := filepath.Join(root, "service.log")
-	home := filepath.Join(root, "home")
+	logPath := filepath.Join(root, ".git", "service.log")
+	home := filepath.Join(root, ".git", "test-home")
 	cmd := exec.Command("make", target)
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(),
@@ -152,7 +181,7 @@ func serviceFixture(t *testing.T, platform, active, target string) (string, stri
 	return root, home, string(logData)
 }
 
-func TestLinuxServiceInstallRendersUnitAndAdoptsManualDaemon(t *testing.T) {
+func TestLinuxServiceInstallRendersUnitAndPreservesInactiveState(t *testing.T) {
 	_, home, log := serviceFixture(t, "Linux", "0", "service-install")
 	unitPath := filepath.Join(home, ".config", "systemd", "user", "arcmux.service")
 	unit, err := os.ReadFile(unitPath)
@@ -166,10 +195,9 @@ func TestLinuxServiceInstallRendersUnitAndAdoptsManualDaemon(t *testing.T) {
 		!strings.Contains(rendered, "KillMode=process") {
 		t.Fatalf("unsafe rendered unit:\n%s", rendered)
 	}
-	stop := strings.Index(log, "pkill -TERM -x arcmux")
-	restart := strings.Index(log, "systemctl --user restart arcmux.service")
-	if stop < 0 || restart < 0 || stop >= restart {
-		t.Fatalf("manual daemon was not stopped before systemd restart:\n%s", log)
+	if strings.Contains(log, "pkill ") || strings.Contains(log, "systemctl --user restart arcmux.service") ||
+		strings.Contains(log, "systemctl --user enable arcmux.service") {
+		t.Fatalf("inactive service was activated or process state was mutated:\n%s", log)
 	}
 
 	if analyze, err := exec.LookPath("systemd-analyze"); err == nil {
@@ -213,8 +241,8 @@ func TestDarwinServiceInstallRetainsLaunchdPath(t *testing.T) {
 		!strings.Contains(string(plist), "<key>KeepAlive</key>") {
 		t.Fatalf("invalid rendered launchd plist:\n%s", plist)
 	}
-	if !strings.Contains(log, "launchctl bootstrap") || strings.Contains(log, "systemctl") {
-		t.Fatalf("Darwin install used the wrong supervisor:\n%s", log)
+	if strings.Contains(log, "launchctl bootstrap") || strings.Contains(log, "systemctl") {
+		t.Fatalf("inactive Darwin service was loaded or used the wrong supervisor:\n%s", log)
 	}
 }
 
@@ -224,7 +252,7 @@ func TestLinuxServiceUninstallSurfacesDisableFailure(t *testing.T) {
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(),
 		"HOME="+home,
-		"PATH="+filepath.Join(root, "fake-bin")+":/usr/bin:/bin",
+		"PATH="+filepath.Join(root, ".git", "test-bin")+":/usr/bin:/bin",
 		"FAKE_OS=Linux",
 		"FAKE_ACTIVE=0",
 		"FAKE_LOAD_STATE=loaded",

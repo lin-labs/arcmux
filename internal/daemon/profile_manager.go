@@ -254,9 +254,10 @@ func (pm *ProfileManager) startLocked(ctx context.Context, rec ProfileRecord) er
 	cfg.Mesh.Enabled = false
 
 	d := New(cfg, pm.parent.logger.With("profile", rec.Name))
-	// The daemon process owns one inference budget. Profile daemons retain
-	// per-session single-flight state but share the root's global slot pool.
-	d.goalSummarySlots = pm.parent.goalSummarySlots
+	// The daemon process owns one fixed inference worker pool and bounded queue.
+	// Root and profile sessions therefore share concurrency and dedupe limits.
+	d.goalSummaries = pm.parent.goalSummaries
+	d.goalSummaryPoolOwner = false
 	if err := d.Start(ctx); err != nil {
 		return fmt.Errorf("start profile %s: %w", rec.Name, err)
 	}

@@ -164,48 +164,6 @@ func TestSendExecPromptRejectsAfterStopBegins(t *testing.T) {
 	}
 }
 
-func TestOverallGoalModelCancellationKillsDescendant(t *testing.T) {
-	tmpDir := t.TempDir()
-	childPIDPath := filepath.Join(tmpDir, "goal-child.pid")
-	fakeGrok := filepath.Join(tmpDir, "grok")
-	script := "#!/bin/sh\n" +
-		"sleep 30 &\n" +
-		"child=$!\n" +
-		"printf '%s\\n' \"$child\" > \"$GOAL_CHILD_PID_FILE\"\n" +
-		"wait \"$child\"\n"
-	if err := os.WriteFile(fakeGrok, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("ARCMUX_GOAL_BIN", fakeGrok)
-	t.Setenv("ARCMUX_GOAL_TIMEOUT", "30s")
-	t.Setenv("GOAL_CHILD_PID_FILE", childPIDPath)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	result := make(chan error, 1)
-	go func() {
-		_, err := runOverallGoalModel(ctx, "", "conversation")
-		result <- err
-	}()
-	childPID := waitForPIDFile(t, childPIDPath)
-	defer func() {
-		if processAlive(childPID) {
-			_ = syscall.Kill(childPID, syscall.SIGKILL)
-		}
-	}()
-
-	cancel()
-	select {
-	case <-result:
-	case <-time.After(2 * time.Second):
-		_ = syscall.Kill(childPID, syscall.SIGKILL)
-		<-result
-		t.Fatal("goal summarizer did not drain after cancellation")
-	}
-	if processAlive(childPID) {
-		t.Fatalf("goal summarizer descendant %d survived cancellation", childPID)
-	}
-}
-
 func TestRootStopDrainsProfileExecBeforeAncillaryShutdown(t *testing.T) {
 	tmpDir := t.TempDir()
 	childPIDPath := filepath.Join(tmpDir, "profile-child.pid")

@@ -31,7 +31,13 @@ const (
 	CanonicalHistoryBindingProvenance = "hook.canonical_history_frontmatter.v1"
 )
 
-var ErrStaleOverallGoal = errors.New("overall-goal summary is stale")
+var (
+	ErrStaleOverallGoal    = errors.New("overall-goal summary is stale")
+	ErrOverallGoalBackoff  = errors.New("overall-goal summary is in backoff")
+	ErrOverallGoalTerminal = errors.New("overall-goal summary attempts are terminal")
+)
+
+const OverallGoalMaxAttempts = 3
 
 // CanonicalEvents lists the accepted --event values for `arcmux hook`.
 var CanonicalEvents = []string{
@@ -59,9 +65,10 @@ type SessionState struct {
 	// LastPromptSubmitAt is the timestamp of the most recent prompt_submit
 	// event. The hooks judge compares it to Evidence.DeliveryStartedAt to
 	// confirm a specific delivery was ingested.
-	LastPromptSubmitAt time.Time     `json:"last_prompt_submit_at,omitempty"`
-	LastTurnEndAt      time.Time     `json:"last_turn_end_at,omitempty"`
-	TurnContract       *TurnContract `json:"turn_contract,omitempty"`
+	LastPromptSubmitAt time.Time                `json:"last_prompt_submit_at,omitempty"`
+	LastTurnEndAt      time.Time                `json:"last_turn_end_at,omitempty"`
+	TurnContract       *TurnContract            `json:"turn_contract,omitempty"`
+	GoalSummaryAttempt *GoalSummaryAttemptState `json:"goal_summary_attempt,omitempty"`
 
 	// Artifacts is the ordered record of files this session created or edited
 	// through its dedicated file tools (Write/Edit/apply_patch — captured from
@@ -70,6 +77,20 @@ type SessionState struct {
 	// answers "what did this conversation produce?" — including vault docs
 	// outside any git repo.
 	Artifacts []Artifact `json:"artifacts,omitempty"`
+}
+
+// GoalSummaryAttemptState is the persistent per-turn retry ledger. Keeping it
+// beside the turn contract makes process restarts unable to reset a failing
+// provider into an unbounded retry loop.
+type GoalSummaryAttemptState struct {
+	TurnCount       int       `json:"turn_count"`
+	LastTurnEndAt   time.Time `json:"last_turn_end_at"`
+	Attempts        int       `json:"attempts"`
+	NextAttemptAt   time.Time `json:"next_attempt_at,omitempty"`
+	Terminal        bool      `json:"terminal,omitempty"`
+	FailureClass    string    `json:"failure_class,omitempty"`
+	ManualResetUsed bool      `json:"manual_reset_used,omitempty"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 // Artifact is one file the session touched via a file tool.
@@ -105,9 +126,10 @@ const maxArtifacts = 200
 //   - LastUserMessage: the raw last user turn, verbatim (3-line truncated).
 //   - OverallGoal: the semantic current-work view, CONTINUOUSLY EVOLVING. It is
 //     seeded locally from the launch prompt but does not gain trusted provenance
-//     until a daemon-owned, tool-less API provider transforms the exact
-//     session-id-keyed Goal plus any prior trusted summary. Raw prompt/history
-//     text and untrusted launch seeds are never inference inputs.
+//     until a daemon-owned, tool-less API provider transforms the exact,
+//     native-ID-verified canonical history plus any prior trusted summary.
+//     Untrusted launch seeds, vault-link guesses, and pane scrollback are never
+//     inference inputs.
 type TurnContract struct {
 	// Goal is the current gauged goal — the agent's latest "Your ask:". Shifts
 	// each turn while still reflecting the objective.
@@ -186,6 +208,10 @@ type OverallGoalInputSnapshot struct {
 	OverallGoalProvenance string
 	OverallGoalUpdatedAt  time.Time
 	TurnContractUpdatedAt time.Time
+	HistoryBasename       string
+	HistoryConversationID string
+	HistoryProvenance     string
+	HistoryUpdatedAt      time.Time
 }
 
 // SnapshotOverallGoalInput captures the exact revision and semantic contract
@@ -204,8 +230,95 @@ func SnapshotOverallGoalInput(st *SessionState) OverallGoalInputSnapshot {
 		snapshot.OverallGoalProvenance = st.TurnContract.OverallGoalProvenance
 		snapshot.OverallGoalUpdatedAt = st.TurnContract.OverallGoalUpdatedAt
 		snapshot.TurnContractUpdatedAt = st.TurnContract.UpdatedAt
+		if history := st.TurnContract.CanonicalHistory; history != nil {
+			snapshot.HistoryBasename = history.Basename
+			snapshot.HistoryConversationID = history.ConversationID
+			snapshot.HistoryProvenance = history.Provenance
+			snapshot.HistoryUpdatedAt = history.UpdatedAt
+		}
 	}
 	return snapshot
+}
+
+// BeginOverallGoalSummaryAttempt atomically admits one attempt for the exact
+// turn snapshot and returns the post-mutation snapshot to use for the summary
+// CAS. manual permits one explicit reset per turn after an earlier attempt.
+func BeginOverallGoalSummaryAttempt(stateDir, sessionID string, expected OverallGoalInputSnapshot, manual bool, now time.Time) (OverallGoalInputSnapshot, int, error) {
+	var started OverallGoalInputSnapshot
+	var attempt int
+	err := mutateSessionStateChecked(stateDir, sessionID, func(st *SessionState) error {
+		actual := SnapshotOverallGoalInput(st)
+		if !sameOverallGoalInput(actual, expected) {
+			return ErrStaleOverallGoal
+		}
+		ledger := st.GoalSummaryAttempt
+		if ledger == nil || ledger.TurnCount != st.TurnCount || !ledger.LastTurnEndAt.Equal(st.LastTurnEndAt) {
+			ledger = &GoalSummaryAttemptState{TurnCount: st.TurnCount, LastTurnEndAt: st.LastTurnEndAt}
+			st.GoalSummaryAttempt = ledger
+		}
+		if manual && ledger.Attempts > 0 && !ledger.ManualResetUsed {
+			ledger.Attempts = 0
+			ledger.NextAttemptAt = time.Time{}
+			ledger.Terminal = false
+			ledger.FailureClass = ""
+			ledger.ManualResetUsed = true
+		}
+		if ledger.Terminal || ledger.Attempts >= OverallGoalMaxAttempts {
+			return ErrOverallGoalTerminal
+		}
+		if !ledger.NextAttemptAt.IsZero() && now.Before(ledger.NextAttemptAt) {
+			return ErrOverallGoalBackoff
+		}
+		ledger.Attempts++
+		ledger.NextAttemptAt = time.Time{}
+		ledger.FailureClass = ""
+		ledger.UpdatedAt = now
+		attempt = ledger.Attempts
+		started = SnapshotOverallGoalInput(st)
+		if st.Revision == math.MaxUint64 {
+			return errors.New("session state revision exhausted")
+		}
+		started.Revision = st.Revision + 1
+		return nil
+	})
+	return started, attempt, err
+}
+
+// FinishOverallGoalSummaryAttempt records a credential-free failure class and
+// either a bounded retry time or a terminal decision for the same turn.
+func FinishOverallGoalSummaryAttempt(stateDir, sessionID string, started OverallGoalInputSnapshot, failureClass string, terminal bool, nextAttemptAt, now time.Time) error {
+	return mutateSessionStateChecked(stateDir, sessionID, func(st *SessionState) error {
+		if st.SessionID != started.SessionID || st.Agent != started.Agent ||
+			st.TurnCount != started.TurnCount || !st.LastTurnEndAt.Equal(started.LastTurnEndAt) {
+			return ErrStaleOverallGoal
+		}
+		ledger := st.GoalSummaryAttempt
+		if ledger == nil || ledger.TurnCount != started.TurnCount || !ledger.LastTurnEndAt.Equal(started.LastTurnEndAt) {
+			return ErrStaleOverallGoal
+		}
+		ledger.FailureClass = compactContractText(failureClass)
+		ledger.Terminal = terminal || ledger.Attempts >= OverallGoalMaxAttempts
+		if ledger.Terminal {
+			ledger.NextAttemptAt = time.Time{}
+		} else {
+			ledger.NextAttemptAt = nextAttemptAt
+		}
+		ledger.UpdatedAt = now
+		return nil
+	})
+}
+
+func sameOverallGoalInput(actual, expected OverallGoalInputSnapshot) bool {
+	return actual.Revision == expected.Revision && actual.SessionID == expected.SessionID &&
+		actual.Agent == expected.Agent && actual.TurnCount == expected.TurnCount &&
+		actual.LastTurnEndAt.Equal(expected.LastTurnEndAt) && actual.Goal == expected.Goal &&
+		actual.OverallGoal == expected.OverallGoal && actual.OverallGoalProvenance == expected.OverallGoalProvenance &&
+		actual.OverallGoalUpdatedAt.Equal(expected.OverallGoalUpdatedAt) &&
+		actual.TurnContractUpdatedAt.Equal(expected.TurnContractUpdatedAt) &&
+		actual.HistoryBasename == expected.HistoryBasename &&
+		actual.HistoryConversationID == expected.HistoryConversationID &&
+		actual.HistoryProvenance == expected.HistoryProvenance &&
+		actual.HistoryUpdatedAt.Equal(expected.HistoryUpdatedAt)
 }
 
 // SessionStatePath returns the live state file path for a session.
@@ -303,7 +416,14 @@ func ApplyContractOnly(stateDir, sessionID, agent string, contract TurnContractU
 // exact turn snapshot used by the summarizer. A slow turn N summary therefore
 // cannot overwrite turn N+1.
 func ApplySummarizedOverallGoal(stateDir, sessionID, agent, overallGoal string, expected OverallGoalInputSnapshot, now time.Time) error {
+	return ApplySummarizedCurrentWork(stateDir, sessionID, agent, overallGoal, "", expected, now)
+}
+
+// ApplySummarizedCurrentWork atomically stamps the trusted summary and an
+// optional bounded feature slug. Explicitly pinned features remain untouched.
+func ApplySummarizedCurrentWork(stateDir, sessionID, agent, overallGoal, feature string, expected OverallGoalInputSnapshot, now time.Time) error {
 	overallGoal = compactContractText(overallGoal)
+	feature = SanitizeFeatureSlug(feature)
 	if overallGoal == "" {
 		return errors.New("summarized overall goal is required")
 	}
@@ -313,12 +433,7 @@ func ApplySummarizedOverallGoal(stateDir, sessionID, agent, overallGoal string, 
 	}
 	return mutateSessionStateChecked(stateDir, sessionID, func(st *SessionState) error {
 		actual := SnapshotOverallGoalInput(st)
-		if actual.Revision != expected.Revision || actual.SessionID != expected.SessionID ||
-			actual.Agent != expected.Agent || actual.TurnCount != expected.TurnCount ||
-			!actual.LastTurnEndAt.Equal(expected.LastTurnEndAt) || actual.Goal != expected.Goal ||
-			actual.OverallGoal != expected.OverallGoal || actual.OverallGoalProvenance != expected.OverallGoalProvenance ||
-			!actual.OverallGoalUpdatedAt.Equal(expected.OverallGoalUpdatedAt) ||
-			!actual.TurnContractUpdatedAt.Equal(expected.TurnContractUpdatedAt) {
+		if !sameOverallGoalInput(actual, expected) {
 			return ErrStaleOverallGoal
 		}
 		st.SessionID = sessionID
@@ -334,6 +449,9 @@ func ApplySummarizedOverallGoal(stateDir, sessionID, agent, overallGoal string, 
 		st.TurnContract.OverallGoal = overallGoal
 		st.TurnContract.OverallGoalProvenance = OverallGoalSummarizerProvenance
 		st.TurnContract.OverallGoalUpdatedAt = now
+		if feature != "" && !st.TurnContract.FeaturePinned {
+			st.TurnContract.Feature = feature
+		}
 		st.TurnContract.UpdatedAt = now
 		st.UpdatedAt = now
 		return nil

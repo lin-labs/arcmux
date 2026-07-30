@@ -1,10 +1,14 @@
-.PHONY: build install proto test validate validate-structural validate-substrate validate-substrate-e2e validate-e2e validate-e2e-hooks validate-eval validate-all clean start stop restart status logs tail release deploy service-install service-uninstall
+.PHONY: build verify-summarizer-safety verify-artifact install verify-installed proto test validate validate-structural validate-substrate validate-substrate-e2e validate-e2e validate-e2e-hooks validate-eval validate-all clean start stop restart status logs tail release deploy service-install service-uninstall
 
 BINARY := arcmux
 INSTALL_DIR := $(HOME)/.local/bin
 BIN := $(INSTALL_DIR)/$(BINARY)
 LOG_DIR := $(HOME)/.config/arcmux/logs
 LOG_FILE := $(LOG_DIR)/daemon.log
+BUILD_REVISION ?= $(shell git rev-parse --verify HEAD)
+BUILD_TIME ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
+SUMMARIZER_SAFETY := direct-api-only-v1
+ARCMUX_LDFLAGS := -X main.buildRevision=$(BUILD_REVISION) -X main.buildTime=$(BUILD_TIME)
 
 # Managed service definitions. `service-install` selects one at runtime.
 LAUNCHD_LABEL := com.blin.arcmux
@@ -22,15 +26,28 @@ LABS_HOST ?= labs
 LABS_REPO ?= ~/Projects/arcmux
 
 build:
-	go build -o bin/$(BINARY) ./cmd/arcmux
+	go build -trimpath -ldflags "$(ARCMUX_LDFLAGS)" -o bin/$(BINARY) ./cmd/arcmux
 	go build -o bin/$(BINARY)-cli ./cmd/arcmux-cli
 	go build -o bin/$(BINARY)-test ./cmd/arcmux-test
 	go build -o bin/$(BINARY)-e2e ./cmd/arcmux-e2e
 
-install: build
+verify-summarizer-safety:
+	go test ./internal/config ./internal/hooks ./internal/daemon ./cmd/arcmux ./packaging -run 'Test(LegacyProducerConfigurationCanNeverExecuteAProcess|SummarizerSourcesContainNoProcessLaunchCapability|OnDemandSummaryUsesTheSameSafeOwnerPathAndNeverLegacyCLI|MissingProviderBecomesPersistentTerminalAfterOneAttempt|CurrentWorkProviderRejectsUnknownOrRelativeCredentialFile|VersionJSONAttestsBuildRevisionAndSummarizerSafety|ReleaseRequiresSafetyAttestationAndPreservesInactiveService)'
+
+verify-artifact: build verify-summarizer-safety
+	@source_revision="$$(git rev-parse --verify HEAD)"; \
+	  test "$(BUILD_REVISION)" = "$$source_revision" || { echo "build revision does not match source HEAD" >&2; exit 1; }; \
+	  test -z "$$(git status --porcelain)" || { echo "refusing unattested dirty build" >&2; exit 1; }
+	@bin/$(BINARY) version --json | python3 -c 'import json,sys; d=json.load(sys.stdin); expected_revision=sys.argv[1]; expected_safety=sys.argv[2]; assert d.get("revision") == expected_revision, d; assert d.get("summarizer_safety") == expected_safety, d' "$(BUILD_REVISION)" "$(SUMMARIZER_SAFETY)"
+
+install: verify-artifact
 	mkdir -p $(INSTALL_DIR)
 	install -m 0755 bin/$(BINARY) $(BIN)
 	install -m 0755 bin/$(BINARY)-cli $(INSTALL_DIR)/$(BINARY)-cli
+
+verify-installed:
+	@test -x $(BIN) || { echo "missing $(BIN)" >&2; exit 1; }
+	@$(BIN) version --json | python3 -c 'import json,sys; d=json.load(sys.stdin); expected_revision=sys.argv[1]; expected_safety=sys.argv[2]; assert d.get("revision") == expected_revision, d; assert d.get("summarizer_safety") == expected_safety, d' "$(BUILD_REVISION)" "$(SUMMARIZER_SAFETY)"
 
 proto:
 	protoc -I proto \
@@ -179,23 +196,25 @@ restart:
 # Install (or refresh) the native managed service. Linux uses a systemd user
 # unit whose KillMode deliberately preserves the external tmux server across
 # daemon restarts; macOS retains the launchd LaunchAgent behavior.
-service-install: install
+service-install: install verify-installed
 	@test -x $(BIN) || { echo "missing $(BIN); run 'make install' first"; exit 1; }
 	@set -e; case "$$(uname -s)" in \
 	  Darwin) \
+	    was_loaded=false; \
+	    if launchctl print gui/$$(id -u)/$(LAUNCHD_LABEL) >/dev/null 2>&1; then was_loaded=true; fi; \
 	    mkdir -p $(HOME)/Library/LaunchAgents $(LOG_DIR); \
 	    sed -e 's#@HOME@#$(HOME)#g' \
 	        -e 's#@BIN@#$(BIN)#g' \
 	        -e 's#@LOG_FILE@#$(LOG_FILE)#g' \
 	        -e 's#@PATH@#$(SERVICE_PATH)#g' \
 	        $(LAUNCHD_TEMPLATE) > $(LAUNCHD_PLIST); \
-	    launchctl bootout gui/$$(id -u)/$(LAUNCHD_LABEL) 2>/dev/null || true; \
-	    pkill -TERM -x $(BINARY) 2>/dev/null || true; \
-	    sleep 1; \
-	    launchctl bootstrap gui/$$(id -u) $(LAUNCHD_PLIST); \
-	    launchctl enable gui/$$(id -u)/$(LAUNCHD_LABEL); \
-	    launchctl kickstart gui/$$(id -u)/$(LAUNCHD_LABEL) 2>/dev/null || true; \
-	    echo "installed launchd agent $(LAUNCHD_LABEL) -> $(LAUNCHD_PLIST)"; \
+	    if [ "$$was_loaded" = true ]; then \
+	      launchctl bootout gui/$$(id -u)/$(LAUNCHD_LABEL) 2>/dev/null || true; \
+	      launchctl bootstrap gui/$$(id -u) $(LAUNCHD_PLIST); \
+	      echo "refreshed active launchd agent $(LAUNCHD_LABEL)"; \
+	    else \
+	      echo "installed launchd agent definition; left it unloaded"; \
+	    fi; \
 	    ;; \
 	  Linux) \
 	    was_active=false; \
@@ -208,19 +227,12 @@ service-install: install
 	        -e 's#@PATH@#$(SERVICE_PATH)#g' \
 	        $(SYSTEMD_TEMPLATE) > $(SYSTEMD_UNIT); \
 	    systemctl --user daemon-reload; \
-	    if [ "$$was_active" != true ]; then \
-	      pkill -TERM -x $(BINARY) 2>/dev/null || true; \
-	      for i in 1 2 3 4 5; do \
-	        pgrep -x $(BINARY) >/dev/null || break; \
-	        sleep 1; \
-	      done; \
-	      if pgrep -x $(BINARY) >/dev/null; then \
-	        pkill -KILL -x $(BINARY); \
-	      fi; \
+	    if [ "$$was_active" = true ]; then \
+	      systemctl --user restart $(BINARY).service; \
+	      echo "refreshed active systemd user unit $(BINARY).service"; \
+	    else \
+	      echo "installed systemd user unit; left it inactive"; \
 	    fi; \
-	    systemctl --user enable $(BINARY).service; \
-	    systemctl --user restart $(BINARY).service; \
-	    echo "installed systemd user unit $(BINARY).service -> $(SYSTEMD_UNIT)"; \
 	    ;; \
 	  *) \
 	    echo "unsupported service platform: $$(uname -s)" >&2; \

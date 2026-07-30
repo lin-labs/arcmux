@@ -159,6 +159,73 @@ func TestSummarizedOverallGoalRejectsSameTurnContractRevisionChange(t *testing.T
 	}
 }
 
+func TestOverallGoalAttemptsPersistCapBackoffAndResetOnlyByPolicy(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	id := "s-persistent-attempts"
+	now := time.Date(2026, 7, 30, 18, 0, 0, 0, time.UTC)
+	if err := ApplyEventWithContract(dir, id, "codex", EventPromptSubmit, "",
+		TurnContractUpdate{Goal: "bounded semantic work"}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyEvent(dir, id, "codex", EventTurnEnd, "", now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	state, _ := ReadSessionState(dir, id)
+	expected := SnapshotOverallGoalInput(state)
+
+	for attempt := 1; attempt <= OverallGoalMaxAttempts; attempt++ {
+		started, gotAttempt, err := BeginOverallGoalSummaryAttempt(dir, id, expected, false, now.Add(time.Duration(attempt)*time.Minute))
+		if err != nil || gotAttempt != attempt {
+			t.Fatalf("begin attempt %d: got=%d err=%v", attempt, gotAttempt, err)
+		}
+		expected = started
+		next := now.Add(time.Duration(attempt+1) * time.Minute)
+		terminal := attempt == OverallGoalMaxAttempts
+		if err := FinishOverallGoalSummaryAttempt(dir, id, started, "transient", terminal, next, next.Add(-time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		state, _ = ReadSessionState(dir, id)
+		expected = SnapshotOverallGoalInput(state)
+		if !terminal {
+			if _, _, err := BeginOverallGoalSummaryAttempt(dir, id, expected, false, next.Add(-2*time.Second)); !errors.Is(err, ErrOverallGoalBackoff) {
+				t.Fatalf("attempt %d ignored persistent backoff: %v", attempt, err)
+			}
+		}
+	}
+
+	// Reading the state again simulates a fresh daemon process: the terminal
+	// decision lives in the JSON ledger, not an in-memory timer.
+	state, _ = ReadSessionState(dir, id)
+	expected = SnapshotOverallGoalInput(state)
+	if _, _, err := BeginOverallGoalSummaryAttempt(dir, id, expected, false, now.Add(10*time.Minute)); !errors.Is(err, ErrOverallGoalTerminal) {
+		t.Fatalf("restart lost terminal attempt state: %v", err)
+	}
+
+	manual, attempt, err := BeginOverallGoalSummaryAttempt(dir, id, expected, true, now.Add(11*time.Minute))
+	if err != nil || attempt != 1 {
+		t.Fatalf("one manual reset failed: attempt=%d err=%v", attempt, err)
+	}
+	if err := FinishOverallGoalSummaryAttempt(dir, id, manual, "auth", true, time.Time{}, now.Add(11*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	state, _ = ReadSessionState(dir, id)
+	if _, _, err := BeginOverallGoalSummaryAttempt(dir, id, SnapshotOverallGoalInput(state), true, now.Add(12*time.Minute)); !errors.Is(err, ErrOverallGoalTerminal) {
+		t.Fatalf("second manual reset was allowed: %v", err)
+	}
+
+	if err := ApplyEvent(dir, id, "codex", EventPromptSubmit, "", now.Add(13*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyEvent(dir, id, "codex", EventTurnEnd, "", now.Add(14*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	state, _ = ReadSessionState(dir, id)
+	if _, attempt, err := BeginOverallGoalSummaryAttempt(dir, id, SnapshotOverallGoalInput(state), false, now.Add(15*time.Minute)); err != nil || attempt != 1 {
+		t.Fatalf("new turn did not reset attempts: attempt=%d err=%v", attempt, err)
+	}
+}
+
 func TestApplyEventTransitions(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

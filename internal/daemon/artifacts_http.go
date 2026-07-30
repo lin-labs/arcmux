@@ -277,13 +277,18 @@ func (h *HTTPServer) handleSessionSummarize(w http.ResponseWriter, r *http.Reque
 	wait := r.URL.Query().Get("wait") == "1" || r.URL.Query().Get("wait") == "true"
 
 	if !wait {
-		go func() {
-			ctx, cancel := context.WithTimeout(h.daemon.ctx, 120*time.Second)
-			defer cancel()
-			if _, err := h.daemon.SummarizeSessionByID(ctx, snap.ID); err != nil && err != ErrSummarizeInFlight {
-				h.daemon.logger.Warn("background summarize failed", "session_id", snap.ID, "error", err)
+		if err := h.daemon.QueueSessionSummaryByID(snap.ID); err != nil {
+			if err == ErrSummarizeInFlight {
+				writeJSON(w, http.StatusConflict, errorResponse{Error: err.Error()})
+				return
 			}
-		}()
+			if err == errGoalSummaryQueueFull {
+				writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"session_id": snap.ID, "name": snap.Name, "started": true,
 			"note": "summarizing in background; re-read the state doc or /sessions shortly",
@@ -296,6 +301,10 @@ func (h *HTTPServer) handleSessionSummarize(w http.ResponseWriter, r *http.Reque
 	goal, err := h.daemon.SummarizeSessionByID(ctx, snap.ID)
 	if err == ErrSummarizeInFlight {
 		writeJSON(w, http.StatusConflict, errorResponse{Error: err.Error()})
+		return
+	}
+	if err == errGoalSummaryQueueFull {
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Error: err.Error()})
 		return
 	}
 	if err != nil {

@@ -162,8 +162,11 @@ type HooksConfig struct {
 	// this application. Read by the hooks judge; written by the
 	// `arcmux hook` CLI and seeded/archived by the daemon.
 	SessionStateDir string `toml:"session_state_dir"`
-	AutoInstall     bool   `toml:"auto_install"`
-	AutoRegister    bool   `toml:"auto_register"`
+	// HistoryRoot is the sole directory from which daemon summarization may
+	// read a hook-verified canonical conversation file.
+	HistoryRoot  string `toml:"history_root"`
+	AutoInstall  bool   `toml:"auto_install"`
+	AutoRegister bool   `toml:"auto_register"`
 }
 
 // CurrentWorkConfig is persistent local provider selection for daemon-owned
@@ -171,20 +174,25 @@ type HooksConfig struct {
 // config.toml: APIKeyFile names an owner-only regular file read at call time.
 // Environment variables remain backwards-compatible runtime overrides.
 type CurrentWorkConfig struct {
-	Provider   string `toml:"provider"` // "openai" | "xai" | "legacy-cli"
+	Provider   string `toml:"provider"` // "openai" | "xai"
 	Model      string `toml:"model"`
 	APIKeyFile string `toml:"api_key_file"`
-	LegacyBin  string `toml:"legacy_bin"`
+	// LegacyBin is decoded only so stale configurations fail loudly. It is
+	// never consumed by the daemon and must remain empty.
+	LegacyBin string `toml:"legacy_bin"`
 }
 
 func (c CurrentWorkConfig) Validate() error {
 	switch strings.ToLower(strings.TrimSpace(c.Provider)) {
-	case "", "openai", "xai", "legacy-cli":
+	case "", "openai", "xai":
 	default:
-		return fmt.Errorf("config: current_work.provider %q is not one of openai|xai|legacy-cli", c.Provider)
+		return fmt.Errorf("config: current_work.provider %q is not one of openai|xai", c.Provider)
 	}
 	if c.APIKeyFile != "" && !filepath.IsAbs(c.APIKeyFile) {
 		return fmt.Errorf("config: current_work.api_key_file must be absolute")
+	}
+	if strings.TrimSpace(c.LegacyBin) != "" {
+		return fmt.Errorf("config: current_work.legacy_bin is forbidden; only direct API providers are supported")
 	}
 	return nil
 }
@@ -242,6 +250,7 @@ func Load(path string) (*Config, error) {
 			GrokHookDir:     defaultGrokHookDir(),
 			HookOutputDir:   defaultHookOutputDir(),
 			SessionStateDir: defaultSessionStateDir(),
+			HistoryRoot:     defaultHistoryRoot(),
 			AutoInstall:     true,
 			AutoRegister:    false,
 		},
@@ -306,6 +315,9 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Hooks.HookOutputDir == "" {
 		cfg.Hooks.HookOutputDir = defaultHookOutputDir()
+	}
+	if cfg.Hooks.HistoryRoot == "" {
+		cfg.Hooks.HistoryRoot = defaultHistoryRoot()
 	}
 
 	if err := cfg.Delivery.Validate(); err != nil {
@@ -428,6 +440,7 @@ func expandConfigPaths(cfg *Config) {
 	cfg.Hooks.GrokHookDir = expandTilde(cfg.Hooks.GrokHookDir)
 	cfg.Hooks.HookOutputDir = expandTilde(cfg.Hooks.HookOutputDir)
 	cfg.Hooks.SessionStateDir = expandTilde(cfg.Hooks.SessionStateDir)
+	cfg.Hooks.HistoryRoot = expandTilde(cfg.Hooks.HistoryRoot)
 	cfg.CurrentWork.APIKeyFile = expandTilde(cfg.CurrentWork.APIKeyFile)
 	cfg.DataRoot = expandTilde(cfg.DataRoot)
 	cfg.Pulse.DataRoot = expandTilde(cfg.Pulse.DataRoot)
@@ -587,6 +600,11 @@ func defaultLogDir() string {
 func defaultSessionStateDir() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, "data", "mux", "sessions")
+}
+
+func defaultHistoryRoot() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "agents", "histories")
 }
 
 // defaultHookOutputDir returns ~/data/mux/hook-output — the per-session raw

@@ -165,11 +165,15 @@ CLI flag. A failed, ambiguous, mismatched, symlinked, or missing file leaves the
 prior binding untouched.
 
 The daemon observes `turn_end` and schedules a **background, best-effort**
-summary, bounded to two concurrent calls globally and one per session. The
-result is committed only if the exact state revision and complete input snapshot
-are unchanged; a concurrent hook update makes the response stale. The generic
-hook and public CLI expose no way to stamp trusted provenance. Missing providers
-or rejected output simply omit mesh `current_work` until a safe summary exists.
+summary through two fixed workers and a bounded process-wide queue shared by
+root and profile sessions. The input is read only from the exact canonical
+history descriptor whose basename and native conversation ID were verified by
+the hook. The result is committed only if the exact state revision and complete
+input snapshot are unchanged; a concurrent hook update makes the response
+stale. Attempts persist in the session JSON across daemon restarts: permanent
+configuration/auth failures stop immediately, transient failures use backoff
+and stop after three attempts, and only a new turn (or one explicit on-demand
+reset) reopens the budget.
 
 Managed services do not source interactive shell files. Persist provider choice
 and the credential-file path in owner-local `~/.config/arcmux/config.toml`; keep
@@ -177,18 +181,19 @@ the credential itself out of TOML:
 
 ```toml
 [current_work]
-provider = "openai" # openai | xai | legacy-cli
+provider = "openai" # openai | xai
 model = "gpt-5.4-mini"
 api_key_file = "~/.config/arcmux/openai-api-key" # 0600, current-uid regular file
 ```
 
 The environment variables `ARCMUX_GOAL_PROVIDER`, `ARCMUX_GOAL_MODEL`,
 `OPENAI_API_KEY` / `XAI_API_KEY`, and `OPENAI_API_KEY_FILE` /
-`XAI_API_KEY_FILE` remain runtime overrides. The fixed HTTPS requests declare no
-tools, explicitly disable OpenAI response storage, and size-bound response
-bodies. `ARCMUX_GOAL_BIN` or `[current_work].legacy_bin` remains an explicit
-`legacy-cli` compatibility path and is never auto-discovered from an agent
-binary.
+`XAI_API_KEY_FILE` remain runtime overrides. A provider must be explicit;
+ambient API keys do not activate inference. The fixed HTTPS requests declare no
+tools, explicitly disable OpenAI response storage, and size-bound request and
+response bodies. `legacy-cli`, `[current_work].legacy_bin`, and
+`ARCMUX_GOAL_BIN` are rejected or ignored fail-closed; no summarization path can
+execute Grok, Codex, Claude, a browser, or any other external agent command.
 
 A subscriber that wants "is session X working? when did it last finish a
 turn?" should read `sessions/<id>.json`. A subscriber that wants the full

@@ -68,20 +68,20 @@ make start && sleep 1 && make status
   The command accepts no arbitrary shell text and both endpoints must remain
   loopback-only.
 - Semantic `current_work` gate: run
-  `go test -race ./internal/daemon ./internal/sessionview ./internal/hooks ./internal/config ./cmd/arcmux -run 'Test(DaemonOwnsTrustedOverallGoalWrite|SameCWDSessionsUseExactStateAndPrivateSessionIsNeverSummarized|DuplicateSessionIDsAcrossProfileScopedStateDoNotCrossAttribute|CreateSessionDuplicateIDsUseProfileScopedHookRendezvous|GoalSummarySingleFlightAndGlobalConcurrencyBound|ToollessOpenAIProviderUsesBoundedHTTPSRequest|APIGoalProviderDoesNotRedirectCredential|ExplicitLegacyProducerKindPreservesCompatibilityWithoutBasenameInference|ResolveGoalSummaryProducerUsesOnlyExplicitSafeCapabilities|ProviderAPIKeyFileRequiresPrivateRegularFile|ProviderAPIKeyFileRequiresAbsolutePath|ProviderOverrideCannotReuseDifferentConfiguredProviderCredential|ProviderAPIKeyFileRequiresCurrentUIDOwnership|ResolveGoalSummaryProducerUsesPersistentConfigWithoutServiceEnvironment|RefreshOverallGoalRejectsWrappedEmbeddedAndUnsafeOutput|BoundedGoalReadersRejectOversizedStreamingOutput|MeshSessionListAndGetAgreeForRealHookStateFixture|SummarizedOverallGoalRejectsStaleTurnAndAdvancesFreshness|SummarizedOverallGoalRejectsSameTurnContractRevisionChange|BuildCurrentWorkRequiresSummarizerProvenance|NormalizeCurrentWork|CurrentWorkProviderPersistsWithoutServiceEnvironment|CurrentWorkProviderRejectsUnknownOrRelativeCredentialFile|ProfileManager_CreateRemoveRestart|SessionEnvFile_ProfileScopeIsPartOfRendezvousKey|SessionEnvFile_RejectsInvalidProfileScope|WriteSessionEnvFile_RejectsPreexistingSymlink|CmdHookEnv_RequiresSessionID|CmdHookEnv_FailSafeOnMissing)' -count=5`.
-  Automatic producer selection uses direct, tool-less OpenAI or xAI HTTPS
+  `go test -race ./internal/daemon ./internal/sessionview ./internal/hooks ./internal/config ./cmd/arcmux ./packaging -run 'Test(DaemonOwnsTrustedOverallGoalWrite|GoalSummaryCandidateRequiresExactCanonicalHistoryBinding|SameCWDSessionsUseExactStateAndPrivateSessionIsNeverSummarized|DuplicateSessionIDsAcrossProfileScopedStateDoNotCrossAttribute|GoalSummaryPoolHasFixedWorkersBoundedQueueAndGlobalDedupe|MissingProviderBecomesPersistentTerminalAfterOneAttempt|ProviderAuthenticationFailureIsPermanentAndCredentialFree|OnDemandSummaryUsesTheSameSafeOwnerPathAndNeverLegacyCLI|WaitSummarizeReturnsServiceUnavailableWhenBoundedQueueIsFull|FeatureOutputRejectsCredentialsAndVerbatimTranscriptText|ToollessOpenAIProviderUsesBoundedHTTPSRequest|APIGoalProviderDoesNotRedirectCredential|LegacyProducerConfigurationCanNeverExecuteAProcess|ResolveGoalSummaryProducerUsesOnlyExplicitSafeCapabilities|ProviderAPIKeyFileRequiresPrivateRegularFile|ProviderAPIKeyFileRequiresAbsolutePath|ProviderOverrideCannotReuseDifferentConfiguredProviderCredential|ProviderAPIKeyFileRequiresCurrentUIDOwnership|ResolveGoalSummaryProducerUsesPersistentConfigWithoutServiceEnvironment|RefreshOverallGoalRejectsWrappedEmbeddedAndUnsafeOutput|BoundedGoalReadersRejectOversizedStreamingOutput|OverallGoalAttemptsPersistCapBackoffAndResetOnlyByPolicy|ReadVerifiedCanonicalHistoryReturnsOnlyExactBoundedBody|SummarizedOverallGoalRejectsStaleTurnAndAdvancesFreshness|SummarizedOverallGoalRejectsSameTurnContractRevisionChange|BuildCurrentWorkRequiresSummarizerProvenance|NormalizeCurrentWork|CurrentWorkProviderPersistsWithoutServiceEnvironment|CurrentWorkProviderRejectsUnknownOrRelativeCredentialFile|VersionJSONAttestsBuildRevisionAndSummarizerSafety|ReleaseRequiresSafetyAttestationAndPreservesInactiveService)' -count=5`.
+  Explicit producer selection uses direct, tool-less OpenAI or xAI HTTPS
   calls; select one with `ARCMUX_GOAL_PROVIDER` and provide its conventional
   API-key environment variable or owner-only key file. Managed services use
   persistent `[current_work]` provider/model/api-key-file config without
-  sourcing shell startup files. `ARCMUX_GOAL_BIN` is supported only as an
-  explicitly configured `legacy-cli` compatibility capability; no agent CLI
-  is auto-launched. Missing producers and unsafe, oversized, or
+  sourcing shell startup files. `ARCMUX_GOAL_BIN` and `legacy-cli` are
+  structurally unsupported; no summary path can launch an agent CLI or browser.
+  Missing producers and unsafe, oversized, or
   verbatim-derived outputs omit `current_work` with a credential-free warning.
-  The inference input comes only from the exact profile-scoped,
-  session-id-keyed hook state, never cwd/host history matching or raw
-  user/history text; private sessions are skipped.
-  Successful completed-turn refreshes are globally bounded to two concurrent
-  calls across the root and every profile daemon, with one call per session;
+  The inference input comes only from the exact, frontmatter-verified canonical
+  history binding, never pane scrollback, vault links, cwd/host/mtime matching,
+  or a latest-file search; private sessions are skipped.
+  Completed-turn refreshes use two fixed workers and a bounded queue across the
+  root and every profile daemon, with one queued/active call per session;
   duplicate IDs are isolated by profile-scoped state/output directories and
   by a profile/session-keyed startup rendezvous. Key-file paths must be
   absolute, exact `0600` owner files; a provider override cannot reuse another
@@ -89,6 +89,9 @@ make start && sleep 1 && make status
   Successful writes stamp `hook.overall_goal_summarizer.v1`, use a full-revision
   CAS, agree across `sessions.list`/`sessions.get`, and never expose raw
   goal/user/history sentinels or credential-like output.
+  The built and installed binary must report the exact source revision and
+  `summarizer_safety=direct-api-only-v1`; install/release refuses a dirty,
+  stale, or unsafe artifact and preserves inactive/disabled service state.
 - Canonical history binding gate: run
   `go test -race ./internal/hooks ./internal/sessionview ./internal/daemon ./cmd/arcmux -run 'Test(Installer_EnsureGenericHook_Refuses|Installer_Install_PreservesExternallyManaged|InstallManagedHook|EnsureCodexHookRefuses|VerifyCanonicalHistoryBinding|ReadCanonicalHistoryFrontmatter|CanonicalHistoryBindingCarriesFixedProvenance|CmdHookBindsVerifiedCanonicalHistory|CmdHookRejects.*CanonicalHistory|CanonicalHistoryReference|ListSessionsBindsProfileScopeAndCanonicalHistory)' -count=10`.
   It must prove release/startup never follows or overwrites a foreign hook
@@ -163,14 +166,18 @@ staticcheck ./... 2>/dev/null    # if installed
   `tmux -L arcmux show-environment -t <agent-session> | grep ARCMUX`. Do not
   rely only on a pane shell's `env`; shared-session inheritance can mask missing
   per-agent env plumbing.
-- **Goal summarizer probe** (turn_contract.overall_goal / feature empty?):
-  the summarizer needs headless grok auth from `~/.config/arcmux/goal.env`
-  (symlink to the machine secrets env; override `ARCMUX_GOAL_ENV_FILE`). Probe:
-  `set -a; . ~/.config/arcmux/goal.env; set +a; echo 'Say OK.' > /tmp/p.txt &&
-  timeout 45 grok --no-alt-screen --disable-web-search -m grok-4.3
-  --prompt-file /tmp/p.txt </dev/null` → must print OK in seconds. A
-  device-code/429 error means the key is missing — the summarizer is silently
-  dead (it never blocks turns). Rotted unnoticed 2026-06-25→07-12.
+- **Production hold — do not start or restart arcmux while `arcmux-xev` is
+  open.** The unauthenticated legacy goal summarizer caused Grok/Chrome process
+  storms on 2026-07-26 and again on 2026-07-30. Keep `arcmux.service` inactive
+  and disabled; `make build` and isolated tests are safe, but `make start`,
+  `make restart`, `make release`, and manual `systemctl start` are not. Release
+  requires every `arcmux-xev` acceptance criterion, an isolated real-binary E2E
+  run, installed-binary verification, and Boyan's explicit restart approval.
+- **Historical Grok probe (not a release gate):** the pre-hardening summarizer
+  used headless Grok authentication. A device-code or 429 response proves that
+  legacy path is unauthenticated; do not solve it by logging Grok in or by
+  restarting production. The replacement must fail closed before spawning an
+  agent CLI and must use the bounded provider path covered by `arcmux-xev`.
 - **Never `make restart`/`release` from an arcmux-hosted agent pane without
   Boyan present** — the restart kills the tmux server and the deploying agent
   with it. `make build`/`install` are always safe; restart goes last.

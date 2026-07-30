@@ -1210,6 +1210,7 @@ func newMeshApplicationTestDaemonAtRoot(t *testing.T, deviceID, root string) *Da
 		Mux:    config.MuxConfig{Backend: "tmux"}, Tmux: config.TmuxConfig{SocketName: "mesh-app-" + deviceID},
 		Hooks: config.HooksConfig{
 			HookOutputDir: filepath.Join(root, "hooks"), SessionStateDir: filepath.Join(root, "mux", "sessions"),
+			HistoryRoot: filepath.Join(root, "histories"),
 		},
 		Agents: config.DefaultAgentProfiles(),
 	}, testDiscardLogger())

@@ -16,7 +16,15 @@ import (
 	"github.com/lin-labs/arcmux/internal/daemon"
 )
 
-const version = "0.1.0"
+const (
+	version                    = "0.1.0"
+	summarizerSafetyCapability = "direct-api-only-v1"
+)
+
+var (
+	buildRevision = "unknown"
+	buildTime     = "unknown"
+)
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -61,14 +69,34 @@ func run(args []string) error {
 	case "info", "status":
 		return cmdInfo(args[1:], os.Stdout)
 	case "version":
-		fmt.Printf("arcmux %s\n", version)
-		return nil
+		return cmdVersion(args[1:], os.Stdout)
 	case "help", "--help", "-h":
 		printUsage()
 		return nil
 	default:
 		return fmt.Errorf("unknown command: %s (try 'arcmux help')", args[0])
 	}
+}
+
+func cmdVersion(args []string, stdout io.Writer) error {
+	info := struct {
+		Version          string `json:"version"`
+		Revision         string `json:"revision"`
+		BuildTime        string `json:"build_time"`
+		SummarizerSafety string `json:"summarizer_safety"`
+	}{
+		Version: version, Revision: buildRevision, BuildTime: buildTime,
+		SummarizerSafety: summarizerSafetyCapability,
+	}
+	if len(args) == 1 && args[0] == "--json" {
+		return json.NewEncoder(stdout).Encode(info)
+	}
+	if len(args) != 0 {
+		return fmt.Errorf("usage: arcmux version [--json]")
+	}
+	_, err := fmt.Fprintf(stdout, "arcmux %s revision=%s built=%s summarizer_safety=%s\n",
+		info.Version, info.Revision, info.BuildTime, info.SummarizerSafety)
+	return err
 }
 
 func cmdStart(args []string) error {
@@ -155,7 +183,7 @@ Usage:
   arcmux handoff retire <handoff-id> [options]            Retire only the immutable verified source session
   arcmux handoff list|show|retry                          Inspect or retry the durable handoff outbox
   arcmux pulse --project <slug> [--interval 10s] [--once] Debug-only: pulse one project (the daemon does this for all projects)
-  arcmux version                                          Print version
+  arcmux version [--json]                                 Print build revision and safety attestation
   arcmux help                                             Show this help
 
 The daemon listens on a Unix socket for gRPC requests. Orchestrators

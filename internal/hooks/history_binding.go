@@ -50,45 +50,76 @@ func ApplyVerifiedCanonicalHistoryBinding(stateDir, sessionID, agent, historyRoo
 // deliberately stops reading at the closing frontmatter fence; transcript body
 // text is neither an input nor an output of history attribution.
 func VerifyCanonicalHistoryBinding(historyRoot, basename, conversationID string) error {
+	_, err := readVerifiedCanonicalHistory(historyRoot, &CanonicalHistoryBinding{
+		Basename: basename, ConversationID: conversationID, Provenance: CanonicalHistoryBindingProvenance,
+	}, 0, false)
+	return err
+}
+
+// ReadVerifiedCanonicalHistory reads a bounded conversation body through the
+// same descriptor whose basename, file identity, and native conversation ID
+// are verified. Verification never races a second path-based open.
+func ReadVerifiedCanonicalHistory(historyRoot string, binding *CanonicalHistoryBinding, maxBodyBytes int) ([]byte, error) {
+	if maxBodyBytes <= 0 {
+		return nil, errors.New("canonical history body limit must be positive")
+	}
+	return readVerifiedCanonicalHistory(historyRoot, binding, maxBodyBytes, true)
+}
+
+func readVerifiedCanonicalHistory(historyRoot string, binding *CanonicalHistoryBinding, maxBodyBytes int, includeBody bool) ([]byte, error) {
+	if binding == nil || binding.Provenance != CanonicalHistoryBindingProvenance {
+		return nil, errors.New("canonical history binding is not trusted")
+	}
+	basename, conversationID := binding.Basename, binding.ConversationID
 	if err := validateCanonicalHistoryMetadata(basename, conversationID); err != nil {
-		return err
+		return nil, err
 	}
 	if !filepath.IsAbs(historyRoot) || filepath.Clean(historyRoot) != historyRoot {
-		return errors.New("canonical history root must be an absolute clean path")
+		return nil, errors.New("canonical history root must be an absolute clean path")
 	}
 	resolvedRoot, err := filepath.EvalSymlinks(historyRoot)
 	if err != nil {
-		return fmt.Errorf("resolve canonical history root: %w", err)
+		return nil, fmt.Errorf("resolve canonical history root: %w", err)
 	}
 	root, err := os.OpenRoot(resolvedRoot)
 	if err != nil {
-		return fmt.Errorf("open canonical history root: %w", err)
+		return nil, fmt.Errorf("open canonical history root: %w", err)
 	}
 	defer root.Close()
 
 	before, err := root.Lstat(basename)
 	if err != nil {
-		return fmt.Errorf("inspect canonical history: %w", err)
+		return nil, fmt.Errorf("inspect canonical history: %w", err)
 	}
 	if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
-		return errors.New("canonical history must be a regular non-symlink file")
+		return nil, errors.New("canonical history must be a regular non-symlink file")
 	}
 	file, err := root.Open(basename)
 	if err != nil {
-		return fmt.Errorf("open canonical history: %w", err)
+		return nil, fmt.Errorf("open canonical history: %w", err)
 	}
 	defer file.Close()
 	opened, err := file.Stat()
 	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
-		return errors.New("canonical history changed while opening")
+		return nil, errors.New("canonical history changed while opening")
 	}
 
 	fields, err := readCanonicalHistoryFrontmatter(&fileByteReader{reader: file})
 	if err != nil {
-		return fmt.Errorf("read canonical history frontmatter: %w", err)
+		return nil, fmt.Errorf("read canonical history frontmatter: %w", err)
 	}
 	if fields["conversation_id"] != conversationID {
-		return errors.New("canonical history conversation identity does not match the exact producer identity")
+		return nil, errors.New("canonical history conversation identity does not match the exact producer identity")
+	}
+	var body []byte
+	if includeBody {
+		body, err = io.ReadAll(io.LimitReader(file, int64(maxBodyBytes)+1))
+		if err != nil {
+			return nil, errors.New("read canonical history body")
+		}
+		if len(body) > maxBodyBytes {
+			return nil, errors.New("canonical history body exceeds size limit")
+		}
 	}
 
 	afterFile, fileErr := file.Stat()
@@ -97,9 +128,9 @@ func VerifyCanonicalHistoryBinding(historyRoot, basename, conversationID string)
 		!os.SameFile(opened, afterFile) || !os.SameFile(opened, afterPath) ||
 		afterFile.Size() != opened.Size() || afterPath.Size() != opened.Size() ||
 		!afterFile.ModTime().Equal(opened.ModTime()) || !afterPath.ModTime().Equal(opened.ModTime()) {
-		return errors.New("canonical history changed while validating frontmatter")
+		return nil, errors.New("canonical history changed while reading")
 	}
-	return nil
+	return body, nil
 }
 
 func validateCanonicalHistoryMetadata(basename, conversationID string) error {

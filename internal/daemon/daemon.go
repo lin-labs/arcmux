@@ -105,10 +105,6 @@ type Daemon struct {
 	// used by CreateSession's cwd resolution. Never nil.
 	platforms map[string]bool
 
-	// summarizing debounces on-demand session summarization (POST
-	// /session/summarize): at most one goal-model pass in flight per session.
-	summarizing sync.Map
-
 	// state is the daemon-level bbolt store backing the C1 substrate RPCs
 	// (Send/PeekInbox/AckInbox/QueryAudit). Opened at Start, lazily on
 	// first need if Start hasn't been called (test path). One file:
@@ -118,12 +114,10 @@ type Daemon struct {
 	stateMu sync.Mutex
 	state   *store.DB
 
-	goalSummaryMu       sync.Mutex
-	goalSummaryWG       sync.WaitGroup
-	goalSummaryAttempts map[string]goalSummaryAttempt
-	goalSummaryActive   map[string]bool
-	goalSummarySlots    chan struct{}
-	goalSummaryRunner   func(context.Context, string, string) (string, error)
+	goalSummaryWG        sync.WaitGroup
+	goalSummaries        *goalSummaryPool
+	goalSummaryPoolOwner bool
+	goalSummaryRunner    func(context.Context, string, string) (string, error)
 }
 
 // New creates a new daemon instance.
@@ -149,26 +143,25 @@ func New(cfg *config.Config, logger *slog.Logger) *Daemon {
 		projects, _ = project.Load(filepath.Join(os.TempDir(), "arcmux-no-such-projects.toml"))
 	}
 	return &Daemon{
-		cfg:                 cfg,
-		tmux:                tmux.NewClient(cfg.Tmux.SocketName),
-		mux:                 backend,
-		hooks:               hooks.NewInstaller(cfg.Hooks.HookOutputDir),
-		watcher:             hooks.NewWatcher(cfg.Hooks.HookOutputDir, logger),
-		profiles:            cfg.Agents,
-		projects:            projects,
-		platforms:           project.LoadPlatforms(""),
-		logger:              logger,
-		sessions:            make(map[string]*session.Session),
-		monitors:            make(map[string]context.CancelFunc),
-		processes:           make(map[string]*os.Process),
-		recorders:           make(map[string]*recorder),
-		healthEvents:        make(chan health.HealthEvent, 64),
-		eventBus:            NewEventBus(),
-		delivery:            delivery.NewController(newDeliveryJudge(cfg, logger), delivery.DefaultControllerConfig()),
-		goalSummaryAttempts: make(map[string]goalSummaryAttempt),
-		goalSummaryActive:   make(map[string]bool),
-		goalSummarySlots:    make(chan struct{}, goalSummaryGlobalLimit),
-		sessionIDGenerator:  generateSessionID,
+		cfg:                  cfg,
+		tmux:                 tmux.NewClient(cfg.Tmux.SocketName),
+		mux:                  backend,
+		hooks:                hooks.NewInstaller(cfg.Hooks.HookOutputDir),
+		watcher:              hooks.NewWatcher(cfg.Hooks.HookOutputDir, logger),
+		profiles:             cfg.Agents,
+		projects:             projects,
+		platforms:            project.LoadPlatforms(""),
+		logger:               logger,
+		sessions:             make(map[string]*session.Session),
+		monitors:             make(map[string]context.CancelFunc),
+		processes:            make(map[string]*os.Process),
+		recorders:            make(map[string]*recorder),
+		healthEvents:         make(chan health.HealthEvent, 64),
+		eventBus:             NewEventBus(),
+		delivery:             delivery.NewController(newDeliveryJudge(cfg, logger), delivery.DefaultControllerConfig()),
+		goalSummaries:        newGoalSummaryPool(goalSummaryGlobalLimit, goalSummaryQueueCapacity),
+		goalSummaryPoolOwner: true,
+		sessionIDGenerator:   generateSessionID,
 	}
 }
 
@@ -316,6 +309,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 	arcmuxv1.RegisterAgentRuntimeServer(d.server, NewGRPCServer(d))
 
 	// Start background loops
+	d.goalSummaries.start(d.ctx)
 	go d.relayHealthEvents()
 	go d.watcher.Run(d.ctx)
 	go d.persistLoop()
@@ -472,6 +466,9 @@ func (d *Daemon) beginStop() {
 	d.stopping = true
 	cancel := d.cancel
 	d.mu.Unlock()
+	if d.goalSummaryPoolOwner {
+		d.goalSummaries.stop()
+	}
 	if !alreadyStopping && cancel != nil {
 		cancel()
 	}
@@ -483,6 +480,9 @@ func (d *Daemon) drainOwnedProcesses() {
 	// the external tmux servers untouched across daemon restarts.
 	d.stopExecProcesses()
 	d.goalSummaryWG.Wait()
+	if d.goalSummaryPoolOwner {
+		d.goalSummaries.wait()
+	}
 }
 
 // ReloadMesh atomically swaps only the best-effort mesh transport. It never

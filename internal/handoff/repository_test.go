@@ -304,6 +304,7 @@ func TestPrepareRepositoryRepairsPushPolicyOnlyWithPreparationMarker(t *testing.
 		t.Fatal(err)
 	}
 	testGit(t, fixture.checkout, "worktree", "add", candidate, localBranch)
+	secureRepositoryTree(t, candidate)
 	prepared, err := PrepareRepository(context.Background(), manifest, fixture.project())
 	if err != nil {
 		t.Fatalf("PrepareRepository recovery: %v", err)
@@ -495,7 +496,22 @@ func setupRegisteredNoCheckout(t *testing.T, fixture *repositoryFixture, manifes
 		t.Fatalf("unknown marker mode %q", markerMode)
 	}
 	testGit(t, fixture.checkout, "worktree", "add", "--no-checkout", candidate, localBranch)
+	secureRepositoryTree(t, candidate)
 	return candidate, marker
+}
+
+// secureRepositoryTree makes hand-built interruption fixtures match the
+// production ownership invariant even on developer hosts with umask 0002.
+func secureRepositoryTree(t *testing.T, root string) {
+	t.Helper()
+	if err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.Mode()&os.ModeSymlink != 0 {
+			return err
+		}
+		return os.Chmod(path, info.Mode().Perm()&^0o022)
+	}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestPrepareRepositoryRecoversMarkerOwnedRegisteredNoCheckout(t *testing.T) {

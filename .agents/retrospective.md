@@ -46,6 +46,15 @@ codified checks live in `.agents/validate.md`.
   retries got the box device-code rate-limited (429). Prevention: probe listed
   in `.agents/validate.md` ("Goal summarizer probe"); run it whenever a
   feature built on a best-effort dependency produces mysteriously empty fields.
+- **A tracked stop gate is not protection unless startup is disabled and the
+  installed binary is verified.** The unauthenticated summarizer storm was
+  contained on 2026-07-26 with a P0 saying production must remain stopped, but
+  the service restarted 35 minutes later on the stale pre-hardening binary and
+  produced a larger Grok/Chrome storm on 2026-07-30. Prevention: while a
+  no-restart issue is open, require both `systemctl --user is-active` =
+  `inactive` and `systemctl --user is-enabled` = `disabled`; before restart,
+  compare installed-binary build markers/version to the verified source and
+  satisfy the explicit release gate in `.agents/validate.md`.
 
 ## Successful patterns worth reinforcing
 
@@ -62,6 +71,10 @@ codified checks live in `.agents/validate.md`.
   verify arcmux features on itself (2026-07-12: artifact capture, summarize,
   feature-slug tmux rename all proven against the verifying session's own
   state doc). Cheapest possible end-to-end fixture — prefer it.
+- **Quiesce the spawner before clearing a process storm.** `SIGSTOP` on the
+  confirmed daemon parent halted creation without killing the diagnostic pane;
+  exact-name child cleanup plus inspection of systemd `KillMode=process` then
+  enabled a clean daemon stop while preserving tmux sessions.
 
 ## Where retro findings from this project should land
 

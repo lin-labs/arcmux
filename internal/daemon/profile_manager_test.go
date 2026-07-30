@@ -67,9 +67,9 @@ func TestProfileManager_CreateRemoveRestart(t *testing.T) {
 		t.Fatalf("profile hook output is not isolated: alpha=%q beta=%q",
 			pm.daemons["alpha"].cfg.Hooks.HookOutputDir, pm.daemons["beta"].cfg.Hooks.HookOutputDir)
 	}
-	if pm.daemons["alpha"].goalSummarySlots != parent.goalSummarySlots ||
-		pm.daemons["beta"].goalSummarySlots != parent.goalSummarySlots {
-		t.Fatal("profile daemons do not share the process-wide current-work limiter")
+	if pm.daemons["alpha"].goalSummaries != parent.goalSummaries ||
+		pm.daemons["beta"].goalSummaries != parent.goalSummaries {
+		t.Fatal("profile daemons do not share the process-wide current-work worker pool")
 	}
 	if pm.daemons["alpha"].mesh != nil || pm.daemons["beta"].mesh != nil {
 		t.Fatal("profile daemon started the machine-scoped mesh")

@@ -21,6 +21,10 @@ func TestDeliveryDefaults(t *testing.T) {
 	if cfg.Hooks.SessionStateDir == "" || !filepath.IsAbs(cfg.Hooks.SessionStateDir) {
 		t.Fatalf("session_state_dir = %q, want absolute default", cfg.Hooks.SessionStateDir)
 	}
+	if cfg.Hooks.HistoryRoot == "" || !filepath.IsAbs(cfg.Hooks.HistoryRoot) ||
+		!strings.HasSuffix(cfg.Hooks.HistoryRoot, filepath.Join("agents", "histories")) {
+		t.Fatalf("history_root = %q, want absolute canonical history root", cfg.Hooks.HistoryRoot)
+	}
 	// ~/data/mux is the PROTOCOL state root — shared by every subscriber,
 	// deliberately not named after this application.
 	if !strings.HasSuffix(cfg.Hooks.SessionStateDir, filepath.Join("mux", "sessions")) {
@@ -40,6 +44,7 @@ judge = "hooks"
 
 [hooks]
 session_state_dir = "~/data/arcmux/sessions"
+history_root = "~/agents/histories"
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -52,6 +57,9 @@ session_state_dir = "~/data/arcmux/sessions"
 	}
 	if strings.HasPrefix(cfg.Hooks.SessionStateDir, "~") {
 		t.Fatalf("session_state_dir not expanded: %q", cfg.Hooks.SessionStateDir)
+	}
+	if strings.HasPrefix(cfg.Hooks.HistoryRoot, "~") {
+		t.Fatalf("history_root not expanded: %q", cfg.Hooks.HistoryRoot)
 	}
 }
 
@@ -92,6 +100,12 @@ func TestCurrentWorkProviderRejectsUnknownOrRelativeCredentialFile(t *testing.T)
 	for name, body := range map[string]string{
 		"unknown provider": `[current_work]
 provider = "agent-cli"
+`,
+		"legacy CLI provider": `[current_work]
+provider = "legacy-cli"
+`,
+		"legacy binary capability": `[current_work]
+legacy_bin = "grok"
 `,
 		"relative key file": `[current_work]
 provider = "openai"
