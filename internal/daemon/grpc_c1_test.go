@@ -199,6 +199,22 @@ func TestListSessionsBindsProfileScopeAndCanonicalHistory(t *testing.T) {
 	}
 }
 
+func TestStatusIncludesTmuxAttachMetadata(t *testing.T) {
+	srv, d, _ := newC1TestServer(t)
+	d.cfg.Tmux.SocketName = "custom-arcmux"
+	sess := injectSession(t, d, "attachable", "owner", session.StateIdle)
+	sess.TmuxSessionName = "blin-agent:with-colon"
+	sess.TmuxTarget = "%42"
+
+	resp, err := srv.Status(context.Background(), &arcmuxv1.StatusRequest{SessionId: sess.ID})
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if resp.GetTmuxSession() != sess.TmuxSessionName || resp.GetTmuxSocket() != d.cfg.Tmux.SocketName {
+		t.Fatalf("attach metadata = session %q socket %q, want session %q socket %q", resp.GetTmuxSession(), resp.GetTmuxSocket(), sess.TmuxSessionName, d.cfg.Tmux.SocketName)
+	}
+}
+
 // TestSend_QueuedWhenNotReady drives the C1 routing predicate: a non-idle
 // session forces the queue path. Verifies msg_id is returned, the inbox
 // bucket is created, the body lands in the queue, and the audit row

@@ -113,6 +113,8 @@ message StatusResponse {
   int32 nudge_count = 9;
   HookState hook_state = 10;
   string owner_id = 11;       // C1: echo for attribution
+  string tmux_session = 12;   // exact tmux session for interactive attach
+  string tmux_socket = 13;    // tmux server socket name for interactive attach
 }
 
 message HookState {

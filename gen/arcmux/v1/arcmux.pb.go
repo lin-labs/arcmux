@@ -530,7 +530,9 @@ type StatusResponse struct {
 	Health         string                 `protobuf:"bytes,8,opt,name=health,proto3" json:"health,omitempty"` // "healthy", "stuck", "escalated"
 	NudgeCount     int32                  `protobuf:"varint,9,opt,name=nudge_count,json=nudgeCount,proto3" json:"nudge_count,omitempty"`
 	HookState      *HookState             `protobuf:"bytes,10,opt,name=hook_state,json=hookState,proto3" json:"hook_state,omitempty"`
-	OwnerId        string                 `protobuf:"bytes,11,opt,name=owner_id,json=ownerId,proto3" json:"owner_id,omitempty"` // C1: echo for attribution
+	OwnerId        string                 `protobuf:"bytes,11,opt,name=owner_id,json=ownerId,proto3" json:"owner_id,omitempty"`             // C1: echo for attribution
+	TmuxSession    string                 `protobuf:"bytes,12,opt,name=tmux_session,json=tmuxSession,proto3" json:"tmux_session,omitempty"` // exact tmux session for interactive attach
+	TmuxSocket     string                 `protobuf:"bytes,13,opt,name=tmux_socket,json=tmuxSocket,proto3" json:"tmux_socket,omitempty"`    // tmux server socket name for interactive attach
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -638,6 +640,20 @@ func (x *StatusResponse) GetHookState() *HookState {
 func (x *StatusResponse) GetOwnerId() string {
 	if x != nil {
 		return x.OwnerId
+	}
+	return ""
+}
+
+func (x *StatusResponse) GetTmuxSession() string {
+	if x != nil {
+		return x.TmuxSession
+	}
+	return ""
+}
+
+func (x *StatusResponse) GetTmuxSocket() string {
+	if x != nil {
+		return x.TmuxSocket
 	}
 	return ""
 }
@@ -2211,7 +2227,7 @@ const file_arcmux_v1_arcmux_proto_rawDesc = "" +
 	"idle_since\x18\x05 \x01(\tR\tidleSince\".\n" +
 	"\rStatusRequest\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x01 \x01(\tR\tsessionId\"\xe0\x02\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\"\xa4\x03\n" +
 	"\x0eStatusResponse\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x14\n" +
@@ -2229,7 +2245,10 @@ const file_arcmux_v1_arcmux_proto_rawDesc = "" +
 	"\n" +
 	"hook_state\x18\n" +
 	" \x01(\v2\x14.arcmux.v1.HookStateR\thookState\x12\x19\n" +
-	"\bowner_id\x18\v \x01(\tR\aownerId\"\x92\x01\n" +
+	"\bowner_id\x18\v \x01(\tR\aownerId\x12!\n" +
+	"\ftmux_session\x18\f \x01(\tR\vtmuxSession\x12\x1f\n" +
+	"\vtmux_socket\x18\r \x01(\tR\n" +
+	"tmuxSocket\"\x92\x01\n" +
 	"\tHookState\x12\x16\n" +
 	"\x06source\x18\x01 \x01(\tR\x06source\x12\"\n" +
 	"\rlast_tool_use\x18\x02 \x01(\tR\vlastToolUse\x12#\n" +

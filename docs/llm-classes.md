@@ -26,8 +26,12 @@ arcmux-cli agents          # JSON: name, class, transport, exec_driver, hook_typ
 arcmux-cli create --agent grok --cwd ~/Projects/x --name my-grok --owner me
 echo "do the thing" | arcmux-cli send <session_id>     # ConfirmDelivery + WaitIdle
 arcmux-cli capture <session_id>
-tmux -L <tmux-socket-name> attach -t <session-name>     # human attach (socket per daemon profile)
+arcmux-cli attach <session_id>                           # human attach by stable ID
 ```
+
+`attach` asks the daemon for the configured tmux socket and exact session name,
+then runs tmux with both values. It is the preferred human attach path; the
+manual form remains useful when inspecting a session outside arcmux.
 
 The daemon creates a dedicated tmux session under its configured tmux socket,
 launches the agent with a fail-safe env loader (`eval "$(arcmux hook-env <scope> <id>)"`),

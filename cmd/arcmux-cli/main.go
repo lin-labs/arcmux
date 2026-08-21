@@ -33,7 +33,7 @@ func die(err error) {
 
 func main() {
 	if len(os.Args) < 2 {
-		die(fmt.Errorf("usage: arcmux-cli create|exec|agents|list|send|capture|status|kill|audit|inbox|ready|voice [args]"))
+		die(fmt.Errorf("usage: arcmux-cli create|exec|agents|list|send|capture|status|attach|kill|audit|inbox|ready|voice [args]"))
 	}
 	cmd := os.Args[1]
 
@@ -177,6 +177,10 @@ func main() {
 			die(err)
 		}
 		enc.Encode(map[string]any{"state": r.State, "health": r.Health, "agent": r.Agent})
+	case "attach":
+		if err := cmdAttach(ctx, c, os.Args[2:], os.Stdin, os.Stdout, os.Stderr, runTmuxAttach); err != nil {
+			die(err)
+		}
 	case "list":
 		// Optional --owner <id> filter; default lists all sessions.
 		var ownerFilter string

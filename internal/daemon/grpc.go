@@ -123,6 +123,8 @@ func (s *GRPCServer) Status(ctx context.Context, req *arcmuxv1.StatusRequest) (*
 		Health:         snap.Health,
 		NudgeCount:     int32(snap.NudgeCount),
 		OwnerId:        snap.OwnerID,
+		TmuxSession:    snap.TmuxSessionName,
+		TmuxSocket:     s.daemon.cfg.Tmux.SocketName,
 	}
 
 	// Populate hook state from watcher
