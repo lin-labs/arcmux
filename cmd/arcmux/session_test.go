@@ -69,3 +69,61 @@ func TestSessionSelfRejectsForgedEnvAndEmitsExplicitMissingHistory(t *testing.T)
 		t.Fatalf("missing history JSON = %s", out.String())
 	}
 }
+
+func TestSessionListPrintsFetchedCatalog(t *testing.T) {
+	fetch := func(configPath string) (sessionCatalogList, error) {
+		if configPath != "/tmp/arcmux.toml" {
+			t.Fatalf("config path=%q", configPath)
+		}
+		return sessionCatalogList{
+			ObservedAt: "2026-08-30T19:00:00Z",
+			Sessions: []sessionCatalogRecord{
+				{
+					RemoteSessionKey: "profile:olympus/s-123",
+					ProfileScope:     "profile:olympus",
+					SessionID:        "s-123",
+					SessionName:      "pr-01-g001",
+					Agent:            "codex",
+					State:            "working",
+					CWD:              "/repo/pr-01",
+					TmuxSessionName:  "blin-stack-pr-01",
+					StartedAt:        "2026-08-30T18:55:00Z",
+					LastActivityAt:   "2026-08-30T18:59:00Z",
+				},
+			},
+		}, nil
+	}
+	var out bytes.Buffer
+	if err := cmdSessionWithDeps(
+		[]string{"list", "--json", "--config", "/tmp/arcmux.toml"},
+		&out,
+		func(string) string { return "" },
+		nil,
+		fetch,
+	); err != nil {
+		t.Fatal(err)
+	}
+	var got sessionCatalogList
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ObservedAt != "2026-08-30T19:00:00Z" || len(got.Sessions) != 1 {
+		t.Fatalf("catalog=%+v", got)
+	}
+	if got.Sessions[0].RemoteSessionKey != "profile:olympus/s-123" || got.Sessions[0].TmuxSessionName != "blin-stack-pr-01" {
+		t.Fatalf("record=%+v", got.Sessions[0])
+	}
+}
+
+func TestSessionListRequiresJSON(t *testing.T) {
+	err := cmdSessionWithDeps(
+		[]string{"list"},
+		&bytes.Buffer{},
+		func(string) string { return "" },
+		nil,
+		func(string) (sessionCatalogList, error) { return sessionCatalogList{}, nil },
+	)
+	if err == nil || err.Error() != "usage: arcmux session list --json [--config path]" {
+		t.Fatalf("err=%v", err)
+	}
+}

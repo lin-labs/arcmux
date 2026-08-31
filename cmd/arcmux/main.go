@@ -142,6 +142,7 @@ Usage:
   arcmux mesh artifact <peer> <kind> <source-id>          Fetch one live remote artifact reference
   arcmux mesh subscribe <peer> [topics...]                Subscribe to typed session/artifact updates
   arcmux session self --json                               Print this supervised agent's exact local session locator
+  arcmux session list --json [--config path]              Export local runtime session facts for cmux-side joins
   arcmux artifact record --kind K --id ID [metadata]      Record a local artifact reference
   arcmux artifact list [--kind kind]                      List local and synchronized artifact references
   arcmux surface bind <device> <scope> <session-id>       Bind this cmux surface to an exact remote session

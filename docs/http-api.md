@@ -199,6 +199,69 @@ curl -s "http://127.0.0.1:7777/sessions" | jq
 
 ---
 
+## `GET /session-catalog`
+
+Export machine-local runtime session facts for downstream joiners such as the
+local cmux metadata indexer. This is a read-only catalog view over the daemon's
+current session sources.
+
+### Response
+
+`200 OK`
+```json
+{
+  "observed_at": "2026-08-31T04:18:00Z",
+  "sessions": [
+    {
+      "remote_session_key": "profile:olympus/s-1779483006907958000",
+      "profile_scope": "profile:olympus",
+      "session_id": "s-1779483006907958000",
+      "session_name": "trigger-group-grading-pr-01",
+      "agent": "codex",
+      "state": "idle",
+      "owner_id": "olympus:trigger-group-grading",
+      "transport": "tmux",
+      "cwd": "/home/blin/Projects/olympus",
+      "tmux_target": "%42",
+      "tmux_session_name": "blin-stack-trigger-group-grading-pr-01-g001",
+      "started_at": "2026-08-31T04:17:12Z",
+      "last_activity_at": "2026-08-31T04:17:55Z",
+      "history_basename": "2026-08-30-21-cmux-metadata-join.md"
+    }
+  ]
+}
+```
+
+Field semantics:
+
+- `remote_session_key` — deterministic join key for machine-local consumers.
+  The current form is `<profile_scope>/<session_id>`.
+- `profile_scope` — the daemon-local source scope, usually a profile such as
+  `profile:olympus`.
+- `session_id` / `session_name` — the arcmux session identity and friendly
+  session name.
+- `agent` / `state` / `owner_id` / `transport` — existing session facts from
+  the live catalog.
+- `cwd` — omitted for private sessions.
+- `tmux_target` / `tmux_session_name` — tmux attachment facts when known.
+- `history_basename` — basename of the projected history file when the session
+  is tracked in the session catalog.
+
+### Notes
+
+- This endpoint is local-runtime data, not a durable registry. A session may
+  disappear between reads.
+- The response is sorted by `profile_scope`, then `session_id`.
+- Consumers should treat unknown fields as forward-compatible additions.
+
+### Example
+
+```bash
+curl -s "http://127.0.0.1:7777/session-catalog" | jq
+```
+
+---
+
 ## `POST|GET /session/close`
 
 Kill the tmux pane for a session and remove it from the registry.

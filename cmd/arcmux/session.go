@@ -7,11 +7,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"time"
 
 	arcmuxv1 "github.com/lin-labs/arcmux/gen/arcmux/v1"
+	"github.com/lin-labs/arcmux/internal/config"
 	"github.com/lin-labs/arcmux/internal/sessionview"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -35,19 +37,68 @@ type sessionSelfCatalogRecord struct {
 }
 
 type sessionSelfCatalogLookup func(string, string) (sessionSelfCatalogRecord, error)
+type sessionCatalogFetcher func(string) (sessionCatalogList, error)
+
+type sessionCatalogRecord struct {
+	RemoteSessionKey string  `json:"remote_session_key"`
+	ProfileScope     string  `json:"profile_scope"`
+	SessionID        string  `json:"session_id"`
+	SessionName      string  `json:"session_name"`
+	Agent            string  `json:"agent"`
+	State            string  `json:"state"`
+	OwnerID          string  `json:"owner_id,omitempty"`
+	Transport        string  `json:"transport,omitempty"`
+	CWD              string  `json:"cwd,omitempty"`
+	TmuxTarget       string  `json:"tmux_target,omitempty"`
+	TmuxSessionName  string  `json:"tmux_session_name,omitempty"`
+	StartedAt        string  `json:"started_at"`
+	LastActivityAt   string  `json:"last_activity_at"`
+	HistoryBasename  *string `json:"history_basename"`
+}
+
+type sessionCatalogList struct {
+	ObservedAt string                 `json:"observed_at"`
+	Sessions   []sessionCatalogRecord `json:"sessions"`
+}
 
 func cmdSession(args []string, stdout io.Writer) error {
-	return cmdSessionWithRuntime(args, stdout, os.Getenv, lookupSessionSelfCatalog)
+	return cmdSessionWithDeps(
+		args, stdout, os.Getenv, lookupSessionSelfCatalog, fetchSessionCatalog,
+	)
 }
 
 func cmdSessionWithRuntime(args []string, stdout io.Writer, getenv func(string) string, catalog sessionSelfCatalogLookup) error {
-	if len(args) == 0 || args[0] != "self" {
-		return errors.New("usage: arcmux session self --json")
+	return cmdSessionWithDeps(args, stdout, getenv, catalog, nil)
+}
+
+func cmdSessionWithDeps(
+	args []string,
+	stdout io.Writer,
+	getenv func(string) string,
+	catalog sessionSelfCatalogLookup,
+	fetchCatalog sessionCatalogFetcher,
+) error {
+	if len(args) == 0 {
+		return errors.New("usage: arcmux session self --json | arcmux session list --json [--config path]")
+	}
+	switch args[0] {
+	case "self":
+		return cmdSessionSelf(args[1:], stdout, getenv, catalog)
+	case "list":
+		return cmdSessionList(args[1:], stdout, fetchCatalog)
+	default:
+		return errors.New("usage: arcmux session self --json | arcmux session list --json [--config path]")
+	}
+}
+
+func cmdSessionSelf(args []string, stdout io.Writer, getenv func(string) string, catalog sessionSelfCatalogLookup) error {
+	if catalog == nil {
+		return errors.New("arcmux session catalog lookup is unavailable")
 	}
 	fs := flag.NewFlagSet("session self", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	asJSON := fs.Bool("json", false, "print JSON")
-	if err := fs.Parse(args[1:]); err != nil {
+	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 || !*asJSON {
@@ -58,6 +109,62 @@ func cmdSessionWithRuntime(args []string, stdout io.Writer, getenv func(string) 
 		return err
 	}
 	return json.NewEncoder(stdout).Encode(identity)
+}
+
+func cmdSessionList(args []string, stdout io.Writer, fetch sessionCatalogFetcher) error {
+	if fetch == nil {
+		return errors.New("arcmux session export is unavailable")
+	}
+	fs := flag.NewFlagSet("session list", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	asJSON := fs.Bool("json", false, "print JSON")
+	configPath := fs.String("config", "", "config path")
+	fs.StringVar(configPath, "c", "", "config path")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 || !*asJSON {
+		return errors.New("usage: arcmux session list --json [--config path]")
+	}
+	catalog, err := fetch(*configPath)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(stdout).Encode(catalog)
+}
+
+func fetchSessionCatalog(configPath string) (sessionCatalogList, error) {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return sessionCatalogList{}, fmt.Errorf("load config: %w", err)
+	}
+	if cfg.Daemon.HTTPAddr == "" {
+		return sessionCatalogList{}, errors.New("daemon http_addr is disabled")
+	}
+	request, err := http.NewRequest(http.MethodGet, "http://"+cfg.Daemon.HTTPAddr+"/session-catalog", nil)
+	if err != nil {
+		return sessionCatalogList{}, fmt.Errorf("build request: %w", err)
+	}
+	if cfg.Daemon.HTTPAuthToken != "" {
+		request.Header.Set("Authorization", "Bearer "+cfg.Daemon.HTTPAuthToken)
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	response, err := client.Do(request)
+	if err != nil {
+		return sessionCatalogList{}, fmt.Errorf("fetch session catalog: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode >= 300 {
+		body, _ := io.ReadAll(response.Body)
+		return sessionCatalogList{}, fmt.Errorf(
+			"session catalog API %s: %s", response.Status, string(body),
+		)
+	}
+	var payload sessionCatalogList
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		return sessionCatalogList{}, fmt.Errorf("decode session catalog: %w", err)
+	}
+	return payload, nil
 }
 
 func resolveSessionSelf(getenv func(string) string, catalog sessionSelfCatalogLookup) (sessionSelfIdentity, error) {
