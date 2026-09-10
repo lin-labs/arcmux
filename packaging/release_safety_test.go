@@ -28,10 +28,34 @@ func TestReleaseRequiresSafetyAttestationAndPreservesInactiveService(t *testing.
 			t.Fatalf("Makefile release safety is missing %q", required)
 		}
 	}
-	if strings.Contains(makefile, "systemctl --user enable $(BINARY).service; \\") {
-		t.Fatal("service-install still unconditionally enables an inactive service")
+	// A fresh install must stay inactive, but a box already running arcmux from a
+	// disabled unit must get enabled or it dies at the next reboot. Both live in
+	// service-install, so check placement: every `enable` must sit inside the
+	// was_active branch. A bare substring check cannot tell the two apart.
+	guard := strings.Index(makefile, "if [ \"$$was_active\" = true ]; then")
+	inactive := strings.Index(makefile, "echo \"installed systemd user unit; left it inactive\"")
+	if guard < 0 || inactive < 0 || guard >= inactive {
+		t.Fatal("service-install lost its was_active guard around the inactive path")
+	}
+	for _, at := range enableOffsets(makefile, "systemctl --user enable $(BINARY).service") {
+		if at < guard || at > inactive {
+			t.Fatalf("service-install enables the unit outside the was_active branch (offset %d)", at)
+		}
 	}
 	if strings.Contains(makefile, "ALLOW_DIRTY_BUILD") {
 		t.Fatal("release attestation exposes a dirty-build bypass")
+	}
+}
+
+// enableOffsets returns every byte offset of needle in haystack.
+func enableOffsets(haystack, needle string) []int {
+	var out []int
+	for at := 0; ; {
+		i := strings.Index(haystack[at:], needle)
+		if i < 0 {
+			return out
+		}
+		out = append(out, at+i)
+		at += i + len(needle)
 	}
 }

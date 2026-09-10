@@ -154,6 +154,7 @@ func serviceFixture(t *testing.T, platform, active, target string) (string, stri
 		"printf 'systemctl %s\\n' \"$*\" >> \"$SERVICE_TEST_LOG\"\n"+
 			"case \" $* \" in\n"+
 			"  *\" is-active \"*) [ \"$FAKE_ACTIVE\" = 1 ]; exit ;;\n"+
+			"  *\" list-unit-files \"*) printf '%s\\n' 'arcmux.service disabled enabled' ;;\n"+
 			"  *\" show \"*\" LoadState \"*) printf '%s\\n' \"$FAKE_LOAD_STATE\" ;;\n"+
 			"  *\" disable \"*) [ \"$FAKE_DISABLE_FAIL\" != 1 ] || exit 42 ;;\n"+
 			"esac\n"+
@@ -217,6 +218,27 @@ func TestLinuxReleaseRefreshesUnitBeforeRestart(t *testing.T) {
 	restart := strings.Index(log, "systemctl --user restart arcmux.service")
 	if reload < 0 || restart < 0 || reload >= restart {
 		t.Fatalf("release did not refresh the unit before restart:\n%s", log)
+	}
+}
+
+// Boot durability, not just "is it running now". On 2026-09-10 labs came up
+// from a reboot with no arcmux: the unit was loaded but disabled, so nothing
+// started it. `Restart=always` only covers crashes.
+func TestLinuxStartEnablesUnitForBoot(t *testing.T) {
+	_, _, log := serviceFixture(t, "Linux", "0", "start")
+	if !strings.Contains(log, "systemctl --user enable --now arcmux") {
+		t.Fatalf("make start must enable the unit so arcmux survives reboot:\n%s", log)
+	}
+}
+
+// A box that is running arcmux from a disabled unit is one reboot from silence.
+// Releasing onto it must heal that, without activating a fresh inactive install.
+func TestLinuxServiceInstallEnablesActiveUnitForBoot(t *testing.T) {
+	_, _, log := serviceFixture(t, "Linux", "1", "service-install")
+	enable := strings.Index(log, "systemctl --user enable arcmux.service")
+	restart := strings.Index(log, "systemctl --user restart arcmux.service")
+	if enable < 0 || restart < 0 || enable >= restart {
+		t.Fatalf("active service-install must enable the unit before restarting:\n%s", log)
 	}
 }
 

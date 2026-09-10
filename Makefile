@@ -138,11 +138,17 @@ HAS_SYSTEMD_UNIT = systemctl --user list-unit-files $(BINARY).service 2>/dev/nul
 # systemd unit-file check, so stop→start round-trips still route to launchd.
 HAS_LAUNCHD_AGENT = test -f $(LAUNCHD_PLIST)
 
+# `enable --now` (not bare `start`) so the daemon survives a reboot. This is the
+# real analogue of the launchd path below: `launchctl bootstrap` persists the
+# agent in the login domain, so macOS comes back after boot. `Restart=always` in
+# the unit only covers crashes, so a `start`-only Linux box silently loses arcmux
+# at the next reboot. `make start` is an explicit request to run, so enabling it
+# is in scope; the fresh `service-install` path stays inactive by design.
 start:
 	@mkdir -p $(LOG_DIR)
 	@if $(HAS_SYSTEMD_UNIT); then \
-		systemctl --user start $(BINARY); \
-		echo "started $(BINARY) via systemd"; \
+		systemctl --user enable --now $(BINARY); \
+		echo "started $(BINARY) via systemd (enabled at boot)"; \
 	elif $(HAS_LAUNCHD_AGENT); then \
 		launchctl bootstrap gui/$$(id -u) $(LAUNCHD_PLIST) 2>/dev/null \
 			|| launchctl kickstart gui/$$(id -u)/$(LAUNCHD_LABEL); \
@@ -228,6 +234,7 @@ service-install: install verify-installed
 	        $(SYSTEMD_TEMPLATE) > $(SYSTEMD_UNIT); \
 	    systemctl --user daemon-reload; \
 	    if [ "$$was_active" = true ]; then \
+	      systemctl --user enable $(BINARY).service; \
 	      systemctl --user restart $(BINARY).service; \
 	      echo "refreshed active systemd user unit $(BINARY).service"; \
 	    else \
