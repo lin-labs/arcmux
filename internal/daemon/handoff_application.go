@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -552,6 +553,9 @@ func (a *handoffApplication) resumeLaunch(ctx context.Context, record handoff.Ta
 		if errors.Is(err, errHandoffLaunchConflict) {
 			return a.reject(current, handoff.FailureLaunch, "target continuation conflicts with durable launch state")
 		}
+		if errors.Is(err, errHandoffLaunchAgentDied) {
+			return a.reject(current, handoff.FailureLaunch, err.Error())
+		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return meshHandoffStatus{}, ctxErr
 		}
@@ -587,6 +591,10 @@ func (a *handoffApplication) resumeLaunch(ctx context.Context, record handoff.Ta
 }
 
 var errHandoffLaunchConflict = errors.New("handoff launch conflict")
+
+// errHandoffLaunchAgentDied marks a target agent that exited before it was
+// ready, e.g. a trust dialog answered "No, exit" (arcmux-c4i).
+var errHandoffLaunchAgentDied = errors.New("target agent failed during startup")
 
 func (a *handoffApplication) targetLaunchSession(ctx context.Context, record handoff.TargetRecord, prepared handoff.RepositoryPreparation, instructionsPath string) (*session.Session, handoff.TargetRecord, bool, error) {
 	name, owner := handoffLaunchSessionIdentity(record)
@@ -655,7 +663,9 @@ func (a *handoffApplication) targetLaunchSession(ctx context.Context, record han
 		switch snap.State {
 		case session.StateIdle:
 			return sess, record, false, nil
-		case session.StateExited, session.StateFailed, session.StateWorking:
+		case session.StateExited, session.StateFailed:
+			return nil, record, false, fmt.Errorf("%w: session %s is %s; see the daemon log for its handshake error", errHandoffLaunchAgentDied, snap.ID, snap.State)
+		case session.StateWorking:
 			return nil, record, false, errHandoffLaunchConflict
 		}
 		select {

@@ -929,3 +929,13 @@ func seedSourceHandoffState(t *testing.T, store *handoff.Store, manifest handoff
 	t.Fatalf("unsupported source state %s", state)
 	return handoff.SourceRecord{}
 }
+
+func TestRemoteFailureReasonIsBoundedPrintableASCII(t *testing.T) {
+	if got := remoteFailureReason(nil); got != "" {
+		t.Fatalf("nil failure = %q", got)
+	}
+	got := remoteFailureReason(&meshHandoffFailureDTO{Message: "agent died\n\x1b[31m❯" + strings.Repeat("x", 300)})
+	if !strings.HasPrefix(got, ": agent died[31m") || len(got) != 2+160 {
+		t.Fatalf("reason = %q (len %d)", got, len(got))
+	}
+}

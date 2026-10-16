@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -736,7 +737,7 @@ func (o *sourceHandoffOutbox) attempt(ctx context.Context, id string, force bool
 			code = remote.Failure.Code
 		}
 		return o.transitionFailed(record, handoff.Failure{
-			Code: code, Message: "target rejected handoff preparation", Retryable: false,
+			Code: code, Message: "target rejected handoff preparation" + remoteFailureReason(remote.Failure), Retryable: false,
 			At: sourceTransitionTime(o.now, record.Updated),
 		})
 	default:
@@ -834,7 +835,7 @@ func (o *sourceHandoffOutbox) attemptLaunch(ctx context.Context, id string, forc
 			code = remote.Failure.Code
 		}
 		return o.transitionFailed(record, handoff.Failure{
-			Code: code, Message: "target rejected handoff launch", At: sourceTransitionTime(o.now, record.Updated),
+			Code: code, Message: "target rejected handoff launch" + remoteFailureReason(remote.Failure), At: sourceTransitionTime(o.now, record.Updated),
 		})
 	default:
 		return o.transitionFailed(record, handoff.Failure{
@@ -931,6 +932,27 @@ func sourceLaunchCallFailure(err error, at time.Time) (handoff.Failure, bool) {
 		return handoff.Failure{Code: handoff.FailureInternal, Message: "local handoff launch protocol is unavailable", At: at}, false
 	}
 	return failure, true
+}
+
+// remoteFailureReason quotes a peer's rejection reason, bounded to printable
+// ASCII, so operators see why without storing arbitrary peer text (arcmux-c4i).
+func remoteFailureReason(failure *meshHandoffFailureDTO) string {
+	if failure == nil {
+		return ""
+	}
+	reason := strings.Map(func(r rune) rune {
+		if r < 0x20 || r > 0x7e {
+			return -1
+		}
+		return r
+	}, failure.Message)
+	if len(reason) > 160 {
+		reason = reason[:160]
+	}
+	if reason == "" {
+		return ""
+	}
+	return ": " + reason
 }
 
 func validSourceFailureCode(code handoff.FailureCode) bool {

@@ -1736,3 +1736,43 @@ func newHandoffTestApplication(t *testing.T, writeHistory bool) (*handoffApplica
 	app.prepareRepository = func(context.Context, handoff.Manifest, project.ResolvedProject) error { return nil }
 	return app, manifest
 }
+
+// arcmux-c4i: an agent that dies during its handshake (e.g. a trust dialog
+// answered "No, exit") must be reported as such, not as a state conflict.
+func TestHandoffLaunchReportsAgentDeathDuringStartup(t *testing.T) {
+	app, manifest := newHandoffTestApplication(t, true)
+	app.launchRendezvousRoot = filepath.Join(t.TempDir(), "handoff-receive")
+	prepared := prepareTargetHandoffForLaunch(t, app, manifest)
+	worktree := t.TempDir()
+	app.prepareLaunchRepo = func(context.Context, handoff.Manifest, project.ResolvedProject) (handoff.RepositoryPreparation, error) {
+		return handoff.RepositoryPreparation{
+			WorktreePath: worktree, Head: manifest.Repository.SourceHead,
+			LocalBranch: manifest.Repository.Branch, SourceBranch: manifest.Repository.Branch,
+		}, nil
+	}
+	var created *session.Session
+	app.createSession = func(_ context.Context, request CreateSessionRequest) (*session.Session, bool, error) {
+		created = session.NewSession("target-session", request.Name, request.Agent, request.CWD)
+		created.SetOwnerID(request.OwnerID)
+		created.SetEnv(request.Env)
+		created.MarkPrivate()
+		created.SetState(session.StateFailed)
+		return created, true, nil
+	}
+	app.lookupSession = func(id string) (*session.Session, bool) { return created, created != nil }
+	app.sendPrompt = func(context.Context, string, string, bool, bool) error {
+		t.Fatal("a dead agent must not be prompted")
+		return nil
+	}
+	app.persistSessions = func() error { return nil }
+	app.launchPoll = time.Millisecond
+
+	status, err := app.launch(context.Background(), arcmuxmesh.Principal{PeerID: "client"}, "server", meshHandoffLaunchRequest{
+		HandoffID: manifest.HandoffID, ManifestDigest: prepared.Digest,
+	})
+	if err != nil || status.State != handoff.TargetRejected || status.Failure == nil ||
+		!strings.Contains(status.Failure.Message, "target agent failed during startup") ||
+		!strings.Contains(status.Failure.Message, "target-session") {
+		t.Fatalf("launch status=%+v failure=%+v err=%v", status, status.Failure, err)
+	}
+}

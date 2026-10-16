@@ -102,20 +102,24 @@ func (d *Daemon) handleTrustPrompt(ctx context.Context, target string, prof prof
 		return false, err
 	}
 
-	if !containsFold(output, prof.TrustPromptPattern) {
+	if !isTrustPrompt(output, prof.TrustPromptPattern) {
 		return false, nil
 	}
-
-	// Trust prompt detected — send response
-	response := prof.TrustResponse
-	if response == "" {
-		response = "Enter"
+	keys, err := trustPromptKeys(output, prof.TrustResponse)
+	if err != nil {
+		return false, err
 	}
-
-	if response == "Enter" {
-		return true, d.tmux.SendKeys(ctx, target, "Enter")
+	for _, key := range keys {
+		if err := d.tmux.SendKeys(ctx, target, key); err != nil {
+			return true, err
+		}
 	}
-	return true, d.tmux.SendKeys(ctx, target, response, "Enter")
+	// An answer that picks a "No, exit" option kills the pane; say so plainly.
+	time.Sleep(300 * time.Millisecond)
+	if _, err := d.tmux.CapturePaneVisible(ctx, target); err != nil {
+		return true, fmt.Errorf("agent exited after answering its trust prompt with %v: %w", keys, err)
+	}
+	return true, nil
 }
 
 func (d *Daemon) handleResumePrompt(ctx context.Context, target string, prof profile.Profile) (bool, error) {
