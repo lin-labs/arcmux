@@ -243,3 +243,37 @@ func TestMeshUpdatesRouteInvalidSinceIs400(t *testing.T) {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body)
 	}
 }
+
+func TestMeshUpdatesRouteResumesAfterPageCap(t *testing.T) {
+	old := updatesMaxPages
+	updatesMaxPages = 1
+	t.Cleanup(func() { updatesMaxPages = old })
+	h, dir := updatesRouteSetup(t)
+	for _, n := range []string{"a.json", "b.json", "c.json"} {
+		writeUpdate(t, dir, n, jsonOfSize(20<<10))
+	}
+	var seen []string
+	body := `{"peer_id":"server"}`
+	for i := 0; i < 5; i++ {
+		rec := meshHTTPRequest(h, "POST", "/mesh/updates", []byte(body))
+		if rec.Code != 200 {
+			t.Fatalf("status %d: %s", rec.Code, rec.Body)
+		}
+		var got struct {
+			Files      []updatesFile `json:"files"`
+			NextCursor string        `json:"next_cursor"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		seen = append(seen, updateNames(updatesListResult{Files: got.Files})...)
+		if got.NextCursor == "" {
+			if !reflect.DeepEqual(seen, []string{"a.json", "b.json", "c.json"}) || i == 0 {
+				t.Fatalf("seen %v after %d requests", seen, i+1)
+			}
+			return
+		}
+		body = `{"peer_id":"server","cursor":"` + got.NextCursor + `"}`
+	}
+	t.Fatalf("never finished: %v", seen)
+}

@@ -69,10 +69,12 @@ unavailable.
 
 ### `POST /mesh/updates`
 
-Body `{"peer_id":"devbox","since":"<RFC3339>"?,"hints":[{"surface_id","workspace_id","mosh_port"}]?}`.
+Body `{"peer_id":"devbox","since":"<RFC3339>"?,"cursor"?,"hints":[{"surface_id","workspace_id","mosh_port"}]?}`.
 Calls `updates.list` on the peer, follows `next_cursor` for at most 20 pages
-(10 s per call, hints on the first page only), and returns
+(10 s per call), and returns
 `{"peer_id","files":[{"name","data"}],"monitor":{...}|null,"skipped":[...]}`.
+If the cap is hit, the reply adds `next_cursor`; resend it as `cursor` to get the
+rest. `hints` are sent only when `cursor` is empty.
 Unknown body fields or a peer `invalid_request` return `400`; a disconnected
 peer, missing `updates.read` capability, or any other failure returns `503`.
 

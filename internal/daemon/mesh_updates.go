@@ -156,14 +156,14 @@ func writeUpdatesHints(dir string, hints []surfaceHint) error {
 	return os.Rename(tmp.Name(), filepath.Join(dir, updatesHintsFile))
 }
 
-const (
-	updatesMaxPages    = 20
-	updatesCallTimeout = 10 * time.Second
-)
+const updatesCallTimeout = 10 * time.Second
+
+var updatesMaxPages = 20 // var so tests can lower it
 
 // RemoteUpdatesList pulls and merges up to updatesMaxPages pages of a peer's
 // updates.list. Hints ride only on the first page; the principal comes from
-// the connection, never the payload.
+// the connection, never the payload. A non-empty NextCursor means the page
+// cap was hit; resume with it as p.Cursor.
 func (d *Daemon) RemoteUpdatesList(ctx context.Context, peer string, p updatesListParams) (updatesListResult, error) {
 	manager, err := d.currentMeshManager()
 	if err != nil {

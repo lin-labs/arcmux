@@ -103,13 +103,18 @@ func (h *HTTPServer) handleMeshUpdates(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		PeerID string        `json:"peer_id"`
 		Since  string        `json:"since"`
+		Cursor string        `json:"cursor"`
 		Hints  []surfaceHint `json:"hints"`
 	}
 	if err := decodeMeshHTTPJSON(w, r, &request); err != nil || request.PeerID == "" {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "body must be a JSON object with peer_id and optional since, hints"})
 		return
 	}
-	result, err := h.daemon.RemoteUpdatesList(r.Context(), request.PeerID, updatesListParams{Since: request.Since, Hints: request.Hints})
+	params := updatesListParams{Since: request.Since, Cursor: request.Cursor}
+	if request.Cursor == "" { // hints only on the true first page
+		params.Hints = request.Hints
+	}
+	result, err := h.daemon.RemoteUpdatesList(r.Context(), request.PeerID, params)
 	if err != nil {
 		status := http.StatusServiceUnavailable
 		var rpcErr *arcmuxmesh.RPCError
@@ -122,9 +127,13 @@ func (h *HTTPServer) handleMeshUpdates(w http.ResponseWriter, r *http.Request) {
 	if result.Skipped == nil {
 		result.Skipped = []string{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	response := map[string]any{
 		"peer_id": request.PeerID, "files": result.Files, "monitor": result.Monitor, "skipped": result.Skipped,
-	})
+	}
+	if result.NextCursor != "" {
+		response["next_cursor"] = result.NextCursor
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (h *HTTPServer) handleMeshArtifacts(w http.ResponseWriter, r *http.Request) {
