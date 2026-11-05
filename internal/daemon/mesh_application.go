@@ -454,8 +454,13 @@ func (d *Daemon) registerMeshApplication(manager *arcmuxmesh.Manager) error {
 				return nil, meshInvalidRequest(errors.New("invalid updates list request"))
 			}
 			result, err := d.listUpdates(d.cfg.Mesh.UpdatesDir, request)
+			var invalid updatesInvalidError
+			if errors.As(err, &invalid) {
+				return nil, meshInvalidRequest(invalid)
+			}
 			if err != nil {
-				return nil, meshInvalidRequest(err)
+				d.logger.Warn("updates.list failed", "error", err)
+				return nil, &arcmuxmesh.RPCError{Code: arcmuxmesh.ErrorInternal, Message: "updates unavailable"}
 			}
 			return result, nil
 		},

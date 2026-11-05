@@ -20,6 +20,11 @@ const (
 
 var updatesUUID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
+// updatesInvalidError marks caller mistakes; any other error is server-side.
+type updatesInvalidError string
+
+func (e updatesInvalidError) Error() string { return string(e) }
+
 type updatesListParams struct {
 	Since  string        `json:"since,omitempty"`
 	Cursor string        `json:"cursor,omitempty"`
@@ -55,12 +60,12 @@ func (d *Daemon) listUpdates(dir string, p updatesListParams) (updatesListResult
 	if p.Since != "" {
 		var err error
 		if since, err = time.Parse(time.RFC3339, p.Since); err != nil {
-			return result, errors.New("since must be RFC 3339")
+			return result, updatesInvalidError("since must be RFC 3339")
 		}
 	}
 	for _, h := range p.Hints {
 		if !updatesUUID.MatchString(h.SurfaceID) || h.MoshPort < 1 || h.MoshPort > 65535 {
-			return result, errors.New("invalid surface hint")
+			return result, updatesInvalidError("invalid surface hint")
 		}
 	}
 	if len(p.Hints) > 0 {
@@ -68,8 +73,11 @@ func (d *Daemon) listUpdates(dir string, p updatesListParams) (updatesListResult
 			return result, fmt.Errorf("write hints: %w", err)
 		}
 	}
-	if monitor, err := os.ReadFile(filepath.Join(dir, updatesMonitorFile)); err == nil && json.Valid(monitor) {
-		result.Monitor = monitor
+	monitorPath := filepath.Join(dir, updatesMonitorFile)
+	if st, err := os.Lstat(monitorPath); err == nil && st.Mode().IsRegular() && st.Size() <= meshPageResultBudget {
+		if monitor, err := os.ReadFile(monitorPath); err == nil && json.Valid(monitor) {
+			result.Monitor = monitor
+		}
 	}
 	entries, err := os.ReadDir(dir) // sorted by name
 	if err != nil {

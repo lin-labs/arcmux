@@ -172,3 +172,19 @@ func TestUpdatesListRequiresScope(t *testing.T) {
 		t.Fatalf("err=%v want permission_denied", err)
 	}
 }
+
+func TestUpdatesListServerErrorIsInternalWithoutPath(t *testing.T) {
+	server := newMeshApplicationTestDaemon(t, "server")
+	client := newMeshApplicationTestDaemon(t, "client")
+	file := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	server.cfg.Mesh.UpdatesDir = file
+	_, m := startDaemonMeshPairWithScopes(t, server, client, []string{arcmuxmesh.ScopeUpdatesRead})
+	_, err := callUpdates(t, m, updatesListParams{})
+	var rpcErr *arcmuxmesh.RPCError
+	if !errors.As(err, &rpcErr) || rpcErr.Code != arcmuxmesh.ErrorInternal || strings.Contains(rpcErr.Message, file) {
+		t.Fatalf("err=%v want internal_error without path", err)
+	}
+}
