@@ -45,6 +45,7 @@ const (
 	meshMethodHandoffsStatus    = "handoffs.status"
 	meshMethodHandoffsLaunch    = "handoffs.launch"
 	meshMethodHandoffsVerify    = "handoffs.verify"
+	meshMethodUpdatesList       = "updates.list"
 )
 
 var meshMethodSpecs = []arcmuxmesh.MethodSpec{
@@ -58,6 +59,7 @@ var meshMethodSpecs = []arcmuxmesh.MethodSpec{
 	{Name: meshMethodHandoffsStatus, Capability: arcmuxmesh.CapabilityHandoffsV1, RequiredScope: arcmuxmesh.ScopeHandoffsPrepare},
 	{Name: meshMethodHandoffsLaunch, Capability: arcmuxmesh.CapabilityHandoffsV1, RequiredScope: arcmuxmesh.ScopeHandoffsLaunch},
 	{Name: meshMethodHandoffsVerify, Capability: arcmuxmesh.CapabilityHandoffsV1, RequiredScope: arcmuxmesh.ScopeHandoffsLaunch},
+	{Name: meshMethodUpdatesList, Capability: arcmuxmesh.CapabilityUpdatesV1, RequiredScope: arcmuxmesh.ScopeUpdatesRead},
 }
 
 type meshPeerSubscription struct {
@@ -445,6 +447,17 @@ func (d *Daemon) registerMeshApplication(manager *arcmuxmesh.Manager) error {
 				return nil, err
 			}
 			return app.verify(ctx, principal, d.meshDeviceID(), request)
+		},
+		meshMethodUpdatesList: func(ctx context.Context, principal arcmuxmesh.Principal, raw json.RawMessage) (any, error) {
+			var request updatesListParams
+			if err := decodeMeshParams(raw, &request); err != nil {
+				return nil, meshInvalidRequest(errors.New("invalid updates list request"))
+			}
+			result, err := d.listUpdates(d.cfg.Mesh.UpdatesDir, request)
+			if err != nil {
+				return nil, meshInvalidRequest(err)
+			}
+			return result, nil
 		},
 	}
 	for _, spec := range meshMethodSpecs {

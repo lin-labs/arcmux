@@ -145,6 +145,29 @@ func TestMeshGrantIsExplicitReadOnlyAndRevokeRestoresTransportOnly(t *testing.T)
 	}
 }
 
+func TestMeshGrantAcceptsUpdatesRead(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := meshTestConfig(t, dir, "server")
+	registryPath := filepath.Join(dir, "server-mesh.json")
+	registry := &mesh.Registry{
+		Version: mesh.RegistryVersion, DeviceID: "server",
+		Accept: map[string]string{"client": mesh.TokenHash("token")}, Grants: map[string][]string{},
+	}
+	if err := mesh.SaveRegistry(registryPath, registry); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdMesh([]string{"grant", "client", mesh.ScopeUpdatesRead, "--config", cfgPath}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("updates grant: %v", err)
+	}
+	updated, err := mesh.LoadRegistry(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := updated.Grants["client"]; len(got) != 1 || got[0] != mesh.ScopeUpdatesRead {
+		t.Fatalf("updates grant = %v", got)
+	}
+}
+
 func TestMeshGrantAcceptsPrepareWithoutChangingReadDefault(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := meshTestConfig(t, dir, "server")

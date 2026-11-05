@@ -17,12 +17,14 @@ const (
 	CapabilityArtifactsReadV1 = "artifacts.read.v1"
 	CapabilityEventsV1        = "events.v1"
 	CapabilityHandoffsV1      = "handoffs.v1"
+	CapabilityUpdatesV1       = "updates.v1"
 
 	ScopeSessionsRead    = "sessions.read"
 	ScopeArtifactsRead   = "artifacts.read"
 	ScopeEventsRead      = "events.read"
 	ScopeHandoffsPrepare = "handoffs.prepare"
 	ScopeHandoffsLaunch  = "handoffs.launch"
+	ScopeUpdatesRead     = "updates.read"
 
 	MaxApplicationPayload = 48 << 10
 	MaxPendingCalls       = 128
@@ -40,6 +42,7 @@ var (
 		CapabilityHandoffsV1,
 		CapabilityRPCV1,
 		CapabilitySessionsReadV1,
+		CapabilityUpdatesV1,
 	}
 
 	ErrBackpressure          = errors.New("mesh peer writer queue is full")

@@ -39,6 +39,7 @@ type MeshConfig struct {
 	Enabled           bool   `toml:"enabled"`
 	ListenAddr        string `toml:"listen_addr"`
 	RegistryPath      string `toml:"registry_path"`
+	UpdatesDir        string `toml:"updates_dir"`
 	HeartbeatInterval string `toml:"heartbeat_interval"`
 	StaleAfter        string `toml:"stale_after"`
 	DeadAfter         string `toml:"dead_after"`
@@ -223,6 +224,7 @@ func Load(path string) (*Config, error) {
 			Enabled:           true,
 			ListenAddr:        "127.0.0.1:7788",
 			RegistryPath:      defaultMeshRegistryPath(),
+			UpdatesDir:        defaultMeshUpdatesDir(),
 			HeartbeatInterval: "15s",
 			StaleAfter:        "35s",
 			DeadAfter:         "60s",
@@ -334,6 +336,11 @@ func defaultMeshRegistryPath() string {
 	return filepath.Join(home, ".config", "arcmux", "mesh.json")
 }
 
+func defaultMeshUpdatesDir() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "data", "mission-control", "updates", "local")
+}
+
 // Parse validates mesh safety and converts duration strings. The listener is
 // loopback-only by design; Tailscale Serve must proxy to it rather than making
 // the arcmux control or mesh ports directly public.
@@ -435,6 +442,7 @@ func expandConfigPaths(cfg *Config) {
 	cfg.Daemon.LogDir = expandTilde(cfg.Daemon.LogDir)
 	cfg.Daemon.StatePath = expandTilde(cfg.Daemon.StatePath)
 	cfg.Mesh.RegistryPath = expandTilde(cfg.Mesh.RegistryPath)
+	cfg.Mesh.UpdatesDir = expandTilde(cfg.Mesh.UpdatesDir)
 	cfg.Hooks.ClaudeHookDir = expandTilde(cfg.Hooks.ClaudeHookDir)
 	cfg.Hooks.CodexHookDir = expandTilde(cfg.Hooks.CodexHookDir)
 	cfg.Hooks.GrokHookDir = expandTilde(cfg.Hooks.GrokHookDir)
