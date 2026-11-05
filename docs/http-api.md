@@ -67,6 +67,15 @@ Sends an application-level ping over the current peer connection and returns
 `peer_id` plus `round_trip_ms`. It returns `503` when the mesh or peer is
 unavailable.
 
+### `POST /mesh/updates`
+
+Body `{"peer_id":"devbox","since":"<RFC3339>"?,"hints":[{"surface_id","workspace_id","mosh_port"}]?}`.
+Calls `updates.list` on the peer, follows `next_cursor` for at most 20 pages
+(10 s per call, hints on the first page only), and returns
+`{"peer_id","files":[{"name","data"}],"monitor":{...}|null,"skipped":[...]}`.
+Unknown body fields or a peer `invalid_request` return `400`; a disconnected
+peer, missing `updates.read` capability, or any other failure returns `503`.
+
 ### `POST /mesh/reload`
 
 Atomically stops and replaces only the mesh manager from the owner-only mesh

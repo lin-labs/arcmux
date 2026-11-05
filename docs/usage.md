@@ -70,6 +70,17 @@ reconnect_min = "500ms"
 reconnect_max = "30s"
 ```
 
+### Session updates between your own devices
+
+`updates.list` serves the session records in `mesh.updates_dir` (see
+`POST /mesh/updates` in the HTTP API). Its payload carries free text such as
+session intents, so `updates.read` is an explicit grant, not part of the default
+read set. Repeat the other scopes you keep, since `mesh grant` replaces the list:
+
+```bash
+arcmux mesh grant ref sessions.read artifacts.read events.read updates.read
+```
+
 ### Explicit cross-device agent handoff
 
 Handoff is a durable two-step control protocol layered onto the mesh. Preparing

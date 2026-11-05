@@ -55,6 +55,7 @@ func NewHTTPServer(d *Daemon, addr string) *HTTPServer {
 	mux.HandleFunc("/mesh/sessions", h.meshOperatorOnly(h.handleMeshSessions))
 	mux.HandleFunc("/mesh/sessions/sync", h.meshOperatorOnly(h.handleMeshSessionsSync))
 	mux.HandleFunc("/mesh/session", h.meshOperatorOnly(h.handleMeshSession))
+	mux.HandleFunc("/mesh/updates", h.meshOperatorOnly(h.handleMeshUpdates))
 	mux.HandleFunc("/mesh/artifacts", h.meshOperatorOnly(h.handleMeshArtifacts))
 	mux.HandleFunc("/mesh/artifacts/sync", h.meshOperatorOnly(h.handleMeshArtifactsSync))
 	mux.HandleFunc("/mesh/artifact", h.meshOperatorOnly(h.handleMeshArtifact))

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	arcmuxmesh "github.com/lin-labs/arcmux/internal/mesh"
 	"github.com/lin-labs/arcmux/internal/meshstate"
 	"github.com/lin-labs/arcmux/internal/sessionview"
 )
@@ -92,6 +93,38 @@ func (h *HTTPServer) handleMeshSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, projection)
+}
+
+func (h *HTTPServer) handleMeshUpdates(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, errorResponse{Error: "POST required"})
+		return
+	}
+	var request struct {
+		PeerID string        `json:"peer_id"`
+		Since  string        `json:"since"`
+		Hints  []surfaceHint `json:"hints"`
+	}
+	if err := decodeMeshHTTPJSON(w, r, &request); err != nil || request.PeerID == "" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "body must be a JSON object with peer_id and optional since, hints"})
+		return
+	}
+	result, err := h.daemon.RemoteUpdatesList(r.Context(), request.PeerID, updatesListParams{Since: request.Since, Hints: request.Hints})
+	if err != nil {
+		status := http.StatusServiceUnavailable
+		var rpcErr *arcmuxmesh.RPCError
+		if errors.As(err, &rpcErr) && rpcErr.Code == arcmuxmesh.ErrorInvalidRequest {
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, errorResponse{Error: err.Error()})
+		return
+	}
+	if result.Skipped == nil {
+		result.Skipped = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"peer_id": request.PeerID, "files": result.Files, "monitor": result.Monitor, "skipped": result.Skipped,
+	})
 }
 
 func (h *HTTPServer) handleMeshArtifacts(w http.ResponseWriter, r *http.Request) {

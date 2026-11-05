@@ -188,3 +188,58 @@ func TestUpdatesListServerErrorIsInternalWithoutPath(t *testing.T) {
 		t.Fatalf("err=%v want internal_error without path", err)
 	}
 }
+
+func updatesRouteSetup(t *testing.T) (*HTTPServer, string) {
+	t.Helper()
+	server := newMeshApplicationTestDaemon(t, "server")
+	client := newMeshApplicationTestDaemon(t, "client")
+	dir := t.TempDir()
+	server.cfg.Mesh.UpdatesDir = dir
+	startDaemonMeshPairWithScopes(t, server, client, []string{arcmuxmesh.ScopeUpdatesRead})
+	return NewHTTPServer(client, "127.0.0.1:0"), dir
+}
+
+func TestMeshUpdatesRouteMergesPages(t *testing.T) {
+	h, dir := updatesRouteSetup(t)
+	for _, n := range []string{"a.json", "b.json", "c.json"} {
+		writeUpdate(t, dir, n, jsonOfSize(20<<10))
+	}
+	writeUpdate(t, dir, "monitor.json", []byte(`{"beat":1}`))
+	rec := meshHTTPRequest(h, "POST", "/mesh/updates", []byte(`{"peer_id":"server"}`))
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	var got struct {
+		PeerID  string          `json:"peer_id"`
+		Files   []updatesFile   `json:"files"`
+		Monitor json.RawMessage `json:"monitor"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	names := updateNames(updatesListResult{Files: got.Files})
+	if got.PeerID != "server" || !reflect.DeepEqual(names, []string{"a.json", "b.json", "c.json"}) || string(got.Monitor) != `{"beat":1}` {
+		t.Fatalf("got %+v names %v", got, names)
+	}
+}
+
+func TestMeshUpdatesRouteUnknownPeer(t *testing.T) {
+	h, _ := updatesRouteSetup(t)
+	if rec := meshHTTPRequest(h, "POST", "/mesh/updates", []byte(`{"peer_id":"nope"}`)); rec.Code != 503 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+}
+
+func TestMeshUpdatesRouteRejectsUnknownFields(t *testing.T) {
+	h, _ := updatesRouteSetup(t)
+	if rec := meshHTTPRequest(h, "POST", "/mesh/updates", []byte(`{"peer_id":"server","x":1}`)); rec.Code != 400 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+}
+
+func TestMeshUpdatesRouteInvalidSinceIs400(t *testing.T) {
+	h, _ := updatesRouteSetup(t)
+	if rec := meshHTTPRequest(h, "POST", "/mesh/updates", []byte(`{"peer_id":"server","since":"yesterday"}`)); rec.Code != 400 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+}

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -153,4 +154,40 @@ func writeUpdatesHints(dir string, hints []surfaceHint) error {
 		return err
 	}
 	return os.Rename(tmp.Name(), filepath.Join(dir, updatesHintsFile))
+}
+
+const (
+	updatesMaxPages    = 20
+	updatesCallTimeout = 10 * time.Second
+)
+
+// RemoteUpdatesList pulls and merges up to updatesMaxPages pages of a peer's
+// updates.list. Hints ride only on the first page; the principal comes from
+// the connection, never the payload.
+func (d *Daemon) RemoteUpdatesList(ctx context.Context, peer string, p updatesListParams) (updatesListResult, error) {
+	manager, err := d.currentMeshManager()
+	if err != nil {
+		return updatesListResult{}, err
+	}
+	merged := updatesListResult{Files: []updatesFile{}}
+	for page := 0; page < updatesMaxPages; page++ {
+		callCtx, cancel := context.WithTimeout(ctx, updatesCallTimeout)
+		var result updatesListResult
+		err := manager.Call(callCtx, peer, meshMethodUpdatesList, p, &result)
+		cancel()
+		if err != nil {
+			return updatesListResult{}, err
+		}
+		merged.Files = append(merged.Files, result.Files...)
+		merged.Skipped = append(merged.Skipped, result.Skipped...)
+		if page == 0 {
+			merged.Monitor = result.Monitor
+		}
+		merged.NextCursor = result.NextCursor
+		if result.NextCursor == "" {
+			break
+		}
+		p.Cursor, p.Hints = result.NextCursor, nil
+	}
+	return merged, nil
 }
