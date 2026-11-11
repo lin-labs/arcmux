@@ -130,7 +130,8 @@ func (j HeuristicJudge) Assess(_ context.Context, evidence Evidence) (Assessment
 	promptVisible := afterPromptCount > 0
 	promptRetained := !containsStandaloneComposerMarker(evidence.Prompt) &&
 		afterPromptCount > beforePromptCount &&
-		containsFreshComposerAfterLatestPrompt(evidence.AfterOutput, evidence.Prompt, afterPromptCount)
+		(containsFreshComposerAfterLatestPrompt(evidence.AfterOutput, evidence.Prompt, afterPromptCount) ||
+			(strings.EqualFold(evidence.Agent, "opencode") && openCodeCompletedTurn(evidence.AfterOutput, evidence.Prompt)))
 	blocked := containsBlockerOutsidePrompt(output, evidence.Prompt, afterPromptCount)
 
 	switch {
@@ -182,6 +183,35 @@ func (j HeuristicJudge) Assess(_ context.Context, evidence Evidence) (Assessment
 			Source:                  "heuristic",
 		}, nil
 	}
+}
+
+// OpenCode uses the same vertical bar for transcript and composer. A response
+// followed by a fresh empty composer proves the prompt left the composer.
+func openCodeCompletedTurn(output, prompt string) bool {
+	lines := strings.Split(output, "\n")
+	latest, footer := -1, -1
+	for i, line := range lines {
+		if promptOccurrenceCount(line, prompt) > 0 {
+			latest = i
+		}
+		if strings.Contains(strings.ToLower(line), "ctrl+p commands") {
+			footer = i
+		}
+	}
+	if latest < 0 || footer <= latest {
+		return false
+	}
+	response := false
+	for _, line := range lines[latest+1 : footer] {
+		line = strings.TrimSpace(line)
+		if line == "┃" && response {
+			return true
+		}
+		if line != "" && !strings.HasPrefix(line, "┃") {
+			response = true
+		}
+	}
+	return false
 }
 
 func normalizeScreen(s string) string {

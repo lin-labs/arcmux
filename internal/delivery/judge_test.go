@@ -172,3 +172,20 @@ func TestHeuristicJudgeDetectsIngestedWhileWorking(t *testing.T) {
 		t.Fatalf("work started probability = %.2f", assessment.WorkStartedProbability)
 	}
 }
+
+func TestOpenCodeComposerDelivery(t *testing.T) {
+	for _, tc := range []struct {
+		name, screen string
+		want         State
+	}{
+		{"pending", "┃ Reply with exactly: pong\n┃\n┃ Build auto\nworkdir  ctrl+p commands", StatePendingSubmit},
+		{"completed", "┃ Reply with exactly: pong\n┃\n  pong\n  Build · 1s\n┃\n┃ Build auto\nworkdir  ctrl+p commands", StateIngested},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := (HeuristicJudge{}).Assess(context.Background(), Evidence{Agent: "opencode", Prompt: "Reply with exactly: pong", AfterOutput: tc.screen})
+			if err != nil || got.State != tc.want {
+				t.Fatalf("got %+v, %v; want %s", got, err, tc.want)
+			}
+		})
+	}
+}

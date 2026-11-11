@@ -10,7 +10,7 @@ import (
 func TestDefaultProfiles(t *testing.T) {
 	profiles := DefaultProfiles()
 
-	for _, name := range []string{"codex", "claude", "grok", "codex_exec", "claude_exec", "grok_exec"} {
+	for _, name := range []string{"codex", "claude", "grok", "opencode", "mirror", "codex_exec", "claude_exec", "grok_exec"} {
 		p, ok := profiles[name]
 		if !ok {
 			t.Errorf("missing default profile: %s", name)
@@ -45,6 +45,22 @@ func TestDefaultProfiles_Codex(t *testing.T) {
 	}
 	if p.HookType != "codex_output" {
 		t.Errorf("HookType = %q, want %q", p.HookType, "codex_output")
+	}
+}
+
+func TestInteractiveScreenProfiles(t *testing.T) {
+	for _, tc := range []struct{ name, command, ready string }{
+		{"mirror", "mirror --approval-mode auto", "auto |"},
+		{"opencode", "opencode --auto", "ctrl+p commands"},
+	} {
+		p := DefaultProfiles()[tc.name]
+		if p.Class != tc.name || p.Transport != TransportTmux || p.HookType != HookTypeScreenOnly || p.StartCommand != tc.command || p.ReadyPattern != tc.ready {
+			t.Errorf("%s profile: %+v", tc.name, p)
+		}
+	}
+	p := DefaultProfiles()["mirror"]
+	if p.TrustPromptPattern != "Continue and trust this folder?" || p.TrustResponse != "y" {
+		t.Errorf("mirror trust prompt: %+v", p)
 	}
 }
 
@@ -155,8 +171,8 @@ func TestClassesDeriveProfiles(t *testing.T) {
 		t.Fatalf("DefaultClasses len = %d, want 3", len(classes))
 	}
 	profiles := DefaultProfiles()
-	if len(profiles) != len(classes)*2 {
-		t.Fatalf("DefaultProfiles len = %d, want %d (2 per class)", len(profiles), len(classes)*2)
+	if len(profiles) != len(classes)*2+2 {
+		t.Fatalf("DefaultProfiles len = %d, want %d", len(profiles), len(classes)*2+2)
 	}
 	for _, c := range classes {
 		inter, ok := profiles[c.InteractiveProfileName()]

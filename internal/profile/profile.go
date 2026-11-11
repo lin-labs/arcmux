@@ -246,5 +246,18 @@ func DefaultProfiles() map[string]Profile {
 		profiles[c.InteractiveProfileName()] = c.Interactive
 		profiles[c.ExecProfileName()] = c.Exec
 	}
+	profiles["opencode"] = Profile{
+		Class: "opencode", Name: "opencode", Transport: TransportTmux,
+		StartCommand: "opencode --auto", ReadyPattern: "ctrl+p commands",
+		StuckTimeout: 5 * time.Minute, IdleTimeout: 60 * time.Second,
+		NudgeCommand: "Enter", MaxNudgeRetries: 3, HookType: HookTypeScreenOnly,
+	}
+	profiles["mirror"] = Profile{
+		Class: "mirror", Name: "mirror", Transport: TransportTmux,
+		StartCommand: "mirror --approval-mode auto", ReadyPattern: "auto |",
+		TrustPromptPattern: "Continue and trust this folder?", TrustResponse: "y",
+		StuckTimeout: 5 * time.Minute, IdleTimeout: 60 * time.Second,
+		NudgeCommand: "Enter", MaxNudgeRetries: 3, HookType: HookTypeScreenOnly,
+	}
 	return profiles
 }
