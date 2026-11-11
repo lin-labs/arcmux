@@ -50,7 +50,7 @@ func TestDefaultProfiles_Codex(t *testing.T) {
 
 func TestInteractiveScreenProfiles(t *testing.T) {
 	for _, tc := range []struct{ name, command, ready string }{
-		{"mirror", "mirror --approval-mode auto", "auto |"},
+		{"mirror", `set -a; [ ! -f "$HOME/.config/arcmux/mirror.env" ] || . "$HOME/.config/arcmux/mirror.env"; set +a; exec mirror --approval-mode auto`, "auto |"},
 		{"opencode", "opencode --auto", "ctrl+p commands"},
 	} {
 		p := DefaultProfiles()[tc.name]

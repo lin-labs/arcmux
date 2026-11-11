@@ -254,7 +254,7 @@ func DefaultProfiles() map[string]Profile {
 	}
 	profiles["mirror"] = Profile{
 		Class: "mirror", Name: "mirror", Transport: TransportTmux,
-		StartCommand: "mirror --approval-mode auto", ReadyPattern: "auto |",
+		StartCommand: `set -a; [ ! -f "$HOME/.config/arcmux/mirror.env" ] || . "$HOME/.config/arcmux/mirror.env"; set +a; exec mirror --approval-mode auto`, ReadyPattern: "auto |",
 		TrustPromptPattern: "Continue and trust this folder?", TrustResponse: "y",
 		StuckTimeout: 5 * time.Minute, IdleTimeout: 60 * time.Second,
 		NudgeCommand: "Enter", MaxNudgeRetries: 3, HookType: HookTypeScreenOnly,
